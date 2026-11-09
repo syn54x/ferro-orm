@@ -16,7 +16,7 @@ import pytest
 from pydantic import SecretBytes, SecretStr, field_serializer
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro._bind_payload import (
     canonicalize_wire_scalar,
     save_bind_payload,
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.backend_matrix
 class SFKeyring(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     passphrase: SecretStr | None = None
-    accounts: Relation[list["SFAccount"]] = BackRef()
+    accounts: Relation[list["SFAccount"]] = Reverse("keyring_id")
 
 
 class SFAccount(Model):
@@ -39,7 +39,8 @@ class SFAccount(Model):
     blob: SecretBytes
     maybe_token: SecretStr | None = None
     maybe_blob: SecretBytes | None = None
-    keyring: Annotated[SFKeyring | None, ForeignKey(related_name="accounts")] = None
+    keyring_id: Annotated[int | None, FerroField(foreign_key=SFKeyring)] = None
+    keyring: Relation[SFKeyring | None] = Forward("keyring_id")
 
 
 class SFSerialized(Model):
@@ -61,7 +62,7 @@ def _account(
 ) -> SFAccount:
     return SFAccount(
         id=pk,
-        keyring=keyring,
+        keyring_id=keyring.id if keyring is not None else None,
         token=SecretStr(f"hunter{pk}"),
         blob=SecretBytes(b"k\x00\xff" + bytes([pk])),
         maybe_token=SecretStr(f"maybe{pk}") if optional else None,

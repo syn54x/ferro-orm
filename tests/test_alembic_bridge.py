@@ -5,10 +5,8 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRef,
     FerroField,
     Field,
-    ForeignKey,
     ManyToMany,
     Model,
     Relation,
@@ -35,12 +33,11 @@ def test_metadata_translation():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: Annotated[str, FerroField(unique=True, index=True)]
         is_active: bool = True
-        posts: Relation[list["Post"]] = BackRef()
 
     class Post(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[User, ForeignKey(related_name="posts", on_delete="CASCADE")]
+        author_id: Annotated[int, FerroField(foreign_key=User, on_delete="CASCADE")]
 
     # Trigger metadata generation
     metadata = get_metadata()
@@ -70,19 +67,16 @@ def test_metadata_translation():
     assert fk.ondelete == "CASCADE"
 
 
-def test_foreign_key_unique_true_propagates_to_shadow_column():
-    """1:1 relations use ForeignKey(unique=True); Alembic metadata must expose UNIQUE."""
+def test_foreign_key_unique_true_propagates_to_fk_column():
+    """A 1:1 relation's key column has unique=True; Alembic metadata must expose
+    UNIQUE."""
 
     class Parent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        child: "Child" = BackRef()
 
     class Child(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated[
-            Parent,
-            ForeignKey(related_name="child", unique=True, on_delete="CASCADE"),
-        ]
+        parent_id: UUID = Field(foreign_key=Parent, unique=True, on_delete="CASCADE")
 
     metadata = get_metadata()
     child_table = metadata.tables["child"]
@@ -96,12 +90,11 @@ def test_m2m_translation():
     class Actor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
     class Movie(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        actors: Relation[list["Actor"]] = BackRef()
 
     metadata = get_metadata()
 
@@ -125,12 +118,11 @@ def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
     class UuidTeam(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        members: Relation[list["UuidMember"]] = ManyToMany(related_name="teams")
+        members: Relation[list["UuidMember"]] = ManyToMany(through="uuidteam_members")
 
     class UuidMember(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         email: str
-        teams: Relation[list["UuidTeam"]] = BackRef()
 
     metadata = get_metadata()
     join_table = metadata.tables["uuidteam_members"]
@@ -143,17 +135,16 @@ def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
         assert col.nullable is False
 
 
-def test_uuid_foreign_key_shadow_column_type():
+def test_uuid_foreign_key_fk_column_type():
     """Alembic bridge: UUID PK targets produce a UUID-capable SQLAlchemy type on *_id columns."""
 
     class UuidAlembicOrg(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        members: Relation[list["UuidAlembicMember"]] = BackRef()
 
     class UuidAlembicMember(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        org: Annotated[UuidAlembicOrg, ForeignKey(related_name="members")]
+        org_id: Annotated[UUID, FerroField(foreign_key=UuidAlembicOrg)]
 
     metadata = get_metadata()
     member_table = metadata.tables["uuidalembicmember"]
@@ -169,57 +160,19 @@ def test_on_delete_translation():
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: Relation[list["Product"]] = BackRef()
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        category: Annotated[
-            Category, ForeignKey(related_name="products", on_delete="SET NULL")
-        ]
+        category_id: Annotated[
+            int | None, FerroField(foreign_key=Category, on_delete="SET NULL")
+        ] = None
 
     metadata = get_metadata()
     product_table = metadata.tables["product"]
     fk = list(product_table.c.category_id.foreign_keys)[0]
     assert fk.ondelete == "SET NULL"
     assert product_table.c.category_id.nullable is True
-
-
-def test_explicit_foreign_key_shadow_id_no_duplicate_alembic_columns():
-    """Declaring ``{relation}_id`` for static checkers must not duplicate DDL columns.
-
-    Ferro injects a shadow ``*_id`` for every :class:`~ferro.base.ForeignKey`. Some
-    type checkers (for example Ty) do not see metaclass-injected fields, so users may
-    duplicate the declaration in the class body. That must still produce exactly one
-    JSON-schema property and one SQLAlchemy column for Alembic autogenerate.
-    """
-
-    class TyShadowFkJobRole(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        scorecards: Relation[list["TyShadowFkScorecard"]] = BackRef()
-
-    class TyShadowFkScorecard(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        title: str
-        job_role: Annotated[TyShadowFkJobRole, ForeignKey(related_name="scorecards")]
-        job_role_id: int | None = None
-
-    assert list(TyShadowFkScorecard.model_fields).count("job_role_id") == 1
-
-    specs = TyShadowFkScorecard.__ferro_columns__
-    assert "job_role_id" in specs
-    assert sum(1 for k in specs if k == "job_role_id") == 1
-    fk = specs["job_role_id"].foreign_key
-    assert fk is not None and fk.to_table == "tyshadowfkjobrole"
-
-    metadata = get_metadata()
-    tbl = metadata.tables["tyshadowfkscorecard"]
-    assert list(tbl.columns.keys()).count("job_role_id") == 1
-    col = tbl.c.job_role_id
-    fks = list(col.foreign_keys)
-    assert len(fks) == 1
-    assert fks[0].target_fullname == "tyshadowfkjobrole.id"
 
 
 def test_build_sa_table_from_ir_renders_quoted_check_body():
@@ -252,36 +205,6 @@ def test_render_check_body_escapes_embedded_double_quote():
 
     result = _render_check_body('a"b', ["'x'"])
     assert result == '"a""b" IN (\'x\')'
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
-    """Runtime migrate + ORM must treat explicit ``*_id`` as the single FK column."""
-
-    from ferro import connect, engines
-
-    class TyRoundJobRole(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        scorecards: Relation[list["TyRoundScorecard"]] = BackRef()
-
-    class TyRoundScorecard(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        title: str
-        job_role: Annotated[TyRoundJobRole, ForeignKey(related_name="scorecards")]
-        job_role_id: int | None = None
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        role = await TyRoundJobRole.create(name="ic")
-        card = await TyRoundScorecard.create(title="card-a", job_role=role)
-        assert card.job_role_id == role.id
-
-        by_shadow_id = await TyRoundScorecard.where(
-            lambda s: s.job_role_id == role.id
-        ).first()
-        assert by_shadow_id is not None and by_shadow_id.id == card.id
 
 
 PRICED = """

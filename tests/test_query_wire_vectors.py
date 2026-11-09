@@ -28,13 +28,13 @@ from typing import Annotated, Any, Callable
 import pytest
 
 from ferro import (
-    BackRef,
     Field,
     FerroField,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     now,
 )
 from ferro.query.nodes import QueryProxy
@@ -51,29 +51,29 @@ def _vector(name: str) -> dict[str, Any]:
 def _build_models() -> dict[str, type]:
     """Declare the model graph the query vectors reference.
 
-    Class names, relation field names, and shadow columns must line up with
+    Class names, relation field names, and foreign-key columns must line up with
     the vectors' hop facts (``account``/``owner`` tables, ``account_id``/
-    ``owner_id`` shadow FKs), so the classes carry the vectors' bare names.
+    ``owner_id`` foreign-key columns), so the classes carry the vectors' bare names.
     """
 
     class Owner(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: str = ""
-        accounts: Relation[list["Account"]] = BackRef()
+        accounts: Relation[list["Account"]] = Reverse("owner_id")
 
     class Account(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str = ""
         balance: int = 0
-        owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
-        transactions: Relation[list["Transaction"]] = BackRef()
+        owner_id: Annotated[int | None, FerroField(foreign_key=Owner)] = None
+        owner: Relation[Owner | None] = Forward("owner_id")
+        transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
     class Transaction(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         amount: int = 0
-        account: Annotated[Account | None, ForeignKey(related_name="transactions")] = (
-            None
-        )
+        account_id: Annotated[int | None, FerroField(foreign_key=Account)] = None
+        account: Relation[Account | None] = Forward("account_id")
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -88,12 +88,12 @@ def _build_models() -> dict[str, type]:
         n: int = 0
         updated_at: datetime | None = None
         turns: dict = Field(default_factory=dict)
-        tags: Relation[list["Tag"]] = BackRef()
+        tags: Relation[list["Tag"]] = Reverse("users")
 
     class Tag(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str = ""
-        users: Relation[list["User"]] = ManyToMany(related_name="tags")
+        users: Relation[list["User"]] = ManyToMany(through="tag_users")
 
     # Dedicated model for the nulls= golden vector (#363) — do not hang
     # pinned_at / updated_at onto User/Account/Transaction (existing fixtures).
@@ -259,7 +259,7 @@ def _q_not_compound(m: dict[str, type]) -> Any:
 
 def _q_exists_bare(m: dict[str, type]) -> Any:
     # Bare 1-hop existence test on a reverse FK (#314, ADR-0007): one `exists`
-    # node whose hop correlates the child's shadow FK to the root PK; the
+    # node whose hop correlates the child's foreign-key column to the root PK; the
     # inner condition tree is empty and no `joins` entry is registered.
     return m["Account"].where(lambda a: a.transactions.exists()).order_by("id")
 

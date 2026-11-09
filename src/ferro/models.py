@@ -1,5 +1,6 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -19,7 +20,8 @@ if TYPE_CHECKING:
     from .rowsecurity import RowSecurity
     from .session import Session
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler
+from pydantic_core import CoreSchema
 
 from ._bind_payload import (
     apply_save_exclude,
@@ -33,6 +35,7 @@ from ._core import (
     begin_transaction,
     commit_transaction,
     fetch_all,
+    prune_stale_relations,
     register_instance,
     rollback_transaction,
     save_bulk_records,
@@ -43,9 +46,15 @@ from ._core import (
 from ._core import (
     evict_instance as _core_evict_instance,
 )
-from .base import ForeignKey, foreign_key_allows_none
+from . import _unloaded
+from .base import ManyToManyRelation, ReverseRelation
 from .exceptions import ModelDoesNotExist
-from .metaclass import ModelMetaclass, generated_refusal
+from .metaclass import (
+    ModelMetaclass,
+    _resolved_relation_specs,
+    generated_refusal,
+    prune_cached_relations,
+)
 from .query import Predicate, Query
 from .state import (
     _CURRENT_TRANSACTION,
@@ -72,6 +81,50 @@ def _is_persisted(instance: object) -> bool:
 
 def _set_persisted(instance: object, value: bool) -> None:
     object.__setattr__(instance, _FERRO_PERSISTED_ATTR, value)
+
+
+def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
+    """Refuse a relation among constructor keywords `names`, naming its fix.
+
+    The constructor takes the foreign-key column only: `team=` never fills
+    or overrides `team_id`, and a reverse or many-to-many relation is
+    written after the row exists.
+    """
+    relations = model_cls.__ferro_relations__
+    if relations.keys().isdisjoint(names):
+        return
+    from .relations import _snake
+
+    name = min(relations.keys() & set(names))
+    declared = relations[name]
+    model = model_cls.__name__
+    instance = _snake(model)
+    if isinstance(declared, ReverseRelation):
+        to = declared.to
+        # A name until relation resolution; `None` when the annotation names no model.
+        child = (to if isinstance(to, str) else getattr(to, "__name__", "row")).rsplit(
+            ".", 1
+        )[-1]
+        raise TypeError(
+            f"{model}.{name} is a relation. Save the {instance}, then set "
+            f"{_snake(child)}.{declared.attribute} = {instance}."
+            f"{model_cls.__ferro_pk__} for each {_snake(child)} in {name}"
+        )
+    if isinstance(declared, ManyToManyRelation):
+        raise TypeError(
+            f"{model}.{name} is a relation. Save the {instance}, then "
+            f"await {instance}.{name}.add(*{name})"
+        )
+    spec = _resolved_relation_specs(model_cls, {name})[name]
+    refusal = (
+        f"{model}.{name} is a relation. Pass the foreign-key "
+        f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}"
+    )
+    # Assigning on the instance is a fix only when the constructor can leave
+    # the key out.
+    if not model_cls.model_fields[spec.fk_column].is_required():
+        refusal += f", or set {instance}.{name} = {name} on the instance"
+    raise TypeError(refusal)
 
 
 def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
@@ -322,14 +375,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
     __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
-    #: Reverse (BackRef) relation facts for existence tests (#314, ADR-0007),
+    #: Reverse and many-to-many relation facts for existence tests (#314, ADR-0007),
     #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
     __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}
     #: Retired columns (ADR-0053), refreshed at the same compile choke point:
     #: in the schema snapshot, never in ``__ferro_columns__``.
     __ferro_retired_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
-    #: Every name a retired declaration took out of the model: retired fields,
-    #: retired relations and their shadow ``*_id`` columns.
+    #: Every name a retired declaration took out of the model: its retired
+    #: fields, foreign-key columns included.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     #: Each generated column (ADR-0058) and the columns its expression reads,
     #: refreshed at the same compile choke point.
@@ -350,6 +403,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         from_attributes=True,
         use_attribute_docstrings=True,
         arbitrary_types_allowed=True,
+        extra="forbid",
     )
     """Pydantic settings shared by every model; a subclass may extend them."""
 
@@ -357,12 +411,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """Build an instance in memory, without saving it.
 
         Args:
-            **data: The field values. A relation field takes the related
-                instance or its primary key.
+            **data: The field values. A forward relation is set through its
+                foreign-key column, `team_id=team.id`, never by its own name.
 
         Raises:
-            TypeError: A value names a retired field or a generated one.
-            ValueError: A related instance's model has no primary key.
+            TypeError: A keyword names a retired field, a generated one or a
+                forward relation.
+            ValidationError: A keyword names no field, or a value does not
+                validate.
         """
         retired = self.__class__.__ferro_retired_names__
         if retired and not retired.isdisjoint(data):
@@ -378,37 +434,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise TypeError(
                 f"{generated_refusal(self.__class__, name)}; drop {name}= from the call"
             )
-        # 1. Handle relationship inputs (e.g. Product(category=my_cat))
-        relations = getattr(self.__class__, "ferro_relations", {})
-        for field_name, metadata in relations.items():
-            if isinstance(metadata, ForeignKey) and field_name in data:
-                val = data.pop(field_name)
-                # If it's a Model instance, extract the ID
-                if isinstance(val, Model):
-                    # Read the *target* model's PK (FF-D D5) — the source
-                    # model's PK name is irrelevant to the related instance.
-                    pk_field = val.__class__.__ferro_pk__
-                    if pk_field is None:
-                        raise ValueError(
-                            f"Cannot assign a {val.__class__.__name__} instance "
-                            f"to relationship field {field_name!r}: "
-                            f"{val.__class__.__name__} declares no primary-key "
-                            "column, so there is no value to store in "
-                            f"{field_name!r}_id. Pass the scalar value directly "
-                            "or declare a primary_key=True column."
-                        )
-                    data[f"{field_name}_id"] = getattr(val, pk_field, None)
-                else:
-                    # It's already an ID or something else
-                    data[f"{field_name}_id"] = val
-
+        _refuse_relation_keywords(self.__class__, data)
         super().__init__(**data)
 
     if not TYPE_CHECKING:
 
         def __getattr__(self, item: str) -> Any:
-            # Only a miss reaches here: a retired field (ADR-0053) is no
+            # Only a miss reaches here: a column an unloaded instance does not
+            # hold (ADR-0063), or a retired field (ADR-0053), which is no
             # attribute, and the error says it is gone on purpose.
+            if item in type(self).model_fields:
+                _unloaded.require_loaded(self)
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
                     f"{type(self).__name__}.{item} is retired in this release: the "
@@ -418,17 +454,98 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 )
             return super().__getattr__(item)
 
-    @model_validator(mode="after")
-    def _validate_required_foreign_keys(self) -> Self:
-        """Keep Python model validation aligned with required FK nullability."""
-        relations = getattr(self.__class__, "ferro_relations", {})
-        for field_name, metadata in relations.items():
-            if not isinstance(metadata, ForeignKey):
-                continue
-            if foreign_key_allows_none(metadata) is False:
-                if getattr(self, f"{field_name}_id", None) is None:
-                    raise ValueError(f"{field_name} is required")
-        return self
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name in type(self).model_fields:
+                _unloaded.require_loaded(self)
+            super().__setattr__(name, value)
+
+        def __iter__(self) -> Any:
+            # `dict(instance)` reads the fields through here, as model_dump does.
+            _unloaded.require_loaded(self)
+            return super().__iter__()
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            """Dump the instance's fields to a dict, as Pydantic's `model_dump` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump` options.
+                **kwargs: Pydantic's keyword `model_dump` options, such as
+                    `mode="json"` or `exclude`.
+
+            Returns:
+                The field values by name.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
+            _unloaded.require_loaded(self)
+            return super().model_dump(*args, **kwargs)
+
+        def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+            """Dump the instance's fields to JSON, as Pydantic's `model_dump_json` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump_json` options.
+                **kwargs: Pydantic's keyword `model_dump_json` options, such
+                    as `indent` or `exclude`.
+
+            Returns:
+                The JSON text.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
+            _unloaded.require_loaded(self)
+            return super().model_dump_json(*args, **kwargs)
+
+        def model_copy(
+            self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+        ) -> Self:
+            """Copy the instance, as Pydantic's `model_copy` does.
+
+            A cached relation the copy's foreign-key column no longer points at
+            is dropped, so the copy reads the relation its own key names.
+
+            Args:
+                update: Field values to change in the copy. Defaults to `None`.
+                deep: Copy the field values too. Defaults to `False`.
+
+            Returns:
+                The copy.
+
+            Raises:
+                InstanceNotLoaded: `update` names a column of an unloaded
+                    instance; load it with `.load()` first.
+                TypeError: `update` names a relation; set its foreign-key
+                    column instead, as the constructor says.
+            """
+            if update:
+                _refuse_relation_keywords(type(self), update)
+                if not type(self).model_fields.keys().isdisjoint(update):
+                    _unloaded.require_loaded(self)
+            copied = super().model_copy(update=update, deep=deep)
+            if update:
+                prune_cached_relations(copied)
+            return copied
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        # Every serializer refuses an unloaded instance: a nested model, a
+        # TypeAdapter and a response model reach pydantic-core without calling
+        # the instance's own `model_dump()`, and a model's own
+        # `model_serializer` would replace a decorated one.
+        schema = handler(source)
+        _unloaded.guard_serialization(handler.resolve_ref_schema(schema))
+        return schema
+
+    def __repr__(self) -> str:
+        if _unloaded.is_unloaded(self):
+            return _unloaded.repr_unloaded(self)
+        return super().__repr__()
 
     async def save(
         self,
@@ -461,6 +578,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 `None`; `exclude=set()` writes every column.
 
         Raises:
+            InstanceNotLoaded: The instance is unloaded; load it with
+                `.load()` first.
             UniqueViolationError: An insert repeats a primary key or unique
                 value.
             ModelDoesNotExist: The row behind a saved instance no longer
@@ -501,6 +620,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert rows[0].views == 1000
             ```
         """
+        _unloaded.require_loaded(self)
         if on_conflict not in (None, "update"):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
@@ -727,8 +847,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 opened by the enclosing `async with engines.session():`.
 
         Raises:
-            RuntimeError: The instance has no primary key value, or its row no
-                longer exists.
+            ModelDoesNotExist: The row no longer exists.
+            RuntimeError: The instance has no primary key value.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -747,19 +867,56 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         name = self.__class__.__ferro_identity__
         route, identity_using = await _instance_transaction_route(self, using, session)
 
-        _core_evict_instance(name, str(pk_val), route)
+        # The session's object for this key is this instance, so the fetch
+        # refreshes it in place, applying the refresh rule a fetch applies.
+        register_instance(name, str(pk_val), self, route)
         query = Query(self.__class__, using=route.connection_name).where(
             _field_eq(pk_field_name, pk_val)
         )
         fresh_instance = await query.first()
 
         if fresh_instance is None:
-            raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
+            # A gone row leaves no complete instance behind for a relation to
+            # read; an unloaded one stays the session's object for its key.
+            if not _unloaded.is_unloaded(self):
+                _core_evict_instance(name, str(pk_val), route)
+            raise ModelDoesNotExist(self.__class__, pk_val)
 
-        self.__dict__.update(fresh_instance.__dict__)
-        register_instance(name, str(pk_val), self, route)
+        if fresh_instance is not self:
+            # No identity map: copy the row in, then apply the same rule.
+            _unloaded.fill(self, fresh_instance)
+            prune_stale_relations(self)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
+
+    async def load(self) -> Self:
+        """Fill an unloaded instance from its row, in place, and return it.
+
+        A forward relation nothing loaded reads as an unloaded instance that
+        holds only its primary key. `load()` reads the row through the
+        connection the instance came from and fills the same object, so every
+        reference to it sees the row. On a complete instance it sends no
+        statement. See
+        [Loaded relations](../guide/queries.md#loading-relations-with-include).
+
+        Returns:
+            The instance itself, now complete.
+
+        Raises:
+            ModelDoesNotExist: The row no longer exists.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            async with engines.session():  # a session that holds no author yet
+                post = await Post.get(1)
+                author = await post.author.load()
+                assert author is post.author
+                assert author.name == "Ada Lovelace"
+            ```
+        """
+        if _unloaded.is_unloaded(self):
+            await self.refresh()
+        return self
 
     @classmethod
     def where(
@@ -880,13 +1037,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Args:
             session: The session to run in. Defaults to `None`, the session
                 opened by the enclosing `async with engines.session():`.
-            **fields: The field values. A relation field takes the related
-                instance or its primary key.
+            **fields: The field values. A forward relation is set through its
+                foreign-key column, `team_id=team.id`, never by its own name.
 
         Returns:
             The saved instance, with a generated primary key filled in.
 
         Raises:
+            TypeError: A keyword names a forward relation, or a retired or
+                generated field.
+            ValidationError: A keyword names no field, or a value does not
+                validate.
             UniqueViolationError: A row with the same primary key or unique
                 value exists.
 
@@ -1005,6 +1166,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert again is author
             ```
         """
+        _refuse_relation_keywords(cls, fields.keys() | (defaults or {}).keys())
         query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1046,6 +1208,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert author.name == "Ada King"
             ```
         """
+        _refuse_relation_keywords(cls, fields.keys() | (defaults or {}).keys())
         query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1199,6 +1362,9 @@ class ModelConnection[M: Model]:
         Returns:
             The record, and whether it was created.
         """
+        _refuse_relation_keywords(
+            self.model_cls, fields.keys() | (defaults or {}).keys()
+        )
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1223,6 +1389,9 @@ class ModelConnection[M: Model]:
         Returns:
             The record, and whether it was created.
         """
+        _refuse_relation_keywords(
+            self.model_cls, fields.keys() | (defaults or {}).keys()
+        )
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))

@@ -23,7 +23,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query import Row
 
 pytestmark = pytest.mark.backend_matrix
@@ -43,7 +43,6 @@ class GAAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
     balance: Decimal | None = None
-    transactions: Relation[list["GATransaction"]] = BackRef()
 
 
 class GATransaction(Model):
@@ -57,7 +56,8 @@ class GATransaction(Model):
     flagged: bool = False
     external_id: UUID | None = None
     payload: dict | None = None
-    account: Annotated[GAAccount | None, ForeignKey(related_name="transactions")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=GAAccount)] = None
+    account: Relation[GAAccount | None] = Forward("account_id")
 
 
 _T1 = datetime(2026, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
@@ -78,7 +78,7 @@ async def _seed():
         price=Decimal("1.25"),
         note="x",
         happened_at=_T1,
-        account=a1,
+        account_id=a1.id,
     ).save()
     await GATransaction(
         id=2,
@@ -87,7 +87,7 @@ async def _seed():
         price=Decimal("2.75"),
         note=None,
         happened_at=_T2,
-        account=a1,
+        account_id=a1.id,
     ).save()
     await GATransaction(
         id=3,
@@ -95,9 +95,9 @@ async def _seed():
         rate=2.0,
         price=Decimal("6.00"),
         note="z",
-        account=a1,
+        account_id=a1.id,
     ).save()
-    await GATransaction(id=4, amount=40, rate=4.0, account=a2).save()
+    await GATransaction(id=4, amount=40, rate=4.0, account_id=a2.id).save()
 
 
 # ---------------------------------------------------------------------------

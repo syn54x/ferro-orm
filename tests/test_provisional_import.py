@@ -15,8 +15,10 @@ import pytest
 import ferro
 from ferro import (
     FerroField,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     reset_engine,
@@ -26,8 +28,6 @@ from ferro._core import (
     _rust_model_registry_count_for_test,
     register_model_schema,
 )
-from ferro.base import ForeignKey
-from ferro.fields import BackRef
 from ferro.ir.compiler import (
     reset_schema_ir_compile_count_for_test,
     schema_ir_compile_count_for_test,
@@ -173,17 +173,18 @@ async def test_cold_rehydration_after_clear_registry(db_url) -> None:
 async def test_relationship_models_stay_python_only_until_connect(
     db_url, clean_registry
 ) -> None:
-    """FK + BackRef resolution at import still does not populate Rust."""
+    """Foreign-key and reverse relation resolution at import still does not populate Rust."""
 
     class PiAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list["PiPost"]] = BackRef()
+        posts: Relation[list["PiPost"]] = Reverse("author_id")
 
     class PiPost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated["PiAuthor", ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key="PiAuthor")]
+        author: Relation["PiAuthor"] = Forward("author_id")
 
     from ferro.relations import resolve_relationships
 

@@ -11,14 +11,14 @@ from ferro import connect, engines, transaction
 from datetime import UTC, datetime
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class Author(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
     email: Annotated[str, Field(unique=True)]
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
@@ -27,7 +27,8 @@ class Post(Model):
     body: str
     published: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    author: Annotated[Author, ForeignKey(related_name="posts")]
+    author_id: Annotated[int, Field(foreign_key=Author)]
+    author: Relation[Author] = Forward("author_id")
 
 
 # --8<-- [end:models]
@@ -47,7 +48,7 @@ async def main() -> None:
             title="Why Ferro is fast",
             body="Ferro hands SQL generation and row hydration to a Rust engine.",
             published=True,
-            author=alice,
+            author_id=alice.id,
         )
         assert post.id == 1  # the database assigned it
 
@@ -57,12 +58,12 @@ async def main() -> None:
                     title="Async patterns",
                     body="One event loop, many queries.",
                     published=True,
-                    author=alice,
+                    author_id=alice.id,
                 ),
                 Post(
                     title="Unfinished draft",
                     body="Still to write.",
-                    author=alice,
+                    author_id=alice.id,
                 ),
             ]
         )
@@ -94,7 +95,7 @@ async def main() -> None:
         # --8<-- [end:aggregate]
 
         # --8<-- [start:relationships]
-        author = await post.author
+        author = await post.author.load()
         assert author.name == "Alice"
 
         alice_posts = await author.posts.where(
@@ -122,7 +123,7 @@ async def main() -> None:
         # --8<-- [start:transaction]
         async with transaction():
             bob = await Author.create(name="Bob", email="bob@example.com")
-            await Post.create(title="Hello", body="First post.", author=bob)
+            await Post.create(title="Hello", body="First post.", author_id=bob.id)
         assert await Author.select().count() == 2  # both writes committed
         # --8<-- [end:transaction]
 

@@ -19,7 +19,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, ManyToMany, Model, Relation
+from ferro import FerroField, Forward, ManyToMany, Model, Relation, Reverse
 from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy, QueryProxy
 from ferro.query.wire import compile_query
@@ -36,51 +36,56 @@ pytestmark = pytest.mark.backend_matrix
 class QJLedger(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    accounts: Relation[list["QJAccount"]] = BackRef()
+    accounts: Relation[list["QJAccount"]] = Reverse("ledger_id")
 
 
 class QJOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     email: str = ""
-    accounts: Relation[list["QJAccount"]] = BackRef()
+    accounts: Relation[list["QJAccount"]] = Reverse("owner_id")
 
 
 class QJAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    ledger: Annotated[QJLedger, ForeignKey(related_name="accounts")]
-    owner: Annotated[QJOwner, ForeignKey(related_name="accounts")]
-    transactions: Relation[list["QJTransaction"]] = BackRef()
-    transfers_out: Relation[list["QJTransfer"]] = BackRef()
-    transfers_in: Relation[list["QJTransfer"]] = BackRef()
-    notes: Relation[list["QJNote"]] = BackRef()
+    ledger_id: Annotated[int, FerroField(foreign_key=QJLedger)]
+    ledger: Relation[QJLedger] = Forward("ledger_id")
+    owner_id: Annotated[int, FerroField(foreign_key=QJOwner)]
+    owner: Relation[QJOwner] = Forward("owner_id")
+    transactions: Relation[list["QJTransaction"]] = Reverse("account_id")
+    transfers_out: Relation[list["QJTransfer"]] = Reverse("from_account_id")
+    transfers_in: Relation[list["QJTransfer"]] = Reverse("to_account_id")
+    notes: Relation[list["QJNote"]] = Reverse("account_id")
 
 
 class QJTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[QJAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    account: Relation[QJAccount] = Forward("account_id")
 
 
 class QJTransfer(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    from_account: Annotated[QJAccount, ForeignKey(related_name="transfers_out")]
-    to_account: Annotated[QJAccount, ForeignKey(related_name="transfers_in")]
+    from_account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    from_account: Relation[QJAccount] = Forward("from_account_id")
+    to_account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    to_account: Relation[QJAccount] = Forward("to_account_id")
 
 
 class QJEmployee(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    manager: Annotated[
-        "QJEmployee", ForeignKey(related_name="reports", nullable=True)
-    ] = None
-    reports: Relation[list["QJEmployee"]] = BackRef()
+    manager_id: Annotated[int | None, FerroField(foreign_key="QJEmployee")] = None
+    manager: Relation["QJEmployee | None"] = Forward("manager_id")
+    reports: Relation[list["QJEmployee"]] = Reverse("manager_id")
 
 
 class QJNote(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     body: str = ""
-    account: Annotated[QJAccount | None, ForeignKey(related_name="notes")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=QJAccount)] = None
+    account: Relation[QJAccount | None] = Forward("account_id")
 
 
 # Nullable-FK chain at BOTH hops (Doc -> Folder -> FolderOwner) so whole-path
@@ -91,20 +96,22 @@ class QJNote(Model):
 class QJFolderOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    folders: Relation[list["QJFolder"]] = BackRef()
+    folders: Relation[list["QJFolder"]] = Reverse("owner_id")
 
 
 class QJFolder(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    owner: Annotated[QJFolderOwner | None, ForeignKey(related_name="folders")] = None
-    docs: Relation[list["QJDoc"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=QJFolderOwner)] = None
+    owner: Relation[QJFolderOwner | None] = Forward("owner_id")
+    docs: Relation[list["QJDoc"]] = Reverse("folder_id")
 
 
 class QJDoc(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    folder: Annotated[QJFolder | None, ForeignKey(related_name="docs")] = None
+    folder_id: Annotated[int | None, FerroField(foreign_key=QJFolder)] = None
+    folder: Relation[QJFolder | None] = Forward("folder_id")
 
 
 # M2M pair whose TARGET model carries a forward FK, so an M2M association
@@ -115,20 +122,21 @@ class QJDoc(Model):
 class QJMAuthor(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     role: str = ""
-    tags: Relation[list["QJMTag"]] = BackRef()
+    tags: Relation[list["QJMTag"]] = Reverse("created_by_id")
 
 
 class QJMTag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    created_by: Annotated[QJMAuthor, ForeignKey(related_name="tags")]
-    posts: Relation[list["QJMPost"]] = BackRef()
+    created_by_id: Annotated[int, FerroField(foreign_key=QJMAuthor)]
+    created_by: Relation[QJMAuthor] = Forward("created_by_id")
+    posts: Relation[list["QJMPost"]] = Reverse("tags")
 
 
 class QJMPost(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    tags: Relation[list["QJMTag"]] = ManyToMany(related_name="posts")
+    tags: Relation[list["QJMTag"]] = ManyToMany(through="qjmpost_tags")
 
 
 # Typed-bind matrix (#270 critical): a related model carrying datetime, uuid,
@@ -153,14 +161,15 @@ class QJTBProfile(Model):
     nickname: str | None = None
     # Plain-text column; collides by name with QJTBUser.tag (a native enum).
     tag: str = ""
-    users: Relation[list["QJTBUser"]] = BackRef()
+    users: Relation[list["QJTBUser"]] = Reverse("profile_id")
 
 
 class QJTBUser(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     # Native-enum column named identically to the related plain-text QJTBProfile.tag.
     tag: QJTBTier = QJTBTier.FREE
-    profile: Annotated[QJTBProfile, ForeignKey(related_name="users")]
+    profile_id: Annotated[int, FerroField(foreign_key=QJTBProfile)]
+    profile: Relation[QJTBProfile] = Forward("profile_id")
 
 
 _TB_T1 = datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -197,8 +206,8 @@ async def _seed_typed_bind_matrix():
     )
     for row in (p1, p2):
         await row.save()
-    await QJTBUser(id=1, tag=QJTBTier.PRO, profile=p1).save()
-    await QJTBUser(id=2, tag=QJTBTier.FREE, profile=p2).save()
+    await QJTBUser(id=1, tag=QJTBTier.PRO, profile_id=p1.id).save()
+    await QJTBUser(id=2, tag=QJTBTier.FREE, profile_id=p2.id).save()
     return {"p1": p1, "p2": p2}
 
 
@@ -213,20 +222,20 @@ async def _seed_core():
     for row in (la, lb, o1, o2):
         await row.save()
 
-    a1 = QJAccount(id=1, label="a1", ledger=la, owner=o1)
-    a2 = QJAccount(id=2, label="a2", ledger=la, owner=o2)
-    b1 = QJAccount(id=3, label="b1", ledger=lb, owner=o1)
+    a1 = QJAccount(id=1, label="a1", ledger_id=la.id, owner_id=o1.id)
+    a2 = QJAccount(id=2, label="a2", ledger_id=la.id, owner_id=o2.id)
+    b1 = QJAccount(id=3, label="b1", ledger_id=lb.id, owner_id=o1.id)
     for row in (a1, a2, b1):
         await row.save()
 
     # Ledger A: 4 transactions (a1 x3, a2 x1); Ledger B: 2 transactions (b1).
     for txn in (
-        QJTransaction(id=1, amount=10, account=a1),
-        QJTransaction(id=2, amount=20, account=a1),
-        QJTransaction(id=3, amount=30, account=a1),
-        QJTransaction(id=4, amount=40, account=a2),
-        QJTransaction(id=5, amount=50, account=b1),
-        QJTransaction(id=6, amount=60, account=b1),
+        QJTransaction(id=1, amount=10, account_id=a1.id),
+        QJTransaction(id=2, amount=20, account_id=a1.id),
+        QJTransaction(id=3, amount=30, account_id=a1.id),
+        QJTransaction(id=4, amount=40, account_id=a2.id),
+        QJTransaction(id=5, amount=50, account_id=b1.id),
+        QJTransaction(id=6, amount=60, account_id=b1.id),
     ):
         await txn.save()
     return {"la": la, "lb": lb, "o1": o1, "o2": o2, "a1": a1, "a2": a2, "b1": b1}
@@ -307,8 +316,8 @@ async def test_inner_join_drops_null_fk_rows(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # One note with an account, one without (nullable FK left NULL).
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.where(lambda n: n.account.ledger_id == 1).all()
         assert {r.id for r in rows} == {1}
@@ -354,8 +363,8 @@ async def test_or_composition_still_renders_inner_join_narrowing_query_wide(db_u
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.where(
             lambda n: (n.account.ledger_id == 1) | (n.body == "orphan")
@@ -381,8 +390,12 @@ async def test_two_fks_to_one_target(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # a1 -> ledger A, b1 -> ledger B.
-        await QJTransfer(id=1, from_account=core["a1"], to_account=core["b1"]).save()
-        await QJTransfer(id=2, from_account=core["b1"], to_account=core["a1"]).save()
+        await QJTransfer(
+            id=1, from_account_id=core["a1"].id, to_account_id=core["b1"].id
+        ).save()
+        await QJTransfer(
+            id=2, from_account_id=core["b1"].id, to_account_id=core["a1"].id
+        ).save()
 
         out_of_a = await QJTransfer.where(
             lambda tr: tr.from_account.ledger_id == 1
@@ -402,12 +415,12 @@ async def test_two_fks_to_one_target(db_url):
 async def test_self_fk_traversal(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-        boss = QJEmployee(id=1, name="boss", manager=None)
+        boss = QJEmployee(id=1, name="boss", manager_id=None)
         await boss.save()
-        alice = QJEmployee(id=2, name="alice", manager=boss)
+        alice = QJEmployee(id=2, name="alice", manager_id=boss.id)
         await alice.save()
-        await QJEmployee(id=3, name="bob", manager=boss).save()
-        await QJEmployee(id=4, name="carol", manager=alice).save()
+        await QJEmployee(id=3, name="bob", manager_id=boss.id).save()
+        await QJEmployee(id=4, name="carol", manager_id=alice.id).save()
 
         managed_by_boss = await QJEmployee.where(
             lambda e: e.manager.name == "boss"
@@ -559,8 +572,8 @@ async def test_order_by_related_column_drops_null_fk_rows(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.select().order_by(lambda n: n.account.label).all()
         assert [r.id for r in rows] == [1]
@@ -592,14 +605,16 @@ def test_bare_relation_proxy_predicate_is_rejected():
 
 
 def _persisted_account(pk: int = 7) -> QJAccount:
-    return QJAccount(id=pk, label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+    return QJAccount(
+        id=pk, label="x", ledger_id=QJLedger(id=1).id, owner_id=QJOwner(id=1).id
+    )
 
 
 class TestRelationProxySugar:
     def _proxy(self) -> QueryProxy:
         return QueryProxy(QJTransaction)
 
-    def test_instance_equality_desugars_to_shadow_fk_join_free(self):
+    def test_instance_equality_desugars_to_fk_column_join_free(self):
         node = self._proxy().account == _persisted_account(7)
         assert isinstance(node, QueryNode)
         assert node.column == "account_id"
@@ -614,10 +629,10 @@ class TestRelationProxySugar:
         assert node.value == 7
         assert node.path == ()
 
-    def test_deep_instance_equality_uses_last_hop_shadow_and_prefix_path(self):
+    def test_deep_instance_equality_uses_last_hop_fk_column_and_prefix_path(self):
         owner = QJOwner(id=3, email="o@ferro.dev")
         node = self._proxy().account.owner == owner
-        # Shadow column of the LAST hop (owner_id, on the account table), with
+        # Foreign-key column of the LAST hop (owner_id, on the account table), with
         # the proxy path MINUS that hop -> the ("account",) prefix join only.
         assert node.column == "owner_id"
         assert node.value == 3
@@ -637,7 +652,9 @@ class TestRelationProxySugar:
         assert node.path == ()
 
     def test_unpersisted_instance_raises_value_error_naming_model(self):
-        unsaved = QJAccount(label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+        unsaved = QJAccount(
+            label="x", ledger_id=QJLedger(id=1).id, owner_id=QJOwner(id=1).id
+        )
         with pytest.raises(
             ValueError, match="unpersisted QJAccount instance .primary key not set"
         ):
@@ -847,8 +864,8 @@ class TestExplicitJoinChainers:
 
 async def _seed_notes(core):
     """One note attached to a1, one orphan (nullable FK left NULL)."""
-    await QJNote(id=1, body="attached", account=core["a1"]).save()
-    await QJNote(id=2, body="orphan", account=None).save()
+    await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+    await QJNote(id=2, body="orphan", account_id=None).save()
 
 
 @pytest.mark.asyncio
@@ -890,9 +907,9 @@ async def test_left_join_null_retention_in_ordered_results(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # Two attached notes (a1 "a1", a2 "a2") + one orphan → non-NULL order a1,a2.
-        await QJNote(id=1, body="attached-a1", account=core["a1"]).save()
-        await QJNote(id=2, body="attached-a2", account=core["a2"]).save()
-        await QJNote(id=3, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached-a1", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="attached-a2", account_id=core["a2"].id).save()
+        await QJNote(id=3, body="orphan", account_id=None).save()
 
         rows = await (
             QJNote.select()
@@ -932,13 +949,13 @@ async def _seed_docs():
     """
     ow = QJFolderOwner(id=1, name="ow")
     await ow.save()
-    f1 = QJFolder(id=1, label="owned", owner=ow)
-    f2 = QJFolder(id=2, label="ownerless", owner=None)
+    f1 = QJFolder(id=1, label="owned", owner_id=ow.id)
+    f2 = QJFolder(id=2, label="ownerless", owner_id=None)
     await f1.save()
     await f2.save()
-    await QJDoc(id=1, title="both-hops", folder=f1).save()
-    await QJDoc(id=2, title="no-folder", folder=None).save()
-    await QJDoc(id=3, title="folder-no-owner", folder=f2).save()
+    await QJDoc(id=1, title="both-hops", folder_id=f1.id).save()
+    await QJDoc(id=2, title="no-folder", folder_id=None).save()
+    await QJDoc(id=3, title="folder-no-owner", folder_id=f2.id).save()
 
 
 @pytest.mark.asyncio
@@ -998,13 +1015,13 @@ async def test_explicit_left_plus_implicit_traversal_renders_left(db_url):
 
 # ---------------------------------------------------------------------------
 # Relation-proxy equality sugar — behavioral (#273): instance-eq filters by the
-# shadow FK join-free; == None / != None lower to IS NULL / IS NOT NULL; the
+# foreign-key column join-free; == None / != None lower to IS NULL / IS NOT NULL; the
 # M2M association context composes with forward-FK traversal on the target.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_instance_equality_filters_by_shadow_fk(db_url):
+async def test_instance_equality_filters_by_fk_column(db_url):
     """`t.account == a1` filters by `account_id` join-free; `!=` complements."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -1022,7 +1039,7 @@ async def test_instance_equality_filters_by_shadow_fk(db_url):
 @pytest.mark.asyncio
 async def test_deep_instance_equality_traverses_prefix_join(db_url):
     """`t.account.owner == o2` compares `owner_id` under the account prefix join
-    (the shadow column lives one hop up, not the final target's PK column)."""
+    (the foreign-key column lives one hop up, not the final target's PK column)."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
@@ -1036,7 +1053,7 @@ async def test_deep_instance_equality_traverses_prefix_join(db_url):
 @pytest.mark.asyncio
 async def test_relation_equals_none_renders_is_null(db_url):
     """`n.account == None` / `!= None` lower to IS NULL / IS NOT NULL on the
-    shadow FK, join-free."""
+    foreign-key column, join-free."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
@@ -1060,8 +1077,8 @@ async def test_m2m_context_composes_with_forward_fk_traversal(db_url):
     async with ferro.engines.session():
         admin = await QJMAuthor.create(id=1, role="admin")
         member = await QJMAuthor.create(id=2, role="member")
-        tag_admin = await QJMTag.create(id=1, name="urgent", created_by=admin)
-        tag_member = await QJMTag.create(id=2, name="chill", created_by=member)
+        tag_admin = await QJMTag.create(id=1, name="urgent", created_by_id=admin.id)
+        tag_member = await QJMTag.create(id=2, name="chill", created_by_id=member.id)
         post = await QJMPost.create(id=1, title="p1")
         await post.tags.add(tag_admin, tag_member)
 

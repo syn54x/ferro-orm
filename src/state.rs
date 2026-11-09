@@ -78,7 +78,7 @@ pub struct RegisteredModel {
     /// The mapped column names in SchemaIR declaration order (#286): the
     /// root fetch names them, and the instances fetch walker enumerates each
     /// included hop's complete column list to widen the SELECT
-    /// deterministically (every populated hop is a complete row — the
+    /// deterministically (every loaded hop is a complete row — the
     /// complete-instance invariant, ADR-0008). A retired column (ADR-0053) is
     /// not part of the row the model owns, so it is not here.
     pub column_names: Vec<String>,

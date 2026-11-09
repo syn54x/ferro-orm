@@ -17,7 +17,7 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -30,14 +30,13 @@ pytestmark = pytest.mark.backend_matrix
 class GRPOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     email: str = ""
-    accounts: Relation[list["GRPAccount"]] = BackRef()
 
 
 class GRPAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    owner: Annotated[GRPOwner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["GRPTransaction"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=GRPOwner)] = None
+    owner: Relation[GRPOwner | None] = Forward("owner_id")
 
 
 class GRPTransaction(Model):
@@ -45,9 +44,8 @@ class GRPTransaction(Model):
     amount: int = 0
     price: Decimal | None = None
     note: str = ""
-    account: Annotated[GRPAccount | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    account_id: Annotated[int | None, FerroField(foreign_key=GRPAccount)] = None
+    account: Relation[GRPAccount | None] = Forward("account_id")
 
 
 async def _seed():
@@ -57,19 +55,19 @@ async def _seed():
     bob = GRPOwner(id=2, email="bob@x.io")
     await alice.save()
     await bob.save()
-    a1 = GRPAccount(id=1, name="a1", owner=alice)
-    a2 = GRPAccount(id=2, name="a2", owner=bob)
+    a1 = GRPAccount(id=1, name="a1", owner_id=alice.id)
+    a2 = GRPAccount(id=2, name="a2", owner_id=bob.id)
     await a1.save()
     await a2.save()
     await GRPTransaction(
-        id=1, amount=10, price=Decimal("1.00"), note="x", account=a1
+        id=1, amount=10, price=Decimal("1.00"), note="x", account_id=a1.id
     ).save()
     await GRPTransaction(
-        id=2, amount=20, price=Decimal("3.00"), note="y", account=a1
+        id=2, amount=20, price=Decimal("3.00"), note="y", account_id=a1.id
     ).save()
     await GRPTransaction(id=3, amount=30, note="orphan").save()
     await GRPTransaction(
-        id=4, amount=40, price=Decimal("8.00"), note="z", account=a2
+        id=4, amount=40, price=Decimal("8.00"), note="z", account_id=a2.id
     ).save()
 
 

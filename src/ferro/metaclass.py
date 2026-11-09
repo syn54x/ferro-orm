@@ -1,17 +1,22 @@
 """The metaclass that turns a model class declaration into a registered table."""
 
-import re
+import __future__
+import ast
 import sys
+import warnings
 from dataclasses import replace
 from functools import partial
 from enum import Enum
+from types import UnionType
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Callable,
     ClassVar,
     ForwardRef,
-    Optional,
+    Union,
+    dataclass_transform,
     get_args,
     get_origin,
     get_type_hints,
@@ -19,25 +24,57 @@ from typing import (
 
 from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
-from pydantic.fields import FieldInfo
+from pydantic.fields import FieldInfo, PrivateAttr
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
-from ._annotation_eval import evaluate_foreign_key_annotation
+from ._annotation_eval import DeferredNames
+from ._core import prune_stale_relations
 from ._annotation_utils import (
-    _strip_optional_union as _annotation_utils_strip_optional_union,
+    _strip_optional_union,
+    annotation_allows_none,
+    is_closed_domain_annotation,
 )
-from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
-from ._shadow_fk_types import shadow_annotation_for_foreign_key
-from .base import FerroField, ForeignKey, GeneratedExpression, ManyToManyRelation
-from .columns import build_column_specs, refuse_back_ref_over_retired_relation
-from .fields import FERRO_FIELD_EXTRA_KEY
+from .base import (
+    FerroField,
+    ForwardRelation,
+    ManyToManyRelation,
+    ReverseRelation,
+)
+from .columns import RetiredField, build_column_specs
+from .fields import (
+    Field,
+    Forward,
+    ManyToMany,
+    Reverse,
+    _RelationOptions,
+    annotation_text,
+    field_line,
+    field_options,
+)
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
+from .relations import (
+    BAD_THROUGH,
+    check_declared_foreign_keys,
+    default_join_table,
+    is_table_name,
+    forward_line,
+    key_column_line,
+    relation_refusal,
+    reverse_line,
+    written_type,
+)
+from .relations.fixes import DeclarationRefusal, Edit
 from .relations.descriptors import ForwardDescriptor
 
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+if TYPE_CHECKING:
+    from pydantic._internal._model_construction import NoInitField
+else:
+    # Pydantic's private name is for the checker only, the way Pydantic's own
+    # metaclass holds its specifiers; a placeholder keeps the import public.
+    NoInitField = object()
 
 
 def _assert_weakref_support(cls: type) -> None:
@@ -95,16 +132,456 @@ def _retired_and_renamed(model: str, field_name: str) -> TypeError:
     )
 
 
-def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeError:
-    if m2m:
-        return TypeError(
-            f"{model}.{field_name}: a ManyToMany cannot be retired; it is a join "
-            "table, not a column. Delete the declaration to drop the join table"
-        )
+def _many_to_many_retired(model: str, field_name: str) -> TypeError:
     return TypeError(
-        f"{model}.{field_name}: a BackRef cannot be retired; it is not a column. "
-        "Delete the BackRef"
+        f"{model}.{field_name}: a ManyToMany cannot be retired; it is a join "
+        "table, not a column. Delete the declaration to drop the join table"
     )
+
+
+def _parsed(text: str) -> ast.expr | None:
+    """``text`` as an expression node, or ``None`` when it does not parse."""
+    try:
+        return ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return None
+
+
+def _head(node: ast.expr) -> str | None:
+    """The name a node spells: ``Team`` for ``Team`` or ``models.Team``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_none(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Constant) and node.value is None) or _head(
+        node
+    ) == "None"
+
+
+def _union_members(node: ast.expr) -> list[ast.expr] | None:
+    """The members of ``A | B``, ``Optional[A]`` or ``Union[A, B]``, else ``None``."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return [*(_union_members(node.left) or [node.left]), node.right]
+    if isinstance(node, ast.Subscript) and _head(node.value) == "Optional":
+        return [node.slice, ast.Constant(None)]
+    if isinstance(node, ast.Subscript) and _head(node.value) == "Union":
+        inner = node.slice
+        return list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+    return None
+
+
+def _node_view(node: ast.expr | None) -> tuple[bool, Any, bool]:
+    """``(is_list, target name, nullable)`` of a relation argument written as text."""
+    if node is None:
+        return False, "", False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _node_view(_parsed(node.value))
+    if isinstance(node, ast.Subscript) and _head(node.value) in ("list", "List"):
+        _, target, _ = _node_view(node.slice)
+        return True, target, False
+    members = _union_members(node)
+    if members is not None:
+        kept = [member for member in members if not _is_none(member)]
+        # A union of several models names no one target.
+        _, target, _ = _node_view(kept[0]) if len(kept) == 1 else (False, None, False)
+        return False, target, len(kept) != len(members)
+    return False, _head(node) or ast.unparse(node), False
+
+
+def _relation_view(hint: Any) -> tuple[bool, Any, bool] | None:
+    """What a `Relation[...]` annotation declares: ``(is_list, target, nullable)``.
+
+    The target is a class, or its name when the annotation writes it as a
+    string (as every annotation is under ``from __future__ import
+    annotations``), and ``None`` when it is a union of several models, which
+    names no one target. ``None`` when the annotation is not ``Relation[...]``.
+    """
+    if isinstance(hint, ForwardRef):
+        hint = hint.__forward_arg__
+    if isinstance(hint, str):
+        node = _parsed(hint)
+        if not isinstance(node, ast.Subscript) or _head(node.value) != "Relation":
+            return None
+        return _node_view(node.slice)
+    if get_origin(hint) is not Relation or not get_args(hint):
+        return None
+    return _relation_argument(get_args(hint)[0])
+
+
+def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
+    if isinstance(argument, ForwardRef):
+        argument = argument.__forward_arg__
+    if isinstance(argument, str):
+        return _node_view(_parsed(argument))
+    if get_origin(argument) is list:
+        inner = get_args(argument)
+        _, target, _ = _relation_argument(inner[0] if inner else "")
+        return True, target, False
+    if get_origin(argument) in (Union, UnionType):
+        inner = _strip_optional_union(argument)
+        nullable = type(None) in get_args(argument)
+        # A union of several models names no one target.
+        several = get_origin(inner) in (Union, UnionType)
+        _, target, _ = (False, None, False) if several else _relation_argument(inner)
+        return False, target, nullable
+    return False, argument, False
+
+
+def _evaluated(hint: Any, namespace: dict, frame_ns: dict | None) -> Any:
+    """``hint`` as Python evaluates it: a string annotation in the class's scope.
+
+    A name not defined yet becomes a ``ForwardRef``, so a target declared
+    later still evaluates, and an alias (``Annotated as A``) is the object it
+    names. A quoted annotation in a postponed module is text twice over, so
+    text is evaluated until it is not. ``hint`` itself when it is not a string
+    or does not evaluate.
+    """
+    module_ns = getattr(
+        sys.modules.get(namespace.get("__module__", "")), "__dict__", {}
+    )
+    names = DeferredNames({**(frame_ns or {}), **namespace}, module_ns)
+    for _ in range(2):
+        if not isinstance(hint, str):
+            break
+        try:
+            # Read for its markers only: the class's own evaluation reports.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                hint = eval(hint, module_ns, names)
+        except Exception:
+            break
+    return hint
+
+
+def _layers(annotation: Any) -> tuple[Any, bool, list[Any]]:
+    """The annotation under its ``| None`` and ``Annotated[...]`` wrappers.
+
+    Returns:
+        ``(core, wrapped_in_none, metadata)``: ``Annotated[Relation[Team],
+        "doc"] | None`` is ``(Relation[Team], True, ["doc"])``.
+    """
+    wrapped, metadata = False, []
+    while True:
+        origin = get_origin(annotation)
+        if origin is Annotated:
+            args = get_args(annotation)
+            metadata += args[1:]
+            annotation = args[0]
+            continue
+        stripped = _strip_optional_union(annotation)
+        if stripped is not annotation:
+            wrapped = True
+            annotation = stripped
+            continue
+        return annotation, wrapped, metadata
+
+
+_RELATION_KINDS = ("forward", "reverse", "many_to_many")
+
+
+def _relation_marker(
+    field_name: str, annotation: Any, namespace: dict
+) -> tuple[str, dict[str, Any], bool] | None:
+    """The relation a field declares: ``(kind, options, in_metadata)``.
+
+    ``kind`` is ``"forward"``, ``"reverse"`` or ``"many_to_many"``, and
+    ``options`` the keywords its ``Forward``, ``Reverse`` or ``ManyToMany``
+    carries. The marker is read from the annotation's ``Annotated`` metadata,
+    under any ``| None``, then from the value the field is assigned;
+    ``in_metadata`` says it sat in the metadata, where a relation is refused.
+    ``None`` when the field declares no relation.
+    """
+    holders = [(item, True) for item in _layers(annotation)[2]]
+    holders.append((namespace.get(field_name), False))
+    for holder, in_metadata in holders:
+        if not isinstance(holder, FieldInfo):
+            continue
+        for option in holder.metadata:
+            if isinstance(option, _RelationOptions):
+                kind = next(k for k in _RELATION_KINDS if k in option.options)
+                return kind, option.options, in_metadata
+    return None
+
+
+def _is_bare_relation(core: Any) -> bool:
+    if core is Relation:
+        return True
+    return isinstance(core, str) and _head(_parsed(core) or ast.Constant(0)) == (
+        "Relation"
+    )
+
+
+def _foreign_key_name(foreign_key: Any) -> str:
+    """The class name a foreign key or relation target is written as."""
+    if isinstance(foreign_key, ForwardRef):
+        foreign_key = foreign_key.__forward_arg__
+    if isinstance(foreign_key, type):
+        return foreign_key.__name__
+    return str(foreign_key).rsplit(".", 1)[-1]
+
+
+def _declared_target(
+    column: str, namespace: dict, annotations: dict, frame_ns: dict | None
+) -> tuple[str, bool] | None:
+    """The target and nullability a column of the class body declares, if any."""
+    annotation = _evaluated(annotations.get(column), namespace, frame_ns)
+    core, wrapped, metadata = _layers(annotation)
+    options = []
+    value = namespace.get(column)
+    if isinstance(value, FieldInfo):
+        options += value.metadata
+    for item in metadata:
+        options += item.metadata if isinstance(item, FieldInfo) else [item]
+    for option in options:
+        if isinstance(option, FerroField) and option.foreign_key is not None:
+            nullable = wrapped or (
+                not isinstance(core, str) and annotation_allows_none(core)
+            )
+            return _foreign_key_name(option.foreign_key), nullable
+    return None
+
+
+_NOT_RELATION = "a relation is annotated Relation[...]"
+_IN_METADATA = "a relation is an assignment, not Annotated metadata"
+_NONE_OUTSIDE = "a relation is annotated Relation[...], with no | None around it"
+
+
+def _declared_relation(
+    model: str,
+    field_name: str,
+    annotation: Any,
+    spelling: str,
+    column: str,
+    *,
+    in_metadata: bool,
+    namespace: dict,
+    annotations: dict,
+    frame_ns: dict | None,
+    scope: frozenset[str] | None,
+) -> ForwardRelation | ReverseRelation:
+    """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
+
+    A declaration that is not ``Relation[...]`` assigned the marker is
+    refused with the line to write. When the class body cannot name the
+    target that line needs (a bare ``Relation``: a forward one over a column
+    whose target is declared later, or a reverse one, whose model only the
+    models pointing back name), the record carries the refusal, raised with
+    the target named once the class exists or relations resolve.
+
+    Args:
+        model: The model's name.
+        field_name: The relation's field name.
+        annotation: The field's annotation, evaluated where it could be.
+        spelling: ``"Forward"`` or ``"Reverse"``.
+        column: The column the relation names.
+        in_metadata: Whether the marker sits in ``Annotated`` metadata.
+        namespace: The class body.
+        annotations: The class body's annotations.
+        frame_ns: The scope running the class statement, if a function.
+        scope: The names defined where the class statement runs, so a fix
+            line quotes a target defined later; ``None`` when the module
+            postpones its annotations and no name needs quotes.
+
+    Raises:
+        TypeError: The relation is ``Annotated`` metadata, the annotation is
+            not ``Relation[...]`` or wraps it in ``| None``, or it is not the
+            shape the relation reads (one row forward, a list in reverse).
+    """
+    core, wrapped, _ = _layers(annotation)
+    view = _relation_view(core)
+    # `Relation[A | B]` (or `A | B` alone) names no one model: refused like a
+    # bare `Relation`, its target named from the column or at resolution.
+    several = (view is not None and view[1] is None) or (
+        view is None
+        and not _is_bare_relation(core)
+        and _relation_argument(core)[1] is None
+    )
+    if several:
+        view = None
+    bound = None if scope is None else scope | frozenset(namespace)
+    # The column the relation reads decides its target and nullability.
+    declared = (
+        _declared_target(column, namespace, annotations, frame_ns)
+        if spelling == "Forward"
+        else None
+    )
+    if in_metadata or wrapped or view is None:
+        if in_metadata:
+            reason = _IN_METADATA
+        elif view is None:
+            reason = _NOT_RELATION
+        else:
+            reason = _NONE_OUTSIDE
+        if declared is not None:
+            named: tuple[str, bool] | None = declared
+        elif view is not None:
+            _, target, nullable = view
+            named = (annotation_text(target), nullable or wrapped)
+        elif not several and not _is_bare_relation(core):
+            named = (annotation_text(core), wrapped)
+        else:
+            named = None
+        if named is not None:
+            target_text, nullable = named
+            line = (
+                forward_line(field_name, target_text, column, bound, nullable=nullable)
+                if spelling == "Forward"
+                else reverse_line(field_name, target_text, column, bound)
+            )
+            raise relation_refusal(model, field_name, reason, line)
+        if spelling == "Forward":
+            return ForwardRelation(column, None, False, refusal=reason, bound=bound)
+        return ReverseRelation(column, None, refusal=reason, bound=bound)
+    is_list, target, nullable = view
+    if spelling == "Forward" and is_list:
+        target_text, nullable = declared or (annotation_text(target), False)
+        raise relation_refusal(
+            model,
+            field_name,
+            "a forward relation reads one row, so it is annotated Relation[...] "
+            "of its target",
+            forward_line(field_name, target_text, column, bound, nullable=nullable),
+        )
+    if spelling == "Reverse" and not is_list:
+        raise relation_refusal(
+            model,
+            field_name,
+            "a reverse relation reads every row pointing back, so it is "
+            "annotated Relation[list[...]]",
+            reverse_line(field_name, annotation_text(target), column, bound),
+        )
+    if spelling == "Forward":
+        return ForwardRelation(column, target, nullable, bound=bound)
+    return ReverseRelation(column, target, bound=bound)
+
+
+_NOT_LIST = (
+    "a many-to-many reads a list of linked rows, so it is annotated Relation[list[...]]"
+)
+_NO_THROUGH = "a many-to-many needs through=, the name of its join table"
+
+
+def _declared_many_to_many(
+    model: str,
+    field_name: str,
+    annotation: Any,
+    options: dict[str, Any],
+    *,
+    in_metadata: bool,
+    table: str,
+    namespace: dict,
+    scope: frozenset[str] | None,
+) -> ManyToManyRelation:
+    """The record of a ``ManyToMany(through=...)`` declaration.
+
+    A declaration that is not ``Relation[list[...]]`` assigned the marker,
+    or names no join table, carries why as its refusal; a ``through=`` that
+    is no table name is recorded as ``<table>_<field>``, the name its fix
+    writes. The refusal is
+    raised once the class exists, by `many_to_many_refusal`, which also
+    refuses a target naming the model itself; a bare ``Relation`` names no
+    target, and relation resolution raises it.
+
+    Args:
+        model: The model's name.
+        field_name: The relation's field name.
+        annotation: The field's annotation, evaluated where it could be.
+        options: The relation keywords the marker carries.
+        in_metadata: Whether the marker sits in ``Annotated`` metadata.
+        table: The model's table name.
+        namespace: The class body.
+        scope: The names defined where the class statement runs, or ``None``
+            when the module postpones its annotations.
+
+    Returns:
+        The relation, its ``refusal`` set when the declaration is refused.
+    """
+    core, wrapped, _ = _layers(annotation)
+    view = _relation_view(core)
+    # `Relation[list[A | B]]` names no one model: refused like a bare `Relation`.
+    several = view is not None and view[1] is None
+    if several:
+        view = None
+    through = options.get("through")
+    reverse_index = options.get("reverse_index", True)
+    # The order of `_declared_relation`: a missing `Relation[...]` is named
+    # before the `| None` around it.
+    if in_metadata:
+        reason = _IN_METADATA
+    elif view is None:
+        reason = _NOT_RELATION
+    elif wrapped:
+        reason = _NONE_OUTSIDE
+    elif not view[0]:
+        reason = _NOT_LIST
+    elif not isinstance(through, str) or not through:
+        reason = _NO_THROUGH
+    elif not is_table_name(through):
+        reason = BAD_THROUGH
+    else:
+        reason = None
+    if not isinstance(through, str) or not is_table_name(through):
+        # The name the fix writes; the refusal checks it in turn.
+        through = default_join_table(table, field_name)
+    if view is not None:
+        target = view[1]
+    elif not several and not _is_bare_relation(core):
+        target = _relation_argument(core)[1]
+    else:
+        target = None
+    relation = ManyToManyRelation(
+        through=through,
+        reverse_index=reverse_index,
+        refusal=reason,
+        bound=None if scope is None else scope | frozenset(namespace),
+        renamed_from=options.get("renamed_from"),
+    )
+    relation.to = target
+    return relation
+
+
+def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
+    """Refuse ``on_delete`` on a column with no ``foreign_key``, naming the fix.
+
+    A foreign-key column's own refusals (the primary key, generated,
+    ``on_delete="SET NULL"`` on a required column) are `check_key_column`'s,
+    which writes its fix from the target key.
+
+    Raises:
+        TypeError: ``on_delete`` without ``foreign_key``.
+    """
+    for name, meta in declared_fields.items():
+        if meta.foreign_key is None and meta.on_delete is not None:
+            info = cls.model_fields[name]
+            line = field_line(
+                name,
+                annotation_text(info.annotation),
+                field_options(meta, on_delete=None),
+                info.default,
+            )
+            raise DeclarationRefusal(
+                cls.__name__,
+                name,
+                "on_delete is a foreign-key option and this column has no foreign_key",
+                [Edit(cls.__name__, name, "replace", (line,))],
+            )
+
+
+def _defined_names(frame: Any) -> frozenset[str] | None:
+    """The names defined where a class statement runs, read from its frame.
+
+    ``None`` when the module postpones its annotations
+    (``from __future__ import annotations``): every annotation stays text
+    there, so a fix line never needs to quote a target. A whole annotation
+    quoted in a module without the import is evaluated, and gets quotes.
+    """
+    if frame.f_code.co_flags & __future__.annotations.compiler_flag:
+        return None
+    return frozenset(frame.f_globals) | frozenset(frame.f_locals)
 
 
 class SecretHydrator:
@@ -250,6 +727,140 @@ def _generated_setattr(inherited: Any):
     return __setattr__
 
 
+def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
+    """The model's relation specs, once every forward relation in `relations` has one.
+
+    A relation whose target is a class-name string gets its spec when the
+    modelset resolves, so the first assignment before `connect()` resolves it.
+    """
+    specs = model_cls.__ferro_relation_specs__
+    if not specs.keys() >= relations:
+        from . import ensure_resolved_modelset
+
+        ensure_resolved_modelset()
+        specs = model_cls.__ferro_relation_specs__
+    return specs
+
+
+def _a(name: str) -> str:
+    """`name` after its indefinite article: "a Team", "an Author", "a User"."""
+    first, rest = name[:1].upper(), name[1:3].lower()
+    vowel = first in "AEIO" or (
+        first == "U" and not (rest[:1] not in "aeiou" and rest[1:2] in "aeiou")
+    )
+    return f"{'an' if vowel else 'a'} {name}"
+
+
+def _none_refusal(model_cls: type, name: str, spec: Any) -> DeclarationRefusal:
+    """The refusal of `None` on a relation over a required key column, with the lines to write."""
+    model = model_cls.__name__
+    target = spec.target.__name__
+    declared = model_cls.__ferro_relations__[name]
+    info = model_cls.model_fields[spec.fk_column]
+    column = key_column_line(
+        model_cls,
+        spec.fk_column,
+        spec.target,
+        nullable=True,
+        meta=model_cls.__ferro_fields__[spec.fk_column],
+        annotation=written_type(info.annotation),
+    )
+    relation = forward_line(name, target, spec.fk_column, declared.bound, nullable=True)
+    return DeclarationRefusal(
+        model,
+        name,
+        f"{spec.fk_column} is not nullable, so the relation cannot be None. "
+        f"Assign {_a(target)}, or make both nullable",
+        [
+            Edit(model, spec.fk_column, "replace", (column,)),
+            Edit(model, name, "replace", (relation,)),
+        ],
+    )
+
+
+def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
+    """Set the foreign-key column behind a forward relation and cache `value` as loaded.
+
+    Every refusal raises before the key column or the cache changes.
+    """
+    model = type(self).__name__
+    spec = _resolved_relation_specs(type(self), relations)[name]
+    target = spec.target.__name__
+    if value is None:
+        if not spec.nullable:
+            raise _none_refusal(type(self), name, spec)
+        key = None
+    # The exact class: a subclass model has a table of its own, so its key
+    # would name another table's row.
+    elif type(value) is not spec.target:
+        raise TypeError(
+            f"{model}.{name}: expected {_a(target)}, got {type(value).__name__}. "
+            f"Assign a saved {target} instance, or set {spec.fk_column} directly"
+        )
+    else:
+        pk = spec.target.__ferro_pk__
+        key = getattr(value, pk)
+        if key is None:
+            raise ValueError(
+                f"{model}.{name}: the {target} has no {pk} yet. Save it first, "
+                "then assign it"
+            )
+    setattr(self, spec.fk_column, key)
+    self.__dict__[name] = value
+
+
+def prune_cached_relations(instance: BaseModel) -> None:
+    """Drop each forward relation `instance` caches that its key no longer points at.
+
+    The refresh rule of ADR-0008, for a key changed in memory. A relation
+    nothing cached has nothing to check, so only a cached one needs its
+    target resolved.
+    """
+    relations = type(instance).__ferro_relations__
+    cached = {
+        name
+        for name in instance.__dict__.keys() & relations.keys()
+        if isinstance(relations[name], ForwardRelation)
+    }
+    if cached:
+        _resolved_relation_specs(type(instance), cached)
+        prune_stale_relations(instance)
+
+
+def _relation_setattr(key_columns: dict[str, str], inherited: Any):
+    """Assign a forward relation through its key column; drop a stale one when the key changes.
+
+    `key_columns` maps each forward relation to its foreign-key column.
+    Assigning the column keeps a loaded relation only while the key still
+    points at it, the refresh rule of ADR-0008.
+    """
+    keys = frozenset(key_columns.values())
+
+    def __setattr__(self: BaseModel, name: str, value: Any) -> None:
+        if name in key_columns:
+            _assign_relation(self, name, value, key_columns.keys())
+            return
+        inherited(self, name, value)
+        if name in keys:
+            prune_cached_relations(self)
+
+    return __setattr__
+
+
+# The constructor `ty` reads is the one `Model.__init__` runs: Pydantic's own
+# specifiers plus Ferro's, since a decorator on `Model` loses to this one.
+@dataclass_transform(
+    kw_only_default=True,
+    field_specifiers=(
+        PydanticField,
+        PrivateAttr,
+        NoInitField,
+        Field,
+        Forward,
+        Reverse,
+        ManyToMany,
+    ),
+)
 class ModelMetaclass(type(BaseModel)):
     """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 
@@ -272,12 +883,15 @@ class ModelMetaclass(type(BaseModel)):
             and caller.f_locals is not caller.f_globals
             else None
         )
-        local_relations, fields_to_remove, pending_relations, retired_relations = (
+        local_relations, fields_to_remove, pending_relations = (
             mcs._scan_relationship_annotations(
-                annotations, namespace, name, frame_ns=frame_ns
+                annotations,
+                namespace,
+                name,
+                frame_ns=frame_ns,
+                scope=_defined_names(caller),
             )
         )
-        mcs._inject_shadow_fields(annotations, namespace, local_relations)
         mcs._prepare_namespace_for_pydantic(namespace, annotations, fields_to_remove)
 
         # Phase 2: Class Creation
@@ -310,13 +924,15 @@ class ModelMetaclass(type(BaseModel)):
                 REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
             mcs._register_model(cls, cls.__ferro_identity__, local_relations)
-            ferro_fields = mcs._parse_ferro_field_metadata(cls)
-            cls.ferro_fields = ferro_fields
-            mcs._validate_db_type_options(cls, ferro_fields)
-            mcs._validate_generated_options(cls, ferro_fields)
-            mcs._retire_fields(cls, retired_relations)
+            declared_fields = mcs._parse_ferro_field_metadata(cls)
+            cls.__ferro_fields__ = declared_fields
+            _refuse_foreign_key_options(cls, declared_fields)
+            mcs._validate_db_type_options(cls, declared_fields)
+            mcs._validate_generated_options(cls, declared_fields)
+            mcs._retire_fields(cls)
             mcs._inject_relation_descriptors(cls, local_relations)
             mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
+            check_declared_foreign_keys(cls)
 
             # Spec-derived runtime attributes (read specs at use time everywhere
             # else; these two bake *names only*, which are stable across epochs).
@@ -328,19 +944,26 @@ class ModelMetaclass(type(BaseModel)):
             raise
         if cls.__ferro_generated__:
             cls.__setattr__ = _generated_setattr(cls.__setattr__)
+        key_columns = {
+            field_name: meta.fk_column
+            for field_name, meta in local_relations.items()
+            if isinstance(meta, ForwardRelation)
+        }
+        if key_columns:
+            cls.__setattr__ = _relation_setattr(key_columns, cls.__setattr__)
 
         return cls
 
     @staticmethod
-    def _retire_fields(cls, retired_relations: dict[str, ForeignKey]) -> None:
+    def _retire_fields(cls) -> None:
         """Take the retired fields out of the model (ADR-0053).
 
-        A retired scalar field's column spec is derived here, once, while the
-        field is still a Pydantic field (its annotation resolved, its ``db_type``
-        and enum read the one way every column's are); then the field leaves
-        the Pydantic model, so the model has no attribute, keyword or dump key
-        for it. A retired relation never became a field: the class-body scan
-        kept it out of ``ferro_relations`` and gave it no shadow column.
+        A retired field's column spec is derived here, once, while the field
+        is still a Pydantic field (its annotation resolved, its ``db_type``
+        and enum read the one way every column's are), and kept with its
+        options, from which every compile reads its foreign key again; then
+        the field leaves the Pydantic model, so the model has no attribute,
+        keyword or dump key for it.
 
         Raises:
             TypeError: a retired primary key, a retired field that also
@@ -350,7 +973,7 @@ class ModelMetaclass(type(BaseModel)):
         model = cls.__name__
         retired = {
             field_name: meta
-            for field_name, meta in cls.ferro_fields.items()
+            for field_name, meta in cls.__ferro_fields__.items()
             if getattr(meta, "retired", False)
         }
         for field_name, meta in retired.items():
@@ -368,29 +991,22 @@ class ModelMetaclass(type(BaseModel)):
         if retired:
             specs = build_column_specs(cls)
             retired_fields = {
-                field_name: replace(specs[field_name], nullable=True, retired=True)
-                for field_name in retired
+                field_name: RetiredField(
+                    replace(specs[field_name], nullable=True, retired=True), meta
+                )
+                for field_name, meta in retired.items()
             }
             for field_name in retired:
                 del cls.__pydantic_fields__[field_name]
-                del cls.ferro_fields[field_name]
+                del cls.__ferro_fields__[field_name]
             annotations = dict(cls.__dict__.get("__annotations__", {}))
             for field_name in retired:
                 annotations.pop(field_name, None)
             cls.__annotations__ = annotations
             cls.model_rebuild(force=True, raise_errors=False)
 
-        for field_name, meta in retired_relations.items():
-            refuse_back_ref_over_retired_relation(cls, field_name, meta)
         cls.__ferro_retired_fields__ = retired_fields
-        cls.__ferro_retired_relations__ = retired_relations
-        cls.__ferro_retired_names__ = frozenset(
-            [
-                *retired_fields,
-                *retired_relations,
-                *(f"{field_name}_id" for field_name in retired_relations),
-            ]
-        )
+        cls.__ferro_retired_names__ = frozenset(retired_fields)
 
     @staticmethod
     def _resolve_table_name(name: str, namespace: dict) -> str:
@@ -408,7 +1024,7 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_table__ on model '{name}' must be a str, "
                 f"got {type(configured).__name__}"
             )
-        if len(configured) > 63 or not _TABLE_NAME_RE.match(configured):
+        if not is_table_name(configured):
             raise ValueError(
                 f"__ferro_table__ {configured!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "
@@ -432,120 +1048,13 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_renamed_from__ on model '{name}' must be a str, "
                 f"got {type(declared).__name__}"
             )
-        if len(declared) > 63 or not _TABLE_NAME_RE.match(declared):
+        if not is_table_name(declared):
             raise ValueError(
                 f"__ferro_renamed_from__ {declared!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "
                 "matching [A-Za-z_][A-Za-z0-9_]*"
             )
         return declared
-
-    @staticmethod
-    def _field_ferro_payload(obj: Any) -> dict[str, Any]:
-        """Return Ferro metadata payload from a wrapped FieldInfo."""
-        if not isinstance(obj, FieldInfo):
-            return {}
-        extra = getattr(obj, "json_schema_extra", None)
-        if not isinstance(extra, dict):
-            return {}
-        payload = extra.get(FERRO_FIELD_EXTRA_KEY, {})
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _strip_optional_union(hint: Any) -> Any:
-        """Unwrap ``T | None`` / ``Optional[T]`` to ``T`` for relationship detection."""
-        return _annotation_utils_strip_optional_union(hint)
-
-    @staticmethod
-    def _relationship_marker_from_annotation(hint: Any) -> Any:
-        """Inner type used to inspect relationship annotations."""
-        if get_origin(hint) is Annotated:
-            args = get_args(hint)
-            if args:
-                return ModelMetaclass._strip_optional_union(args[0])
-            return hint
-        return ModelMetaclass._strip_optional_union(hint)
-
-    @staticmethod
-    def _legacy_back_ref_error(field_name: str) -> TypeError:
-        return TypeError(
-            f"Field '{field_name}' uses deprecated BackRef[...] annotation syntax. "
-            "Use Relation[list[T]] = BackRef() for collection back-references."
-        )
-
-    @staticmethod
-    def _relationship_field_payload(
-        field_name: str, hint: Any, namespace: dict
-    ) -> dict[str, Any]:
-        """Return relationship metadata supplied by ferro.Field helpers."""
-        origin = get_origin(hint)
-        default_val = namespace.get(field_name)
-        payload = ModelMetaclass._field_ferro_payload(default_val)
-        if payload:
-            return payload
-
-        if origin is Annotated:
-            for metadata in get_args(hint)[1:]:
-                payload = ModelMetaclass._field_ferro_payload(metadata)
-                if payload:
-                    return payload
-
-        return {}
-
-    @staticmethod
-    def _relation_target_from_annotation(field_name: str, hint: Any) -> Any:
-        """Extract T from Relation[list[T]] for collection relationships."""
-        marker = ModelMetaclass._relationship_marker_from_annotation(hint)
-        if isinstance(marker, str):
-            return ModelMetaclass._relation_target_from_string(field_name, marker)
-        if get_origin(marker) is not Relation:
-            raise TypeError(
-                f"Field '{field_name}' must be annotated as Relation[list[T]] "
-                "when using BackRef(), ManyToMany(), or relationship Field flags."
-            )
-
-        args = get_args(marker)
-        if not args:
-            raise TypeError(f"Field '{field_name}' must specify Relation[list[T]].")
-
-        relation_arg = ModelMetaclass._strip_optional_union(args[0])
-        if get_origin(relation_arg) is not list:
-            raise TypeError(
-                f"Field '{field_name}' must use Relation[list[T]] for collection relationships."
-            )
-
-        inner_args = get_args(relation_arg)
-        if not inner_args:
-            raise TypeError(f"Field '{field_name}' must specify Relation[list[T]].")
-        return ModelMetaclass._strip_optional_union(inner_args[0])
-
-    @staticmethod
-    def _relation_target_from_string(field_name: str, hint: str) -> str:
-        """Extract T from a string ``Relation[list[T]]`` annotation."""
-        normalized = hint.replace(" ", "")
-        prefix = "Relation[list["
-        if not normalized.startswith(prefix) or not normalized.endswith("]]"):
-            raise TypeError(
-                f"Field '{field_name}' must be annotated as Relation[list[T]] "
-                "when using BackRef(), ManyToMany(), or relationship Field flags."
-            )
-        target = normalized[len(prefix) : -2]
-        return target.strip("\"'")
-
-    @staticmethod
-    def _annotation_is_plain_list(hint: Any) -> bool:
-        marker = ModelMetaclass._relationship_marker_from_annotation(hint)
-        if get_origin(marker) is list:
-            return True
-        return isinstance(marker, str) and marker.replace(" ", "").startswith("list[")
-
-    @staticmethod
-    def _annotation_looks_like_back_ref(hint: Any) -> bool:
-        if isinstance(hint, str) and "BackRef" in hint:
-            return True
-        if isinstance(hint, ForwardRef) and "BackRef" in hint.__forward_arg__:
-            return True
-        return False
 
     @staticmethod
     def _resolve_deferred_annotations(namespace: dict) -> dict[str, Any]:
@@ -562,14 +1071,10 @@ class ModelMetaclass(type(BaseModel)):
                 # Format 1: Value (evaluated)
                 return namespace["__annotate_func__"](1)
             except Exception as value_error:
-                if "BackRef[...]" in str(value_error):
-                    raise value_error
                 try:
                     # Format 2: ForwardRef (non-evaluated objects)
                     return namespace["__annotate_func__"](2)
-                except Exception as forward_error:
-                    if "BackRef[...]" in str(forward_error):
-                        raise forward_error
+                except Exception:
                     # #155: was `pass` -> returned {} -> Pydantic then raised the
                     # misleading "non-annotated attribute" on the first class-body
                     # assignment. Surface the REAL cause (PEP 649 deferred-eval
@@ -595,160 +1100,65 @@ class ModelMetaclass(type(BaseModel)):
         namespace: dict,
         model_name: str,
         frame_ns: dict | None = None,
-    ) -> tuple[dict, list, list, dict]:
-        """
-        Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
+        scope: frozenset[str] | None = None,
+    ) -> tuple[dict, list, list]:
+        """Scan annotations for relations (``Forward``, ``Reverse``, ``ManyToMany``).
 
         Returns:
-            (local_relations, fields_to_remove, pending_relations,
-            retired_relations): Relationship metadata, fields to hide from
-            Pydantic, ``(field_name, metadata)`` entries deferred to the
-            Registry's pending-relation queue (flushed under the model's
-            resolved ``__ferro_identity__`` after the class object exists), and
-            the retired ``ForeignKey`` relations (ADR-0053), which leave the
-            class body entirely.
+            (local_relations, fields_to_remove, pending_relations): each
+            relation's record, the fields to hide from Pydantic, and the
+            ``(field_name, record)`` entries deferred to the Registry's
+            pending-relation queue (flushed under the model's resolved
+            ``__ferro_identity__`` after the class object exists).
+
+        Raises:
+            TypeError: A ``ManyToMany`` is retired, or a relation is refused
+                (see `_declared_relation`).
         """
         local_relations = {}
         fields_to_remove = []
         pending_relations = []
-        retired_relations: dict[str, ForeignKey] = {}
 
         for field_name, hint in list(annotations.items()):
-            if ModelMetaclass._annotation_looks_like_back_ref(hint):
-                raise ModelMetaclass._legacy_back_ref_error(field_name)
-
-            relationship_payload = ModelMetaclass._relationship_field_payload(
-                field_name, hint, namespace
-            )
-            is_back_field = relationship_payload.get("back_ref") is True
-            is_m2m_field = relationship_payload.get("many_to_many") is True
-            if relationship_payload.get("retired") is True and (
-                is_back_field or is_m2m_field
-            ):
-                raise _reverse_relation_retired(model_name, field_name, is_m2m_field)
-
-            if is_back_field and is_m2m_field:
-                raise TypeError(
-                    f"Field '{field_name}' cannot be both back_ref and many_to_many."
-                )
-
-            if is_back_field:
-                marker = ModelMetaclass._relationship_marker_from_annotation(hint)
-                if get_origin(marker) is Relation:
-                    ModelMetaclass._relation_target_from_annotation(field_name, hint)
-                elif ModelMetaclass._annotation_is_plain_list(hint):
-                    raise TypeError(
-                        f"Field '{field_name}' uses a plain list annotation. Use "
-                        "Relation[list[T]] = BackRef() for collection back-references."
-                    )
-                local_relations[field_name] = "BackRef"
-                fields_to_remove.append(field_name)
+            # Markers are read from the evaluated annotation, under any `| None`
+            # or `Annotated[...]` wrapper, so every spelling is seen with or
+            # without postponed annotations.
+            evaluated = _evaluated(hint, namespace, frame_ns)
+            marker = _relation_marker(field_name, evaluated, namespace)
+            if marker is None:
                 continue
-
-            if is_m2m_field:
-                target = ModelMetaclass._relation_target_from_annotation(
-                    field_name, hint
+            kind, options, in_metadata = marker
+            if kind == "many_to_many":
+                if options.get("retired") is True:
+                    raise _many_to_many_retired(model_name, field_name)
+                relation = _declared_many_to_many(
+                    model_name,
+                    field_name,
+                    evaluated,
+                    options,
+                    in_metadata=in_metadata,
+                    table=ModelMetaclass._resolve_table_name(model_name, namespace),
+                    namespace=namespace,
+                    scope=scope,
                 )
-                related_name = relationship_payload.get("related_name")
-                if not related_name:
-                    raise TypeError(
-                        f"Field '{field_name}' uses many_to_many=True but did not "
-                        "provide related_name."
-                    )
-                metadata = ManyToManyRelation(
-                    related_name=related_name,
-                    through=relationship_payload.get("through"),
-                    reverse_index=relationship_payload.get("reverse_index", True),
-                )
-                metadata.to = target
-                local_relations[field_name] = metadata
-                pending_relations.append((field_name, metadata))
-                fields_to_remove.append(field_name)
-                continue
-
-            if isinstance(hint, str):
-                hint = evaluate_foreign_key_annotation(
-                    hint,
-                    model=model_name,
-                    field=field_name,
-                    module=namespace.get("__module__", ""),
-                    localns=namespace,
+            else:
+                relation = _declared_relation(
+                    model_name,
+                    field_name,
+                    evaluated,
+                    "Forward" if kind == "forward" else "Reverse",
+                    options[kind],
+                    in_metadata=in_metadata,
+                    namespace=namespace,
+                    annotations=annotations,
                     frame_ns=frame_ns,
+                    scope=scope,
                 )
-            # `Annotated[T, ForeignKey(...)] | None` is the same relation as
-            # `Annotated[T | None, ForeignKey(...)]`.
-            core = ModelMetaclass._strip_optional_union(hint)
-            if get_origin(core) is Annotated:
-                args = get_args(core)
-                for metadata in args:
-                    if isinstance(metadata, ForeignKey):
-                        metadata.relation_annotation = (
-                            args[0] if core is hint else Optional[args[0]]
-                        )
-                        inner = ModelMetaclass._strip_optional_union(args[0])
-                        metadata.to = inner
-                        if metadata.retired:
-                            ModelMetaclass._retire_relation(
-                                model_name, field_name, metadata, annotations, namespace
-                            )
-                            retired_relations[field_name] = metadata
-                            break
-                        local_relations[field_name] = metadata
-                        pending_relations.append((field_name, metadata))
-                        fields_to_remove.append(field_name)
-                        break
+            local_relations[field_name] = relation
+            pending_relations.append((field_name, relation))
+            fields_to_remove.append(field_name)
 
-                    if metadata.__class__.__name__ == "ManyToManyField":
-                        raise TypeError(
-                            "ManyToManyField(...) is no longer supported. Use "
-                            "Relation[list[T]] = ManyToMany(...)."
-                        )
-
-        return local_relations, fields_to_remove, pending_relations, retired_relations
-
-    @staticmethod
-    def _retire_relation(
-        model_name: str,
-        field_name: str,
-        metadata: ForeignKey,
-        annotations: dict,
-        namespace: dict,
-    ) -> None:
-        """Take a retired ``ForeignKey`` out of the class body (ADR-0053).
-
-        The relation gets no descriptor and no shadow ``*_id`` field, so the
-        model has neither attribute; its column is compiled from the
-        ``ForeignKey`` alone (`ferro.columns.retired_column_specs`).
-        """
-        if metadata.renamed_from is not None:
-            raise _retired_and_renamed(model_name, field_name)
-        if not annotation_allows_none(metadata.relation_annotation):
-            raise _retired_not_optional(model_name, field_name, metadata.to)
-        if metadata.nullable is False:
-            raise _retired_not_nullable(model_name, field_name)
-        annotations.pop(field_name, None)
-        namespace.pop(field_name, None)
-
-    @staticmethod
-    def _inject_shadow_fields(
-        annotations: dict, namespace: dict, local_relations: dict
-    ) -> None:
-        """
-        Inject shadow {field_name}_id fields for ForeignKeys.
-
-        When ``ForeignKey.to`` is already a concrete model class, the shadow type is
-        derived from that model's primary key annotation; otherwise a broad fallback
-        union is used until ``resolve_relationships()`` can reconcile it.
-
-        Mutates annotations and namespace in place.
-        """
-        for field_name, metadata in local_relations.items():
-            if isinstance(metadata, ForeignKey):
-                # INJECT SHADOW FIELD into annotations
-                id_field = f"{field_name}_id"
-                annotations[id_field] = shadow_annotation_for_foreign_key(metadata)
-                # Set a default so Pydantic doesn't make it required
-                namespace[id_field] = PydanticField(default=None)
+        return local_relations, fields_to_remove, pending_relations
 
     @staticmethod
     def _prepare_namespace_for_pydantic(
@@ -790,83 +1200,42 @@ class ModelMetaclass(type(BaseModel)):
                     "them to give it a distinct table name."
                 )
         REGISTRY.register(cls)
-        cls.ferro_relations = local_relations
+        cls.__ferro_relations__ = local_relations
 
     @staticmethod
     def _parse_ferro_field_metadata(cls) -> dict[str, FerroField]:
         """
-        Parse Ferro column metadata from model fields.
+        Collect each field's database options from its metadata.
 
-        Sources: ``Annotated[..., FerroField(...)]``, assignment ``Field(...)``
-        (Ferro kwargs live under ``json_schema_extra["ferro_field"]``), and
-        ``Annotated[..., Field(...)]`` (Pydantic merges that ``Field`` into the
-        same ``FieldInfo`` shape as assignment).
+        ``Field(...)`` and ``FerroField(...)`` each leave one ``FerroField``
+        in the field's ``FieldInfo.metadata``, whether assigned or given inside
+        ``Annotated[...]`` (Pydantic merges both into the same ``FieldInfo``).
+        The options never live in ``json_schema_extra``; `build_column_specs`
+        refuses a key there that names one.
 
         Returns:
             Dictionary mapping field names to FerroField metadata
 
         Raises:
-            TypeError: If FerroField is declared twice for the same field
+            TypeError: A field declares its options twice.
         """
-        ferro_fields = {}
+        declared_fields = {}
         for f_name, field_info in cls.model_fields.items():
-            annotated_metadata: FerroField | None = None
-            for metadata in field_info.metadata:
-                if isinstance(metadata, FerroField):
-                    annotated_metadata = metadata
-                    break
-            wrapped_metadata = None
-            extra = getattr(field_info, "json_schema_extra", None)
-            if isinstance(extra, dict):
-                wrapped_payload = extra.get(FERRO_FIELD_EXTRA_KEY)
-                if wrapped_payload:
-                    field_payload = {
-                        key: wrapped_payload[key]
-                        for key in (
-                            "primary_key",
-                            "autoincrement",
-                            "unique",
-                            "index",
-                            "nullable",
-                            "db_type",
-                            "db_check",
-                            "renamed_from",
-                            "retired",
-                        )
-                        if key in wrapped_payload
-                    }
-                    if field_payload:
-                        wrapped_metadata = FerroField(**field_payload)
-            generated = next(
-                (
-                    metadata.func
-                    for metadata in field_info.metadata
-                    if isinstance(metadata, GeneratedExpression)
-                ),
-                None,
-            )
-            if generated is not None:
-                if annotated_metadata:
-                    raise TypeError(
-                        f"Field '{f_name}' cannot declare Ferro field metadata twice "
-                        "(Annotated[..., FerroField(...)] + ferro.Field(generated=...)); "
-                        "pass generated= to the one FerroField."
-                    )
-                wrapped_metadata = wrapped_metadata or FerroField()
-                wrapped_metadata.generated = generated
-
-            if annotated_metadata and wrapped_metadata:
+            declared = [
+                metadata
+                for metadata in field_info.metadata
+                if isinstance(metadata, FerroField)
+            ]
+            if len(declared) > 1:
                 raise TypeError(
                     f"Field '{f_name}' cannot declare Ferro field metadata twice "
-                    "(Annotated[...] + ferro.Field(...))."
+                    "(Annotated[..., FerroField(...)] + ferro.Field(...)); give "
+                    "every option to one of them."
                 )
+            if declared:
+                declared_fields[f_name] = declared[0]
 
-            if annotated_metadata:
-                ferro_fields[f_name] = annotated_metadata
-            elif wrapped_metadata:
-                ferro_fields[f_name] = wrapped_metadata
-
-        return ferro_fields
+        return declared_fields
 
     @staticmethod
     def _register_enum_fields(cls) -> None:
@@ -930,7 +1299,7 @@ class ModelMetaclass(type(BaseModel)):
             )
 
     @staticmethod
-    def _validate_db_type_options(cls, ferro_fields: dict) -> None:
+    def _validate_db_type_options(cls, declared_fields: dict) -> None:
         """Strict validation of ``Field(db_type=..., db_check=...)`` combinations.
 
         Runs at class-definition time (Phase 3) so incoherent combinations
@@ -945,7 +1314,7 @@ class ModelMetaclass(type(BaseModel)):
 
         model_fields = getattr(cls, "model_fields", {})
 
-        for field_name, metadata in ferro_fields.items():
+        for field_name, metadata in declared_fields.items():
             db_type = getattr(metadata, "db_type", None)
             db_check = getattr(metadata, "db_check", False)
             if db_type is None and not db_check:
@@ -977,13 +1346,13 @@ class ModelMetaclass(type(BaseModel)):
                     )
 
     @staticmethod
-    def _validate_generated_options(cls, ferro_fields: dict) -> None:
+    def _validate_generated_options(cls, declared_fields: dict) -> None:
         """Refuse `generated=` beside an option the database cannot honour.
 
         A generated column's value comes only from its expression, so it has
         no key, sequence, default or enum check of its own.
         """
-        for field_name, metadata in ferro_fields.items():
+        for field_name, metadata in declared_fields.items():
             if getattr(metadata, "generated", None) is None:
                 continue
             field_info = cls.model_fields[field_name]
@@ -1013,35 +1382,22 @@ class ModelMetaclass(type(BaseModel)):
     @staticmethod
     def _inject_relation_descriptors(cls, local_relations: dict) -> None:
         """
-        Inject descriptors for relationship fields (ForeignKey, ManyToMany).
+        Inject a forward relation's descriptor; a reverse one or a many-to-many
+        gets its descriptor when relations resolve.
 
         Mutates cls in place.
         """
         for field_name, metadata in local_relations.items():
-            if isinstance(metadata, ForeignKey):
-                target_name = (
-                    metadata.to
-                    if isinstance(metadata.to, str)
-                    else (
-                        metadata.to.__name__
-                        if hasattr(metadata.to, "__name__")
-                        else str(metadata.to)
-                    )
-                )
-                if isinstance(metadata.to, ForwardRef):
-                    target_name = metadata.to.__forward_arg__
-                target_name = (
-                    metadata.to.__ferro_identity__
-                    if hasattr(metadata.to, "__ferro_identity__")
-                    else target_name
-                )
-
+            if isinstance(metadata, ForwardRelation):
+                target = metadata.to
                 setattr(
                     cls,
                     field_name,
                     ForwardDescriptor(
-                        target_model_name=target_name,
+                        target_model_name=getattr(target, "__ferro_identity__", target)
+                        or "",
                         field_name=field_name,
+                        fk_column=metadata.fk_column,
                     ),
                 )
             else:

@@ -9,15 +9,12 @@ from typing import Annotated
 import pytest
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
     InterfaceError,
     IntegrityError,
     Model,
     NotNullViolationError,
     OperationalError,
-    Relation,
     UniqueViolationError,
     connect,
     engines,
@@ -110,12 +107,11 @@ async def test_foreign_key_violation_is_typed(db_url, db_backend):
     class FkAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        books: Relation[list["FkBook"]] = BackRef()
 
     class FkBook(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[FkAuthor, ForeignKey(related_name="books")]
+        author_id: Annotated[int, FerroField(foreign_key=FkAuthor)]
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
@@ -134,13 +130,12 @@ async def test_restrict_parent_instance_delete_is_typed(db_url, db_backend):
     class RestrictDelParent(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        kids: Relation[list["RestrictDelChild"]] = BackRef()
 
     class RestrictDelChild(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        parent: Annotated[
-            RestrictDelParent, ForeignKey(related_name="kids", on_delete="RESTRICT")
+        parent_id: Annotated[
+            int, FerroField(foreign_key=RestrictDelParent, on_delete="RESTRICT")
         ]
 
     await connect(db_url, auto_migrate=True)
@@ -166,13 +161,12 @@ async def test_restrict_parent_query_delete_is_typed(db_url, db_backend):
     class RestrictQDelParent(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        kids: Relation[list["RestrictQDelChild"]] = BackRef()
 
     class RestrictQDelChild(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        parent: Annotated[
-            RestrictQDelParent, ForeignKey(related_name="kids", on_delete="RESTRICT")
+        parent_id: Annotated[
+            int, FerroField(foreign_key=RestrictQDelParent, on_delete="RESTRICT")
         ]
 
     await connect(db_url, auto_migrate=True)

@@ -17,8 +17,8 @@ from typing import Annotated
 
 from pydantic import SecretStr
 
-from ferro import BackRef, Model, Relation
-from ferro.base import FerroField, ForeignKey
+from ferro import Forward, Model, Relation
+from ferro.base import FerroField
 from ferro.query.builder import Query
 from ferro.query.wire import compile_query
 
@@ -26,20 +26,20 @@ from ferro.query.wire import compile_query
 class CQLedger(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    accounts: Relation[list["CQAccount"]] = BackRef()
 
 
 class CQAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    ledger: Annotated[CQLedger, ForeignKey(related_name="accounts")]
-    transactions: Relation[list["CQTransaction"]] = BackRef()
+    ledger_id: Annotated[int, FerroField(foreign_key=CQLedger)]
+    ledger: Relation[CQLedger] = Forward("ledger_id")
 
 
 class CQTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[CQAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=CQAccount)]
+    account: Relation[CQAccount] = Forward("account_id")
 
 
 def test_compiled_query_carries_wire_json_payload_and_hop_classes():

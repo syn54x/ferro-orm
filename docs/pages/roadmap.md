@@ -43,9 +43,9 @@ The query sums views per author, and the list comprehension keeps the groups abo
 
 A projected `Row` types its fields as `Any` on access, so `row.total` above does not check as `int | None`. Inferring a type per field from the selector is [tracked here](https://github.com/syn54x/ferro-orm/issues/290).
 
-### Reverse and many-to-many population
+### Reverse and many-to-many loading
 
-[`include()`](guide/queries.md#populating-relations-with-include) populates forward foreign keys in one statement. Populating `BackRef` collections and many-to-many sets is not built: it needs a separate mechanism, a batched second query stitched onto the results. Until then, each awaited collection is its own query:
+[`include()`](guide/queries.md#loading-relations-with-include) loads forward relations in one statement. Loading `Reverse` collections and `ManyToMany` sets is not built: it needs a separate mechanism, a batched second query stitched onto the results. Until then, each awaited collection is its own query:
 
 ```python {test=run prelude=reference}
 authors = await Author.all()

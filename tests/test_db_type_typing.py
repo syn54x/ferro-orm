@@ -23,7 +23,7 @@ def test_field_accepts_db_type_token_literal():
         id: int | None = Field(default=None, primary_key=True)
         name: str = Field(db_type=token)
 
-    assert Doc.ferro_fields["name"].db_type == "text"
+    assert Doc.__ferro_fields__["name"].db_type == "text"
 
 
 def test_field_accepts_varchar_helper():
@@ -31,7 +31,7 @@ def test_field_accepts_varchar_helper():
         id: int | None = Field(default=None, primary_key=True)
         code: str = Field(db_type=varchar(64))
 
-    assert Doc.ferro_fields["code"].db_type == "varchar(64)"
+    assert Doc.__ferro_fields__["code"].db_type == "varchar(64)"
 
 
 def test_json_tokens_are_dbtypetoken_literals():

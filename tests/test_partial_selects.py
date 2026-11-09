@@ -20,7 +20,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import FerroField, ForeignKey, Model, Relation, BackRef
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro.query import ProjectedQuery, Query, Row, Rows
 
 pytestmark = pytest.mark.backend_matrix
@@ -34,14 +34,15 @@ pytestmark = pytest.mark.backend_matrix
 class PSAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    transactions: Relation[list["PSTransaction"]] = BackRef()
+    transactions: Relation[list["PSTransaction"]] = Reverse("account_id")
 
 
 class PSTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
     note: str = ""
-    account: Annotated[PSAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=PSAccount)]
+    account: Relation[PSAccount] = Forward("account_id")
 
 
 class PSTier(StrEnum):
@@ -67,7 +68,9 @@ async def _seed_transactions():
     acct = PSAccount(id=1, label="a1")
     await acct.save()
     for i, amount in enumerate((10, 20, 30), start=1):
-        await PSTransaction(id=i, amount=amount, note=f"n{i}", account=acct).save()
+        await PSTransaction(
+            id=i, amount=amount, note=f"n{i}", account_id=acct.id
+        ).save()
     return acct
 
 
@@ -261,8 +264,8 @@ async def test_string_selectors_behave_identically_to_the_lambda_form(db_url):
 
 
 @pytest.mark.asyncio
-async def test_string_selector_projects_shadow_fk_column(db_url):
-    """Shadow ``{fk}_id`` columns are queryable columns, so they project."""
+async def test_string_selector_projects_fk_column(db_url):
+    """Foreign-key columns are queryable columns, so they project."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_transactions()
@@ -363,7 +366,7 @@ async def test_projection_composes_with_relation_traversal_predicate(db_url):
         acct = await _seed_transactions()
         other = PSAccount(id=2, label="b1")
         await other.save()
-        await PSTransaction(id=9, amount=99, note="other", account=other).save()
+        await PSTransaction(id=9, amount=99, note="other", account_id=other.id).save()
 
         rows = await (
             PSTransaction.select(lambda t: (t.id, t.amount))

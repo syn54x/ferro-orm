@@ -1,7 +1,7 @@
 """The PK fact is derived once at class-body compile and cached on the class.
 
 ``__ferro_pk__`` is set at the compile choke point (the same site that attaches
-``__ferro_columns__``), so every consumer — save, descriptors, shadow-FK typing,
+``__ferro_columns__``), so every consumer — save, descriptors, foreign-key column typing,
 traversal — reads one cached fact instead of re-looping the column specs.
 At most one ``primary_key=True`` column is legal; the violation raises at class
 definition time (ADR-0002's flagged follow-up). Zero PKs stays a legal
@@ -10,12 +10,9 @@ need a PK raise clear errors instead of guessing (the old silent ``"id"``
 fallback).
 """
 
-from typing import Annotated
-
 import pytest
 
-from ferro import Field, Model
-from ferro.base import ForeignKey
+from ferro import Field, Forward, Model, Relation
 
 
 @pytest.fixture(autouse=True)
@@ -72,4 +69,5 @@ def test_fk_to_pkless_target_is_refused_at_declaration_instead_of_guessing_id():
 
         class PkGuessReferrer(Model):
             id: int | None = Field(default=None, primary_key=True)
-            target: Annotated[PkLessTarget, ForeignKey(related_name="referrers")]
+            target_id: int = Field(foreign_key=PkLessTarget)
+            target: Relation[PkLessTarget] = Forward("target_id")

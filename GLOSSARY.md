@@ -21,7 +21,7 @@ Replacing an existing materialized view by dropping and recreating it when its d
 _Avoid_: Alter, migrate, update
 
 **Materialized view column**:
-A flat, typed field on a `MaterializedView` — same declarations as `Model` fields, but no `ForeignKey`, `BackRef`, or `ManyToMany`. Reference related entities by scalar columns (`order_id: int`), not relations.
+A flat, typed field on a `MaterializedView` — same declarations as `Model` fields, but no `Forward`, `Reverse` or `ManyToMany`. Reference related entities by scalar columns (`order_id: int`), not relations.
 _Avoid_: Relation column, FK field
 
 **Materialized query**:
@@ -48,16 +48,32 @@ _Avoid_: Object field, blob field, document column
 The single authoritative record of one column's facts — identity, type, and constraints — derived exactly once from the field declaration. Provisional at class-body time; authoritative once relationship resolution completes.
 _Avoid_: Column metadata, enriched schema property, field dict
 
+**Field option**:
+A database setting declared on one model field (`primary_key`, `unique`, `index`, `db_type`, `foreign_key`, `on_delete`, `renamed_from`, `retired`, `generated`), stored on the field and never printed in its JSON schema.
+_Avoid_: `ferro_field`, raw path, column option
+
+**Foreign-key column**:
+A column the model declares with `Field(foreign_key=Target)`, holding the target's primary-key value. Its constraint, `fk_<table>_<column>_<target table>`, and its index are derived from the declaration; a *forward relation* names it. Its nullability comes from its annotation alone (`int | None`), never `nullable=`; rename and retirement are its own options.
+_Avoid_: shadow column, shadow FK, `*_id` column, injected column, reference column
+
+**Forward relation**:
+A typed view over one foreign-key column of its own model, declared `team: Relation[Team] = Forward("team_id")`. It reads as the related instance: complete when an include or `.load()` filled it, otherwise holding only its key (see *Complete-instance invariant*).
+_Avoid_: Belongs-to, parent link, FK field, forward-FK, forward foreign key, foreign key relation
+
+**Reverse relation**:
+A query over the rows of another model whose foreign-key column points at this instance, declared `players: Relation[list["Player"]] = Reverse("team_id")`. It is always a query, at every cardinality; a one-to-one's reverse side reads with `.first()`.
+_Avoid_: BackRef, back-reference, has-many, related_name
+
 **Relation traversal**:
-Attribute access on a declared forward-FK field inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
+Attribute access on a declared forward relation inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
 _Avoid_: Join inference, nested filter, path lookup, string path
 
 **Relation path**:
-The ordered sequence of forward-FK hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
+The ordered sequence of forward-relation hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
 _Avoid_: Join alias, lookup chain, dotted path string
 
 **Existence test**:
-The only predicate form on a reverse or many-to-many relation — `t.lines.exists(...)` — asking whether at least one related row exists, optionally scoped by a full inner predicate over the related model. Renders as a correlated EXISTS; the result stays root-shaped (shape-preserving query), so it composes with any other predicate, ordering, and paging. Reverse relations are *tested*, never *traversed*: traversal remains a forward-FK concept.
+The only predicate form on a reverse or many-to-many relation — `t.lines.exists(...)` — asking whether at least one related row exists, optionally scoped by a full inner predicate over the related model. Renders as a correlated EXISTS; the result stays root-shaped (shape-preserving query), so it composes with any other predicate, ordering, and paging. Reverse relations are *tested*, never *traversed*: traversal remains a forward-relation concept.
 _Avoid_: membership filter, semi-join filter, reverse traversal, subquery filter, `.any()`
 
 **Shape-preserving query**:
@@ -65,8 +81,12 @@ The invariant that filtering and ordering never change what a query returns — 
 _Avoid_: Implicit projection, row narrowing
 
 **Complete-instance invariant**:
-A model instance always carries a complete row — there is no such thing as a partial or deferred-field model instance, anywhere. Anything narrower than a full row (a column subset, an aggregate) comes back as a projected record, never as the model type.
+A model instance is complete or unloaded, never anything between. A complete instance carries its whole row. An unloaded instance stands behind a forward relation nothing has loaded, holds only its primary key, and refuses every other column until `include()` or `.load()` fills it in place. Anything narrower than a row (a column subset, an aggregate) is a projected record, never the model type.
 _Avoid_: Partial instance, deferred field, lightweight model, .only()
+
+**Unloaded instance**:
+The instance a forward relation reads as before anything loads it: a real instance of the target model holding only its primary key, shared with the session's identity map, filled in place by `include()`, `.load()` or any later fetch of its row. An include that finds no row leaves it unloaded. Reading another column, assigning one, saving or dumping it is refused with the fix.
+_Avoid_: Stub, proxy, placeholder, lazy reference, partial instance
 
 **Projected record**:
 The result of an explicit projection — a typed record of named values that is not a model instance and cannot be saved, refreshed, or identity-mapped. Column subsets and aggregation results are projected records; complete model rows are not. Realized as `Row`, delivered in the list-like `Rows` container.
@@ -77,15 +97,15 @@ A class tied to one model that carries its data across the application's boundar
 _Avoid_: Shape, schema, API model, serializer
 
 **Include**:
-The explicit request (`.include(lambda t: t.account.owner)`) that a query populate a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path populates every hop along it and never changes which rows come back.
+The explicit request (`.include(lambda t: t.account.owner)`) that a query load a forward relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path loads every hop along it and never changes which rows come back.
 _Avoid_: Eager load, select_related, prefetch, join-fetch
 
-**Populated relation**:
-A forward-FK field carrying its complete related instance, attached by an explicit include on the query. Attribute access returns the instance directly — no await, no query — matching the field's declared type. An unpopulated relation keeps the awaitable contract; population changes cost and attached data, never the result type (there is no separate "loaded" model type).
-_Avoid_: Eager-loaded field, select_related, prefetched attribute, joined attribute
+**Loaded relation**:
+A forward relation whose instance is complete, filled by an explicit `include()` on the query or by `.load()` on the instance. Reading it returns the instance directly, with no query. A refresh keeps the load only while the foreign key still points at it.
+_Avoid_: Populated relation, eager-loaded field, select_related, prefetched attribute
 
 **Materialization plan**:
-A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
+A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a loaded instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
 _Avoid_: Select list, projection spec, hydration mode flag
 
 **QueryIR payload**:
@@ -97,7 +117,7 @@ The QueryIR window over matching rows: a size (`limit`) and a start. A start is 
 _Avoid_: pagination, cursor, page filter
 
 **Position**:
-The ordered tuple of a query's order-key values that marks one row's place in that order. Two rows never share a position: the order keys include the model's primary key. A non-PK slot may be empty (`None`); the PK slot may not. `after`/`before` start the page from a position; `position_of` reads one off a model instance, or off a projected record that carries every order key. Traversed order keys require those relations populated. Not a cursor — encoding is the caller's.
+The ordered tuple of a query's order-key values that marks one row's place in that order. Two rows never share a position: the order keys include the model's primary key. A non-PK slot may be empty (`None`); the PK slot may not. `after`/`before` start the page from a position; `position_of` reads one off a model instance, or off a projected record that carries every order key. Traversed order keys require those relations loaded. Not a cursor — encoding is the caller's.
 _Avoid_: cursor, bookmark, page token, keyset
 
 **Order key**:
@@ -121,7 +141,7 @@ A projection containing at least one aggregate field. Each group collapses to ex
 _Avoid_: Group-by query, summary query, rollup, partition
 
 **Traversed projection**:
-A projected record field whose source column lives across a forward-FK relation path (`select(lambda t: t.account.name)`). Projection traversal narrows exactly like predicate traversal (ADR-0006). Unaliased, the field takes the bare leaf column name; two selected fields sharing an output name is a build-time error, resolved with an output alias.
+A projected record field whose source column lives across a forward relation path (`select(lambda t: t.account.name)`). Projection traversal narrows exactly like predicate traversal (ADR-0006). Unaliased, the field takes the bare leaf column name; two selected fields sharing an output name is a build-time error, resolved with an output alias.
 _Avoid_: Nested select, join column, related-field pull
 
 **Output alias**:
@@ -141,7 +161,7 @@ The per-model state installed when a class body finishes executing — enough fo
 _Avoid_: Import-time registration, partial registry
 
 **Resolved registration**:
-The registry epoch after relationship resolution completes — join tables exist, shadow FK columns are wired, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
+The registry epoch after relationship resolution completes — join tables exist, foreign-key columns are known, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
 _Avoid_: Final registration, committed registry
 
 **Migration strategy**:
@@ -295,7 +315,7 @@ One *target dialect*'s SQL for a DDL step. Every DDL step has a rendering for ev
 _Avoid_: Variant, dialect file, translation
 
 **Schema change**:
-A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a back-reference) is not a schema change and generates no migration.
+A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a reverse relation) is not a schema change and generates no migration.
 _Avoid_: Model change, diff, IR change
 
 **Rename hint**:
@@ -396,7 +416,7 @@ A named boolean invariant over one row of one table, declared on the model as a 
 _Avoid_: table-level check, multi-column check, composite check, row check
 
 **Check predicate**:
-The lambda body of a table check — a ferro predicate over that model's own columns (or a forward-FK null test on the relation or its shadow `*_id`), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
+The lambda body of a table check — a ferro predicate over that model's own columns (or a null test on the relation or its foreign-key column), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
 _Avoid_: check SQL, constraint expression, check body
 
 **Session settings**:
@@ -424,7 +444,7 @@ Drop-and-recreate of a ferro-owned row policy whose live catalog entry no longer
 _Avoid_: Policy alter, policy sync, RLS drift repair
 
 **Retired column**:
-A column the model still declares but that this release's code neither reads nor writes: it is absent from the model's attributes and from every statement the model issues, and it stays in the *schema snapshot*, nullable, so a database built fresh still has it and *historical models* still see it. Retiring a required column is the change that makes it nullable; nothing else about the column changes until the declaration is deleted, which is the drop: its index, unique, check, foreign key, and every *table check*, *row policy*, composite index or unique that names it stay as declared. Only a scalar field or a `ForeignKey` field can be retired; a back-reference over a retired foreign key cannot exist, a join table is a table.
+A column the model still declares but that this release's code neither reads nor writes: it is absent from the model's attributes and from every statement the model issues, and it stays in the *schema snapshot*, nullable, so a database built fresh still has it and *historical models* still see it. Retiring a required column is the change that makes it nullable; nothing else about the column changes until the declaration is deleted, which is the drop: its index, unique, check, foreign key, and every *table check*, *row policy*, composite index or unique that names it stay as declared. Only a field can be retired, a foreign-key column included; a relation over a retired foreign-key column cannot exist, and a join table is a table.
 _Avoid_: Deprecated column, hidden column, ignored field, soft-dropped column
 
 **Retired label**:

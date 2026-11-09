@@ -34,8 +34,8 @@ A Ferro model is a Pydantic model: annotated fields become columns, and defaults
 
 - `Field(default=None, primary_key=True)` marks `id` as the primary key. The type is `int | None` because the database assigns the value on insert.
 - `Field(unique=True)` adds a unique constraint, and `default_factory` gives each post a creation timestamp in UTC.
-- `Annotated[Author, ForeignKey(related_name="posts")]` declares the many-to-one side: each `Post` stores an `author_id` column that points at an `Author`.
-- `Relation[list["Post"]] = BackRef()` declares the reverse side, so `author.posts` becomes a query for that author's posts. `related_name="posts"` links the two.
+- `author_id` with `Field(foreign_key=Author)` is a foreign-key column: each `Post` stores the id of its `Author`. `author: Relation[Author] = Forward("author_id")` reads that author through it.
+- `posts: Relation[list["Post"]] = Reverse("author_id")` declares the reverse side, so `author.posts` becomes a query for the posts whose `author_id` is that author's.
 
 ## Connect
 
@@ -57,7 +57,7 @@ Create an author and a first post, then insert two more posts in one statement w
 --8<-- "docs/examples/quickstart.py:create"
 ```
 
-`create()` validates the data, inserts one row and returns the instance with its database-assigned `id`. Passing the instance (`author=alice`) sets the foreign key. A duplicate unique value raises [`UniqueViolationError`](../api/exceptions.md); `create()` never overwrites a row. `bulk_create()` writes the whole batch at once, so use it whenever you load more than a handful of rows. The table now holds three posts.
+`create()` validates the data, inserts one row and returns the instance with its database-assigned `id`. Passing `author_id=alice.id` sets the foreign key. A duplicate unique value raises [`UniqueViolationError`](../api/exceptions.md); `create()` never overwrites a row. `bulk_create()` writes the whole batch at once, so use it whenever you load more than a handful of rows. The table now holds three posts.
 
 ## Query
 
@@ -93,7 +93,7 @@ Load a post's author, then the author's published posts:
 --8<-- "docs/examples/quickstart.py:relationships"
 ```
 
-Awaiting the foreign key (`post.author`) loads the related `Author`. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
+`post.author` is a forward relation: it reads as the `Author` its `author_id` points at. That is the complete instance an `include()` or `.load()` filled, or the session's instance for that key (here `alice`, created in this session), or else an unloaded `Author` holding only the key, which `.load()` fills in place and returns. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
 
 ## Update and delete
 
@@ -132,7 +132,7 @@ Pick a path by what you are building.
 For an API with FastAPI, Starlette or similar:
 
 1. [Models and fields](../guide/models-and-fields.md) covers field types, constraints and defaults.
-2. [Relationships](../guide/relationships.md) covers foreign keys, back-references and many-to-many.
+2. [Relationships](../guide/relationships.md) covers foreign-key columns, forward and reverse relations and many-to-many.
 3. [Queries](../guide/queries.md) covers filtering, ordering and slicing.
 4. [Pagination](../howto/pagination.md) shows offset and cursor pagination.
 5. [Testing](../howto/testing.md) shows fast, isolated tests on in-memory SQLite.

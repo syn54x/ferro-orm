@@ -302,7 +302,9 @@ class RtlPlain(Model):
 def test_a_model_without_retired_labels_gains_no_setattr_or_validator():
     assert RtlPlain.__setattr__ is Model.__setattr__
     assert RtlPlain.model_fields["status"].metadata == []
-    assert Model.__setattr__ is BaseModel.__setattr__
+    # Model's own __setattr__ is the unloaded-instance guard (ADR-0063);
+    # retired labels add nothing on top of it.
+    assert Model.__setattr__ is not BaseModel.__setattr__
 
 
 @pytest.mark.parametrize("validate_assignment", [False, True])

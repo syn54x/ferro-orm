@@ -15,7 +15,7 @@ import pytest
 from pydantic import SecretBytes, SecretStr
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro._core import _catalog_query_count_for_test
 from ferro.exceptions import DataError
 from ferro.models import _FERRO_PERSISTED_ATTR
@@ -181,11 +181,12 @@ async def test_include_of_a_mismatched_target_refuses_but_the_root_alone_loads(d
     class Vault(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         secret: SecretBytes
-        keys: Relation[list["Key"]] = BackRef()
+        keys: Relation[list["Key"]] = Reverse("vault_id")
 
     class Key(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        vault: Annotated[Vault | None, ForeignKey(related_name="keys")] = None
+        vault_id: Annotated[int | None, FerroField(foreign_key=Vault)] = None
+        vault: Relation[Vault | None] = Forward("vault_id")
 
     await ferro.connect(db_url)
     async with ferro.engines.session():
@@ -237,11 +238,12 @@ async def test_projection_through_a_relation_checks_the_hop_column(db_url, live)
     class Vault(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         secret: SecretBytes
-        keys: Relation[list["Key"]] = BackRef()
+        keys: Relation[list["Key"]] = Reverse("vault_id")
 
     class Key(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        vault: Annotated[Vault | None, ForeignKey(related_name="keys")] = None
+        vault_id: Annotated[int | None, FerroField(foreign_key=Vault)] = None
+        vault: Relation[Vault | None] = Forward("vault_id")
 
     await ferro.connect(db_url)
     async with ferro.engines.session():

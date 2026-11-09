@@ -16,6 +16,7 @@ instead of string-matching driver messages:
         - `CheckViolationError`
     - `ModelDoesNotExist`: no row matched the primary key (also a
       `LookupError`).
+    - `InstanceNotLoaded`: an unloaded instance was asked for a column.
 
 Exceptions raised from the Rust core keep the driver's message and, where
 the backend reports them, the SQLSTATE code and the violated constraint's
@@ -121,7 +122,7 @@ class UniqueViolationError(IntegrityError):
 class ForeignKeyViolationError(IntegrityError):
     """A `FOREIGN KEY` constraint rejected the statement.
 
-    Includes a parent delete blocked by `ForeignKey(on_delete="RESTRICT")`.
+    Includes a parent delete blocked by `Field(foreign_key=..., on_delete="RESTRICT")`.
     PostgreSQL 18 reports SQLSTATE `23001` for that case; PostgreSQL 17
     reports `23503`. `sqlstate` is the raw driver code.
     """
@@ -174,3 +175,41 @@ class ModelDoesNotExist(FerroError, LookupError):
 
     def __reduce__(self):
         return (self.__class__, (self.model, self.pk))
+
+
+class InstanceNotLoaded(FerroError):
+    """An unloaded instance was asked for more than its primary key.
+
+    A forward relation nothing loaded reads as an unloaded instance of its
+    model, holding only its primary key. Reading another column, assigning
+    one, `save()`, `model_dump()` and `model_dump_json()` raise this error,
+    whose message names the fix: load the relation with `include()` on the
+    query, or call `.load()` on the instance. It is not an
+    `AttributeError`, so `hasattr()` and `getattr()` with a default raise it
+    too, and a Pydantic model built `from_attributes` never mistakes the
+    missing column for an absent one. See
+    [Loaded relations](../guide/queries.md#loading-relations-with-include).
+
+    Serializing the instance any other way, nested in another model, through
+    a `TypeAdapter` or as a response model, raises Pydantic's
+    `PydanticSerializationError` instead, with this error's message inside
+    it; in Python mode this error is its `__cause__`. See
+    [The unloaded instance](../concepts/identity-map.md#the-unloaded-instance).
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import InstanceNotLoaded
+
+        async with engines.session():  # a session that holds no author yet
+            post = await Post.get(1)
+            try:
+                post.author.name
+            except InstanceNotLoaded as error:
+                assert "await post.author.load()" in str(error)
+            else:
+                raise AssertionError("expected InstanceNotLoaded")
+
+            author = await post.author.load()
+            assert author.name == "Ada Lovelace"
+        ```
+    """

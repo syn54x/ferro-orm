@@ -18,6 +18,7 @@ FerroError
 │   ├── NotNullViolationError
 │   └── CheckViolationError
 ├── ModelDoesNotExist       (also a LookupError)
+├── InstanceNotLoaded
 ├── SettingsError           the project configuration is missing a key, malformed, or contradicts itself
 └── MigrationRefused        a migration call refused; .report says how far it got
     ├── PendingMigrationsError
@@ -28,7 +29,8 @@ FerroError
 ```
 
 `ForeignKeyViolationError` covers every foreign-key rejection: a dangling
-insert, and deleting a row still referenced by `ForeignKey(on_delete="RESTRICT")`.
+insert, and deleting a row still referenced by a foreign-key column declared
+`Field(foreign_key=..., on_delete="RESTRICT")`.
 Catch the type, not a SQLSTATE. On PostgreSQL 17 that RESTRICT delete
 reports `23503`; PostgreSQL 18 reports `23001` (`restrict_violation`).
 Both are this class. `exc.sqlstate` is the raw driver code; Ferro does not
@@ -108,5 +110,7 @@ committed before the failure.
 ::: ferro.CheckViolationError
 
 ::: ferro.ModelDoesNotExist
+
+::: ferro.InstanceNotLoaded
 
 ::: ferro.SettingsError

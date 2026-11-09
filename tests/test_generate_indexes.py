@@ -190,7 +190,7 @@ def test_an_underscore_join_collision_is_its_own_index_step_both_ways(project, p
 def test_a_foreign_key_removed_from_a_kept_column_is_dropped_and_its_down_adds_it(
     project, pkg, db
 ):
-    """``team: Annotated[Team, ForeignKey(...)]`` becomes ``team_id: int``: the
+    """``team_id`` loses its ``foreign_key=Team`` and stays a plain column: the
     column stays, its constraint goes. No emitter planned it before (ADR-0051)."""
     start(project, pkg, db, LINKED)
 

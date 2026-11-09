@@ -6,18 +6,18 @@ the richer root-column ``where()`` dialect and its rejection rules (ADR-0016).
 
 import json
 from enum import StrEnum
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 import pytest
 
 from ferro import (
-    BackRef,
     Check,
     CheckViolationError,
     Field,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     engines,
@@ -272,7 +272,6 @@ def test_still_rejected_predicate_forms(predicate, expected):
     class RejectOwner(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str | None = None
-        rejects: Relation[list["Rejecting"]] = BackRef()
 
     with pytest.raises(TypeError, match=expected):
 
@@ -281,14 +280,13 @@ def test_still_rejected_predicate_forms(predicate, expected):
 
             id: int | None = Field(default=None, primary_key=True)
             amount: int = 0
-            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = (
-                None
-            )
-            notes: Relation[list["RejectNote"]] = BackRef()
+            owner_id: int | None = Field(default=None, foreign_key=RejectOwner)
+            owner: Relation[RejectOwner | None] = Forward("owner_id")
+            notes: Relation[list["RejectNote"]] = Reverse("rejecting_id")
 
         class RejectNote(Model):
             id: int | None = Field(default=None, primary_key=True)
-            rejecting: Annotated[Rejecting, ForeignKey(related_name="notes")]
+            rejecting_id: int = Field(foreign_key=Rejecting)
 
 
 # ---------------------------------------------------------------------------

@@ -1117,8 +1117,9 @@ def validate_query_column(model_cls: type, name: str) -> str:
         `name`, unchanged.
 
     Raises:
-        AttributeError: The model has no such column. The message suggests
-            the closest column or relation name and lists the valid ones.
+        AttributeError: The model has no such column. A forward relation's
+            name gets its foreign-key column; any other name gets the
+            closest column or relation name and the list of valid ones.
         TypeError: `model_cls` is not a Ferro model.
     """
     valid = getattr(model_cls, "__ferro_query_columns__", None)
@@ -1129,10 +1130,16 @@ def validate_query_column(model_cls: type, name: str) -> str:
         )
     if name in valid:
         return name
-    # A valid relation name never reaches here (proxies resolve relations
-    # before column validation), but relation field names still enrich the
-    # did-you-mean pool so a typo close to a relation gets the right hint.
     relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    if name in relations:
+        raise AttributeError(
+            f"{model_cls.__name__} has no queryable column {name!r}: it is a "
+            f"relation. Its foreign-key column is {relations[name].fk_column!r}.",
+            name=name,
+            obj=model_cls,
+        )
+    # Relation names enrich the did-you-mean pool so a typo close to a
+    # relation gets the right hint.
     suggestions = sorted(set(valid) | set(relations))
     close = difflib.get_close_matches(name, suggestions, n=1)
     hint = f" Did you mean {close[0]!r}?" if close else ""
@@ -1141,7 +1148,7 @@ def validate_query_column(model_cls: type, name: str) -> str:
     )
     # `name`/`obj` carry the failing attribute and its model structurally
     # (PEP 678-era AttributeError metadata), so callers with a sharper story
-    # for a specific name — include()'s BackRef/M2M guardrail (#287) — can
+    # for a specific name — include()'s reverse/M2M guardrail (#287) — can
     # re-raise pointedly without parsing this message.
     raise AttributeError(
         f"{model_cls.__name__} has no queryable column {name!r}."
@@ -1158,7 +1165,7 @@ class QueryProxy(Generic[TModel]):
     Reading a field gives a `FieldProxy` for that column, so
     `lambda post: post.views > 1000` builds a condition. A misspelled name
     raises `AttributeError` with the closest match, before any SQL runs. A
-    foreign key relation gives a stand-in for the related row
+    forward relation gives a stand-in for the related row
     (`post.author.name`), and a reverse or many-to-many relation offers
     `exists()` (`author.posts.exists()`). See
     [Typed query predicates](../concepts/query-typing.md).
@@ -1184,7 +1191,7 @@ class QueryProxy(Generic[TModel]):
         self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Read a field: a column, a foreign key relation or a reverse relation.
+        """Read a field: a column, a forward relation or a reverse relation.
 
         Args:
             name: The field name.
@@ -1218,7 +1225,7 @@ class QueryProxy(Generic[TModel]):
 
 
 class RelationProxy:
-    """The stand-in for a related row, reached through a foreign key relation.
+    """The stand-in for a related row, reached through a forward relation.
 
     `post.author` in a query lambda gives one. Reading a field from it
     reaches into the related model (`post.author.name`) and joins that
@@ -1295,8 +1302,8 @@ class RelationProxy:
         """The last-hop relation field name (the one being compared)."""
         return self._path[-1]
 
-    def _last_hop_shadow_column(self) -> tuple[str, type]:
-        """Shadow FK column of the LAST hop and the model declaring it.
+    def _last_hop_fk_column(self) -> tuple[str, type]:
+        """Foreign-key column of the LAST hop and the model declaring it.
 
         For ``t.account`` this is ``account_id`` on the root table (owner =
         root model); for ``t.account.owner`` it is ``owner_id`` on the hop-1
@@ -1312,12 +1319,12 @@ class RelationProxy:
             declaring = current
             current = spec.target
         assert spec is not None  # a RelationProxy always has ≥ 1 hop
-        return spec.shadow_column, declaring
+        return spec.fk_column, declaring
 
     def _instance_comparison(self, other: object, operator: str) -> QueryNode:
-        """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).
+        """Desugar ``== instance`` / ``== None`` to a foreign-key column leaf (#273).
 
-        The node targets the last hop's shadow FK column with the proxy path
+        The node targets the last hop's foreign-key column with the proxy path
         MINUS that hop, so it registers only the PREFIX joins (none for a
         one-hop proxy — genuinely join-free).
 
@@ -1328,15 +1335,15 @@ class RelationProxy:
                 the relation-vs-scalar guardrail, suggesting a column compare.
         """
         relation = self._relation_name()
-        shadow, shadow_owner = self._last_hop_shadow_column()
+        fk_column, fk_column_owner = self._last_hop_fk_column()
         prefix_path = self._path[:-1]
         if other is None:
             return QueryNode(
-                column=shadow,
+                column=fk_column,
                 operator=operator,
                 value=None,
                 path=prefix_path,
-                owner=shadow_owner,
+                owner=fk_column_owner,
             )
         if isinstance(other, self._target):
             # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
@@ -1352,11 +1359,11 @@ class RelationProxy:
                     "save it first"
                 )
             return QueryNode(
-                column=shadow,
+                column=fk_column,
                 operator=operator,
                 value=pk_value,
                 path=prefix_path,
-                owner=shadow_owner,
+                owner=fk_column_owner,
             )
         raise TypeError(
             f"cannot compare relation {relation!r} to {other!r}: expected a "
@@ -1574,7 +1581,7 @@ def _collect_inner_traversal_paths(
 
 
 class ReverseRelationProxy:
-    """The stand-in for a reverse (`BackRef`) or many-to-many relation in a query lambda.
+    """The stand-in for a reverse (`Reverse`) or many-to-many relation in a query lambda.
 
     `author.posts` gives one. Its one method is
     [`exists`][ferro.query.nodes.ReverseRelationProxy.exists], which tests

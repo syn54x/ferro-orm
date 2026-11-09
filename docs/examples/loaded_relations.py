@@ -1,16 +1,15 @@
-"""Runnable companion to "Populating relations with include()" in the Queries
+"""Runnable companion to "Loading relations with include()" in the Queries
 guide (docs/pages/guide/queries.md); the relationships guide embeds ``basic``.
 
 Runs every include() query the guide shows against the guide's ledger
 (declared in predicates.py, rows from _ledger_seed.py) and asserts the
-populations that come back.
+loaded relations that come back.
 
-Two sessions on purpose: populations accumulate across one session's queries,
+Two sessions on purpose: loaded relations accumulate across one session's queries,
 so the accumulation example needs instances no earlier include has touched.
 """
 
 import asyncio
-import inspect
 
 import predicates
 from _ledger_seed import seed
@@ -28,7 +27,7 @@ async def main() -> None:
         # --8<-- [start:awaitable]
         transaction = await Transaction.get(6)
 
-        account = await transaction.account  # runs its own query
+        account = await transaction.account.load()  # runs its own query
         assert account.label == "Travel"
         # --8<-- [end:awaitable]
 
@@ -61,7 +60,7 @@ async def main() -> None:
         assert len(everything) == 9
 
         salary = next(row for row in everything if row.memo == "Salary")
-        assert salary.category is None  # no category: populated as None
+        assert salary.category is None  # no category: loaded as None
         # --8<-- [end:membership]
 
         # --8<-- [start:interplay]
@@ -118,7 +117,7 @@ async def main() -> None:
 
     async with engines.session():
         # --8<-- [start:accumulate]
-        market_run = await Transaction.get(3)  # nothing populated yet
+        market_run = await Transaction.get(3)  # nothing loaded yet
 
         await (
             Transaction.select().include(lambda transaction: transaction.account).all()
@@ -144,16 +143,15 @@ async def main() -> None:
         await execute('UPDATE "transaction" SET account_id = $1 WHERE id = $2', 1, 5)
         await Transaction.get(5)  # refreshes the instance in place
 
-        pending = from_checking.account  # awaitable again
-        assert inspect.isawaitable(pending)
-        assert (await pending).label == "Checking"
+        current = await from_checking.account.load()  # the account the key names now
+        assert current.label == "Checking"
         # --8<-- [end:refresh-rule]
 
         # --8<-- [start:limits]
         try:
             Account.select().include(lambda account: account.transactions)
         except TypeError as error:
-            assert "reverse (BackRef) or many-to-many" in str(error)
+            assert "reverse (Reverse) or many-to-many" in str(error)
         else:
             raise AssertionError("including a reverse relation must raise")
 
@@ -178,7 +176,7 @@ async def main() -> None:
             raise AssertionError("delete() on an included query must raise")
         # --8<-- [end:limits]
 
-    print("populated_relations example ran successfully")
+    print("loaded_relations example ran successfully")
 
 
 if __name__ == "__main__":

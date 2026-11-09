@@ -22,7 +22,7 @@ from ._core import (
     _install_registration,
     connect as _core_connect,
 )
-from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
+from .base import DbType, DbTypeToken, FerroField, FerroNullable, varchar
 from . import fn
 from .checks import Check
 from .exceptions import (
@@ -31,13 +31,14 @@ from .exceptions import (
     FerroError,
     ForeignKeyViolationError,
     IntegrityError,
+    InstanceNotLoaded,
     InterfaceError,
     ModelDoesNotExist,
     NotNullViolationError,
     OperationalError,
     UniqueViolationError,
 )
-from .fields import BackRef, Field, ManyToMany
+from .fields import UPGRADING_URL, Field, Forward, ManyToMany, Reverse
 from .models import Model, evict_instance, transaction
 from .pass_report import (
     ExecutedStatement,
@@ -57,6 +58,34 @@ from .settings import (
     lock_timeout_setting_seconds,
     parse_ddl_lock_timeout,
 )
+
+# The relation declarations the explicit foreign-key column replaced, and
+# what replaces each one.
+_REMOVED_NAMES = {
+    "ForeignKey": (
+        "foreign keys are columns, Field(foreign_key=...), and relations are "
+        "Forward(), Reverse() and ManyToMany()"
+    ),
+    "BackRef": (
+        'the reverse side of a relation is Reverse("<column on the other model>")'
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Refuse a removed relation declaration by name, naming what replaces it.
+
+    Raises:
+        ImportError: `name` is `ForeignKey` or `BackRef`.
+        AttributeError: Any other name the module does not define.
+    """
+    if name in _REMOVED_NAMES:
+        raise ImportError(
+            f"ferro.{name} is gone: {_REMOVED_NAMES[name]}. See {UPGRADING_URL}",
+            name=name,
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # A library installs no output of its own: the `ferro` logger (and the
 # statement log on `ferro.sql` beneath it) propagates to whatever logging the
@@ -599,6 +628,7 @@ __all__ = [
     "NotNullViolationError",
     "CheckViolationError",
     "ModelDoesNotExist",
+    "InstanceNotLoaded",
     "DbType",
     "DbTypeToken",
     "FerroField",
@@ -609,9 +639,9 @@ __all__ = [
     "fn",
     "RowSecurity",
     "RowPolicy",
-    "ForeignKey",
-    "BackRef",
     "ManyToMany",
+    "Forward",
+    "Reverse",
     "Relation",
     "Row",
     "Rows",

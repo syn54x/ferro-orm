@@ -3,16 +3,14 @@
 import asyncio
 
 # --8<-- [start:models]
-from typing import Annotated
-
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
+from ferro import Field, Forward, Model, Relation, Reverse, connect, engines
 
 
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
@@ -20,7 +18,8 @@ class Post(Model):
     title: str
     published: bool = False
     views: int = 0
-    author: Annotated[Author, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key=Author)
+    author: Relation[Author] = Forward("author_id")
 
 
 # --8<-- [end:models]
@@ -30,7 +29,7 @@ async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
         ada = await Author.create(name="Ada Lovelace", email="ada@example.com")
-        await Post.create(title="Notes", published=True, views=10, author=ada)
+        await Post.create(title="Notes", published=True, views=10, author_id=ada.id)
         authors = await Author.where(lambda author: author.name == "Ada Lovelace").all()
         assert [author.email for author in authors] == ["ada@example.com"]
         posts = await Post.where(lambda post: post.views == 10).all()

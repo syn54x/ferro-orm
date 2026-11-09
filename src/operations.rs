@@ -1021,7 +1021,7 @@ fn record_field_converters_for<'py>(
 struct IncludeHop {
     /// Full relation path from the root model to this hop.
     path: Vec<String>,
-    /// The relation field name populated on the parent (the path's last hop).
+    /// The relation field name loaded on the parent (the path's last hop).
     relation: String,
     /// The parent's relation path (`[]` = the root instance).
     parent_path: Vec<String>,
@@ -1048,8 +1048,8 @@ fn include_column_alias(hop_alias: &str, column: &str) -> String {
 /// # Errors
 /// `PyValueError` when a path's prefix has no join-plan entry (cannot happen
 /// with a [`QueryPlan::build_join_plan`]-built plan — defense in depth), no
-/// registration (the walker populates every rendered join's table first), or
-/// the hop model has no primary key (population runs the identity protocol
+/// registration (resolve each rendered join's table registration first), or
+/// the hop model has no primary key (loading runs the identity protocol
 /// per hop, which needs one; Python validates this at build time too).
 fn resolve_include_hops(
     paths: &[Vec<QueryJoinHop>],
@@ -1088,7 +1088,7 @@ fn resolve_include_hops(
             if registration.meta.pk_col.is_none() {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "included table {table:?} (path {prefix:?}) has no primary \
-                     key; population runs the identity protocol per hop and \
+                     key; loading runs the identity protocol per hop and \
                      requires one"
                 )));
             }
@@ -1130,7 +1130,8 @@ fn apply_include_select_list(select: &mut SelectStatement, hops: &[IncludeHop]) 
 /// Returns one `(root, hop_rows)` pair per input row; `hop_rows` aligns with
 /// `hops` by index. A hop whose row the LEFT join did not match decodes to a
 /// `(None, all-NULL fields)` parsed row — the graph hydrator turns that into
-/// a populated `None` (the hop PK is NULL exactly when the FK is NULL).
+/// a loaded `None` when the FK is NULL, and an unloaded instance holding
+/// the key when it is not (the row is gone or row security hides it).
 fn instances_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     root: &crate::state::RegisteredModel,
@@ -3573,7 +3574,7 @@ fn fetch_request(
     };
     // The hop-class map travels the same way, paired to the plans that decode
     // or hydrate through another model's protocol: every instances plan
-    // (population, #286) and a record plan with traversed PLAIN fields (each
+    // (loading, #286) and a record plan with traversed PLAIN fields (each
     // leaf's hydration converter resolves through its owning model's class, #293).
     // Aggregate fields never need one — enum sources are rejected at build
     // time and count decodes to a plain int (#294).
@@ -3810,7 +3811,7 @@ async fn build_fetch(
 /// a `record` plan renders the projected SELECT list and hydrates
 /// `record_cls` records (#279) — no identity map, no persistence identity;
 /// an `instances` plan widens the SELECT with every included hop's complete
-/// aliased row and hydrates a populated instance graph (#286, ADR-0008).
+/// aliased row and hydrates a loaded instance graph (#286, ADR-0008).
 ///
 /// Args:
 ///     cls (PyAny): The Python model class.
@@ -3823,7 +3824,7 @@ async fn build_fetch(
 ///         instances plan, forbidden otherwise.
 ///
 /// Returns:
-///     list[PyAny]: Hydrated model instances (populated when included), or
+///     list[PyAny]: Hydrated model instances (loaded when included), or
 ///     projected records.
 #[pyfunction]
 #[pyo3(signature = (
@@ -3903,7 +3904,7 @@ pub fn fetch_filtered<'py>(
 
             if include_paths.is_some() {
                 // Instances path (#286): decode root + hops (each against its own
-                // model's codec plan), then hydrate the populated graph — every
+                // model's codec plan), then hydrate the loaded graph — every
                 // node through the full identity-map protocol.
                 let parsed_data = instances_rows_to_parsed_data(
                     rows,
@@ -3974,6 +3975,8 @@ pub fn fetch_filtered<'py>(
                         }
                     }
                     let converters = crate::hydration::field_converters_for(py, cls)?;
+                    let root_model_name: String =
+                        cls.getattr(pyo3::intern!(py, "__name__"))?.extract()?;
 
                     for ((root_pk, root_fields), hop_rows) in parsed_data {
                         let root_obj = materialize_model_row(
@@ -3990,10 +3993,10 @@ pub fn fetch_filtered<'py>(
                         )?;
 
                         // Walk the hops parent-before-child, tracking this row's
-                        // materialized node per path. A populated-`None` (or a
+                        // materialized node per path. A loaded-`None` (or a
                         // parent skipped under one) ends its chain: deeper hops
                         // have nothing to attach to.
-                        let mut populated: HashMap<&[String], Option<Bound<'_, PyAny>>> =
+                        let mut loaded: HashMap<&[String], Option<Bound<'_, PyAny>>> =
                             HashMap::new();
                         for ((hop, ctx), (hop_pk, hop_fields)) in
                             include_hops.iter().zip(&hop_ctx).zip(hop_rows)
@@ -4001,23 +4004,45 @@ pub fn fetch_filtered<'py>(
                             let parent = if hop.parent_path.is_empty() {
                                 Some(root_obj.clone())
                             } else {
-                                match populated.get(hop.parent_path.as_slice()) {
+                                match loaded.get(hop.parent_path.as_slice()) {
                                     Some(Some(obj)) => Some(obj.clone()),
                                     _ => None,
                                 }
                             };
                             let Some(parent) = parent else { continue };
                             if hop_pk.is_none() {
-                                // The LEFT join matched no row ⟺ the FK is NULL:
-                                // populate `None` (truthful to the declared
-                                // `| None` type), root row retained.
-                                crate::hydration::set_populated_relation(
+                                // The LEFT join matched no row. A NULL key
+                                // loads `None` (truthful to the declared
+                                // `| None` type). A key whose row is gone, or
+                                // hidden by row security, leaves the relation
+                                // unloaded, holding the key (ADR-0063). Either
+                                // way the root row is retained and the chain
+                                // ends here.
+                                let key = foreign_key_of(py, &parent, &hop.relation)?;
+                                let unloaded = match key {
+                                    Some(key) => Some(unloaded_for_key(
+                                        py,
+                                        &ctx.cls,
+                                        &ctx.identity,
+                                        Some(&connection_name),
+                                        session_id.as_deref(),
+                                        use_identity_map,
+                                        &key,
+                                        &crate::hydration::UnloadedOrigin {
+                                            model: &root_model_name,
+                                            path: &hop.path.join("."),
+                                            found_no_row: true,
+                                        },
+                                    )?),
+                                    None => None,
+                                };
+                                crate::hydration::set_loaded_relation(
                                     py,
                                     &parent,
                                     &hop.relation,
-                                    None,
+                                    unloaded.as_ref(),
                                 )?;
-                                populated.insert(hop.path.as_slice(), None);
+                                loaded.insert(hop.path.as_slice(), None);
                                 continue;
                             }
                             let instance = materialize_model_row(
@@ -4032,13 +4057,13 @@ pub fn fetch_filtered<'py>(
                                 &ctx.py_col_names,
                                 &ctx.converters,
                             )?;
-                            crate::hydration::set_populated_relation(
+                            crate::hydration::set_loaded_relation(
                                 py,
                                 &parent,
                                 &hop.relation,
                                 Some(&instance),
                             )?;
-                            populated.insert(hop.path.as_slice(), Some(instance));
+                            loaded.insert(hop.path.as_slice(), Some(instance));
                         }
 
                         results.append(root_obj)?;
@@ -4337,6 +4362,126 @@ pub fn register_instance(
         )?;
     }
     Ok(())
+}
+
+/// The instance a forward relation reads as for one key (ADR-0063).
+///
+/// Looks the key up in the session's identity map: a held instance comes
+/// back as that object, complete or not. Otherwise an unloaded instance is
+/// built by the hydrator and registered under the key, so a later fetch of
+/// the row fills the same object in place. Without a session (or with the
+/// identity map off) the built instance is returned unregistered.
+///
+/// An include that found no row (`origin.found_no_row`) takes the held
+/// instance too, so the session keeps one object per row; it marks the
+/// instance as not found only when it is unloaded (a held complete instance
+/// keeps the row the session last read).
+#[allow(clippy::too_many_arguments)]
+fn unloaded_for_key<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    identity: &str,
+    connection_name: Option<&str>,
+    session_id: Option<&str>,
+    use_identity_map: bool,
+    pk: &Bound<'py, PyAny>,
+    origin: &crate::hydration::UnloadedOrigin<'_>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = match connection_name {
+        Some(connection_name) if use_identity_map && session_id.is_some() => Some((
+            connection_name.to_string(),
+            identity.to_string(),
+            pk.str()?.to_string(),
+        )),
+        _ => None,
+    };
+    if let Some(key) = &key
+        && let Some(held) = identity_map_get(py, session_id, key)?
+    {
+        let held = held.into_bound(py);
+        if origin.found_no_row && crate::hydration::is_unloaded(py, &held)? {
+            crate::hydration::mark_unloaded(py, &held, origin)?;
+        }
+        return Ok(held);
+    }
+    let instance =
+        crate::hydration::hydrate_unloaded_instance(py, cls, connection_name, pk, origin)?;
+    if let Some(key) = key {
+        identity_map_insert(py, session_id, key, &instance)?;
+    }
+    Ok(instance)
+}
+
+/// The value a parent's forward relation key column holds, or `None` when it
+/// is NULL. The column comes from the relation's spec, so both declaration
+/// forms read it the same way.
+///
+/// # Errors
+/// Any `PyErr` reading the spec or the column.
+fn foreign_key_of<'py>(
+    py: Python<'py>,
+    parent: &Bound<'py, PyAny>,
+    relation: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let spec = parent
+        .get_type()
+        .getattr(pyo3::intern!(py, "__ferro_relation_specs__"))?
+        .get_item(relation)?;
+    let fk_column = spec.getattr(pyo3::intern!(py, "fk_column"))?;
+    let key = parent.getattr(fk_column.cast::<pyo3::types::PyString>()?)?;
+    Ok((!key.is_none()).then_some(key))
+}
+
+/// Read a forward relation for the first time: the session's instance for
+/// `pk`, or an unloaded instance of `cls` holding it (ADR-0063).
+///
+/// Args:
+///     cls (type): The relation's target model.
+///     pk (Any): The key the parent's foreign-key column holds (not `None`).
+///     relation (tuple[str, str]): The parent model's name and the relation
+///         read, `("Player", "team")`, for the refusal message.
+///     route (RouteHandle | None): The parent's route; `None` when no session
+///         and no connection give one, and the instance is shared with nothing.
+///
+/// # Errors
+/// `PyRuntimeError` when the target has no primary key, or a route with a
+/// session names an unknown connection.
+#[pyfunction]
+#[pyo3(signature = (cls, pk, relation, route=None))]
+pub fn unloaded_instance<'py>(
+    py: Python<'py>,
+    cls: Bound<'py, PyAny>,
+    pk: Bound<'py, PyAny>,
+    relation: (String, String),
+    route: Option<Py<crate::state::RouteHandle>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let identity = crate::state::model_identity(&cls)?;
+    let origin = crate::hydration::UnloadedOrigin {
+        model: &relation.0,
+        path: &relation.1,
+        found_no_row: false,
+    };
+    let Some(route) = route else {
+        return unloaded_for_key(py, &cls, &identity, None, None, false, &pk, &origin);
+    };
+    let r = route.get();
+    // Only a session's identity map needs the engine: a sessionless read
+    // builds the instance on the route's connection and registers nothing,
+    // so it works after that connection is dropped.
+    let use_identity_map = match r.session_id {
+        Some(_) => route_engine(r)?.1.is_identity_map_enabled(),
+        None => false,
+    };
+    unloaded_for_key(
+        py,
+        &cls,
+        &identity,
+        Some(&r.connection_name),
+        r.session_id.as_deref(),
+        use_identity_map,
+        &pk,
+        &origin,
+    )
 }
 
 /// Remove one instance from the identity map.
@@ -8281,6 +8426,30 @@ mod instances_select_list_tests {
     }
 
     #[test]
+    fn an_included_table_without_a_primary_key_says_loading_runs_the_identity_protocol() {
+        let mut plan = include_plan();
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({"properties": {"label": {"type": "string"}}}),
+                "account".to_string(),
+            ),
+        );
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
+            panic!("include plan expected");
+        };
+        let Err(err) = resolve_include_hops(paths, &join_plan, &plan) else {
+            panic!("a table without a primary key must be refused");
+        };
+        assert!(
+            err.to_string()
+                .contains("loading runs the identity protocol per hop"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
     fn rendered_select_widens_with_aliased_hop_columns_and_left_join() {
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
@@ -8362,7 +8531,7 @@ mod instances_select_list_tests {
     #[test]
     fn left_missed_hop_row_decodes_to_pk_none() {
         // A LEFT join that matched no row (NULL FK) yields a hop slice whose
-        // PK is None — the graph hydrator's populated-`None` signal.
+        // PK is None — the graph hydrator's loaded-`None` signal.
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
         let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
@@ -8617,7 +8786,7 @@ mod select_join_render_tests {
         .expect("v2 envelope parses")
     }
 
-    /// `t.account == instance` desugars to a shadow-FK leaf (`account_id`) with
+    /// `t.account == instance` desugars to a foreign-key column leaf (`account_id`) with
     /// an EMPTY path and NO joins entry — the join-free proof (#273). The
     /// rendered SELECT must contain no JOIN and a WHERE qualified by the ROOT
     /// table's `account_id`, never a relation alias.
@@ -8663,7 +8832,7 @@ mod select_join_render_tests {
         );
         assert!(
             sql.contains("WHERE \"transaction\".\"account_id\""),
-            "WHERE must filter the ROOT-qualified shadow FK: {sql}"
+            "WHERE must filter the ROOT-qualified foreign-key column: {sql}"
         );
     }
 

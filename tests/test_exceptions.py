@@ -114,9 +114,17 @@ class TestPublicSurface:
             "NotNullViolationError",
             "CheckViolationError",
             "ModelDoesNotExist",
+            "InstanceNotLoaded",
         ):
             assert hasattr(ferro, name), f"ferro.{name} missing"
             assert name in ferro.__all__
+
+    def test_instance_not_loaded_is_a_ferro_error_and_an_attribute_error(self):
+        from ferro import InstanceNotLoaded
+
+        assert issubclass(InstanceNotLoaded, FerroError)
+        assert not issubclass(InstanceNotLoaded, AttributeError)
+        assert InstanceNotLoaded.__module__ == "ferro.exceptions"
 
     def test_module_is_ferro_exceptions(self):
         """Classes must not leak a private module path into tracebacks."""

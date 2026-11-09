@@ -56,6 +56,7 @@ MIGRATION_EXAMPLES = [
     "migrations_quickstart",
     "migrations_backfill",
     "migrations_rename",
+    "migrations_rename_join_table",
     "migrations_retire",
     "migrations_retire_label",
     "migrations_squash",
@@ -1257,6 +1258,10 @@ STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
         "guide/schema/renames-and-retirements.md",
         "0002_rename_writer",
     ): "migrations_rename",
+    (
+        "guide/schema/renames-and-retirements.md",
+        "0002_rename_author_tags",
+    ): "migrations_rename_join_table",
     (
         "guide/schema/renames-and-retirements.md",
         "0002_retire_bio",

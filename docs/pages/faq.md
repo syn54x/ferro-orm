@@ -97,7 +97,7 @@ Rows come back as plain dicts of primitives. Raw SQL is an escape hatch, not a t
 
 ## Eager loading
 
-Ferro has no `prefetch_related` or `select_related`. A forward foreign key loads in the same statement with `include()`:
+Ferro has no `prefetch_related` or `select_related`. A forward relation loads in the same statement with `include()`:
 
 ```python {test=run prelude=reference}
 posts = await (
@@ -112,7 +112,7 @@ assert [(post.title, post.author.name) for post in posts] == [
 ]
 ```
 
-Each `post.author` arrives populated, with no second query. Reverse and many-to-many collections are not populated yet, so awaiting `author.posts` in a loop issues one query per author (the N+1 pattern); see the [roadmap](roadmap.md#query-features). See [Queries](guide/queries.md#populating-relations-with-include) for the full contract.
+Each `post.author` arrives loaded, with no second query. Reverse and many-to-many collections are not loaded yet, so running `await author.posts.all()` in a loop issues one query per author (the N+1 pattern); see the [roadmap](roadmap.md#query-features). See [Queries](guide/queries.md#loading-relations-with-include) for the full contract.
 
 ## Speed
 
@@ -127,15 +127,6 @@ You ran a schema operation such as `ferro.create_tables()` before connecting. Im
 ### `No database route for this operation`
 
 You ran a query outside a session, with no `using=` or `session=`. Open a session around the work, as the first block on this page does, or route with `using=`. See [Connections › Sessions](guide/connections.md#sessions).
-
-### `defines a relationship ... but ... does not have that field defined as BackRef()`
-
-Relationships are declared on both sides and cross-validated when you connect. The full message reads `Model 'P' defines a relationship to 'A' with related_name='posts', but 'A' does not have that field defined as BackRef()/Field(back_ref=True)`. It has two common causes:
-
-- The target model has no reverse field. A `ForeignKey(related_name="posts")` needs the target to declare `posts: Relation[list["Post"]] = BackRef()`, as `Author` does above.
-- The model named in a forward reference (`"Author"`) was never imported, so it is not registered. Import every model module before `connect()`.
-
-See [Relationships](guide/relationships.md).
 
 ### `ModelDoesNotExist`
 

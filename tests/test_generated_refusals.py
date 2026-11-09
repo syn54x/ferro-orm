@@ -23,8 +23,7 @@ from enum import Enum
 
 import pytest
 
-from ferro import Field, ForeignKey, Model, fn
-from typing import Annotated
+from ferro import Field, Forward, Model, Relation, fn
 
 pytestmark = pytest.mark.usefixtures("clean_registry")
 
@@ -214,15 +213,19 @@ def test_reading_a_retired_column_is_refused():
             )
 
 
-def test_reading_a_relation_is_refused_naming_the_shadow_column():
+def test_reading_a_relation_is_refused_naming_the_fk_column():
     class Author(Model):
         id: int | None = Field(default=None, primary_key=True)
 
-    with pytest.raises(TypeError, match=r"relation 'author'.*'author_id'"):
+    with pytest.raises(
+        TypeError,
+        match=r"relation 'author'.*read the foreign-key column 'author_id' instead",
+    ):
 
         class Post(Model):
             id: int | None = Field(default=None, primary_key=True)
-            author: Annotated[Author, ForeignKey(related_name="posts")]
+            author_id: int = Field(foreign_key=Author)
+            author: Relation[Author] = Forward("author_id")
             author_copy: int = Field(generated=lambda post: post.author)
 
 

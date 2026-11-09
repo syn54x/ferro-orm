@@ -5,11 +5,9 @@ The selective re-registration pass used to wrap every re-registration in
 on its pre-relationship schema.
 """
 
-from typing import Annotated
-
 import pytest
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 from ferro.relations import resolve_relationships
 
 
@@ -26,12 +24,12 @@ def test_second_pass_rebuild_failure_aborts_with_model_named(monkeypatch):
     class E4Broken(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        peers: Relation[list["E4Peer"]] = BackRef()
+        peers: Relation[list["E4Peer"]] = Reverse("broken_id")
 
     class E4Peer(Model):
         id: int | None = None
-        broken_id: int | None = None
-        broken: Annotated[E4Broken, ForeignKey(related_name="peers")]
+        broken_id: int = Field(foreign_key=E4Broken)
+        broken: Relation[E4Broken] = Forward("broken_id")
 
     import ferro.relations as relations_mod
 

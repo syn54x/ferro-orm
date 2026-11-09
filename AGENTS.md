@@ -47,7 +47,7 @@ functions. Today Ferro emits DDL through:
 For a single model, every emitter must agree on:
 
 1. **Table name** — already handled by `model_name.lower()`.
-2. **Column names** — including shadow `*_id` columns from `ForeignKey`.
+2. **Column names**, including foreign-key columns, which the user declares.
 3. **Column types** — decided by ONE function:
    `ferro_ddl_lowering::resolve_column_storage` (explicit `db_type` token →
    native-enum resolution → the `canonical_from_parts` cascade). The Alembic
@@ -403,8 +403,8 @@ If you add a new emitter (e.g. `ferro schema dump`):
    emitter's output with `_core._plan_from_ir(..., render=True)` for every
    casebook case on both dialects, the way pin (a) does for the
    generator; at least single-column index, composite index, single-column
-   unique, composite unique and foreign key with shadow column must be
-   among them.
+   unique, composite unique and foreign key with its foreign-key column must
+   be among them.
 3. Update this AGENTS.md entry with the new emitter in the bulleted list above.
 
 ### Adding a new artifact
@@ -552,9 +552,10 @@ Rules:
   `docs/examples/` (exercised by `tests/test_docs_examples.py`); inline
   blocks are written in both styles and compile-checked by the same test.
 - Constructs with only one valid form appear identically in both tabs and
-  are not tabbed on their own: forward FKs are always
-  `Annotated[Target, ForeignKey(...)]`, and `BackRef()` / `ManyToMany()`
-  are always assignments.
+  are not tabbed on their own: a relation (`Forward()`, `Reverse()`,
+  `ManyToMany()`) is always an assignment. A foreign-key column is a field
+  like any other and is tabbed: `team_id: int = Field(foreign_key=Team)`
+  against `team_id: Annotated[int, Field(foreign_key=Team)]`.
 - Code blocks that do not declare fields (queries, mutations, transactions,
   usage snippets) are not affected by this rule.
 

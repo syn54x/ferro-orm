@@ -18,15 +18,16 @@ from typing import Annotated, ClassVar
 import pytest
 import sqlalchemy as sa
 
+import ferro
 from ferro import (
-    BackRef,
     Check,
     CheckViolationError,
     Field,
     FerroField,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     engines,
@@ -186,9 +187,12 @@ def test_empty_ferro_checks_is_a_no_op():
 @pytest.mark.parametrize(
     "predicate, expected",
     [
-        (lambda t: t.owner.label == None, "traversal"),  # noqa: E711
-        (lambda t: t.notes.exists(), "existence test"),
-        (lambda t: t.amount.sum(), "aggregate"),
+        (
+            lambda rejecting: rejecting.owner.label == None,  # noqa: E711
+            r"traversal.*its foreign-key column \(t\.owner_id\)",
+        ),
+        (lambda rejecting: rejecting.notes.exists(), "existence test"),
+        (lambda rejecting: rejecting.amount.sum(), "aggregate"),
     ],
 )
 def test_unsupported_check_predicates_fail_at_class_definition(predicate, expected):
@@ -197,7 +201,7 @@ def test_unsupported_check_predicates_fail_at_class_definition(predicate, expect
     class RejectOwner(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str | None = None
-        rejects: Relation[list["Rejecting"]] = BackRef()
+        rejects: Relation[list["Rejecting"]] = Reverse("owner_id")
 
     with pytest.raises(TypeError, match=expected):
 
@@ -207,14 +211,14 @@ def test_unsupported_check_predicates_fail_at_class_definition(predicate, expect
             id: int | None = Field(default=None, primary_key=True)
             memo: str | None = None
             amount: int = 0
-            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = (
-                None
-            )
-            notes: Relation[list["RejectNote"]] = BackRef()
+            owner_id: int | None = Field(default=None, foreign_key=RejectOwner)
+            owner: Relation[RejectOwner | None] = Forward("owner_id")
+            notes: Relation[list["RejectNote"]] = Reverse("rejecting_id")
 
         class RejectNote(Model):
             id: int | None = Field(default=None, primary_key=True)
-            rejecting: Annotated[Rejecting, ForeignKey(related_name="notes")]
+            rejecting_id: int = Field(foreign_key=Rejecting)
+            rejecting: Relation[Rejecting] = Forward("rejecting_id")
 
 
 # ---------------------------------------------------------------------------
@@ -226,21 +230,23 @@ def _build_transfer_models():
     """The Transfer-shaped fixture: four checks over two exclusive-or sides.
 
     Both FK-null spellings appear (the relation on the outflow checks, the
-    shadow ``*_id`` column on the inflow ones), as do every combinator this
+    foreign-key column on the inflow ones), as do every combinator this
     release supports.
     """
 
     class Activity(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str = ""
-        outflow_transfers: Relation[list["Transfer"]] = BackRef()
-        inflow_transfers: Relation[list["Transfer"]] = BackRef()
+        outflow_transfers: Relation[list["Transfer"]] = Reverse("outflow_activity_id")
+        inflow_transfers: Relation[list["Transfer"]] = Reverse("inflow_activity_id")
 
     class Txn(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str = ""
-        outflow_transfers: Relation[list["Transfer"]] = BackRef()
-        inflow_transfers: Relation[list["Transfer"]] = BackRef()
+        outflow_transfers: Relation[list["Transfer"]] = Reverse(
+            "outflow_transaction_id"
+        )
+        inflow_transfers: Relation[list["Transfer"]] = Reverse("inflow_transaction_id")
 
     class Transfer(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -277,18 +283,14 @@ def _build_transfer_models():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        outflow_transaction: Annotated[
-            Txn | None, ForeignKey(related_name="outflow_transfers")
-        ] = None
-        outflow_activity: Annotated[
-            Activity | None, ForeignKey(related_name="outflow_transfers")
-        ] = None
-        inflow_transaction: Annotated[
-            Txn | None, ForeignKey(related_name="inflow_transfers")
-        ] = None
-        inflow_activity: Annotated[
-            Activity | None, ForeignKey(related_name="inflow_transfers")
-        ] = None
+        outflow_transaction_id: int | None = Field(default=None, foreign_key=Txn)
+        outflow_transaction: Relation[Txn | None] = Forward("outflow_transaction_id")
+        outflow_activity_id: int | None = Field(default=None, foreign_key=Activity)
+        outflow_activity: Relation[Activity | None] = Forward("outflow_activity_id")
+        inflow_transaction_id: int | None = Field(default=None, foreign_key=Txn)
+        inflow_transaction: Relation[Txn | None] = Forward("inflow_transaction_id")
+        inflow_activity_id: int | None = Field(default=None, foreign_key=Activity)
+        inflow_activity: Relation[Activity | None] = Forward("inflow_activity_id")
 
     return Activity, Txn, Transfer
 
@@ -330,22 +332,21 @@ def test_compiler_emits_named_structured_table_checks():
 
 def test_both_fk_null_spellings_compile_to_the_same_predicate():
     """``t.outflow_transaction == None`` and ``t.outflow_transaction_id == None``
-    are the same shadow-column IS NULL leaf (ADR-0016)."""
+    are the same foreign-key column IS NULL leaf (ADR-0016)."""
 
     class SpellTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
-        spellings: Relation[list["Spelling"]] = BackRef()
+        spellings: Relation[list["Spelling"]] = Reverse("target_id")
 
     class Spelling(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check("via_relation", lambda spelling: spelling.target == None),  # noqa: E711
-            Check("via_shadow", lambda spelling: spelling.target_id == None),  # noqa: E711
+            Check("via_fk_column", lambda spelling: spelling.target_id == None),  # noqa: E711
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        target: Annotated[SpellTarget | None, ForeignKey(related_name="spellings")] = (
-            None
-        )
+        target_id: int | None = Field(default=None, foreign_key=SpellTarget)
+        target: Relation[SpellTarget | None] = Forward("target_id")
 
     table_checks = _model_payload("spelling")["table_checks"]
     assert table_checks[0]["predicate"] == table_checks[1]["predicate"]
@@ -354,7 +355,7 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
 
 def test_forward_referenced_relation_spelling_compiles():
     """A relation whose target resolves only at ``resolve_relationships`` still
-    compiles: the shadow column name never needs the target class."""
+    compiles: the foreign-key column name never needs the target class."""
 
     class Forward(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -362,13 +363,13 @@ def test_forward_referenced_relation_spelling_compiles():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        later: Annotated[
-            "LaterTarget", ForeignKey(related_name="forwards", nullable=True)
-        ] = None
+        later_id: int | None = Field(default=None, foreign_key="LaterTarget")
+        # The class is named Forward, so the relation reads ferro.Forward.
+        later: Relation["LaterTarget | None"] = ferro.Forward("later_id")
 
     class LaterTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
-        forwards: Relation[list[Forward]] = BackRef()
+        forwards: Relation[list[Forward]] = Reverse("later_id")
 
     ensure_resolved_modelset()
     assert _model_payload("forward")["table_checks"] == [
@@ -475,23 +476,27 @@ async def test_transfer_checks_are_enforced_live(db_url, db_backend):
         activity = await _Activity.create(label="opposite")
 
         # Legal: a transaction on each side.
-        await Transfer.create(outflow_transaction=out_txn, inflow_transaction=in_txn)
+        await Transfer.create(
+            outflow_transaction_id=out_txn.id, inflow_transaction_id=in_txn.id
+        )
         # Legal: a transaction plus an opposite-side activity.
-        await Transfer.create(outflow_transaction=out_txn, inflow_activity=activity)
+        await Transfer.create(
+            outflow_transaction_id=out_txn.id, inflow_activity_id=activity.id
+        )
 
         # Illegal: both outflow spellings set.
         with pytest.raises(CheckViolationError) as excinfo:
             await Transfer.create(
-                outflow_transaction=out_txn,
-                outflow_activity=activity,
-                inflow_transaction=in_txn,
+                outflow_transaction_id=out_txn.id,
+                outflow_activity_id=activity.id,
+                inflow_transaction_id=in_txn.id,
             )
         if db_backend == "postgres":
             assert excinfo.value.constraint == OUTFLOW_CHECK_NAME
 
         # Illegal: no inflow at all.
         with pytest.raises(CheckViolationError):
-            await Transfer.create(outflow_transaction=out_txn)
+            await Transfer.create(outflow_transaction_id=out_txn.id)
 
 
 @pytest.mark.backend_matrix

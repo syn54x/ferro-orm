@@ -1,17 +1,17 @@
 """Field and relation options that model annotations carry.
 
-[`FerroField`][ferro.FerroField] holds a column's database options and
-[`ForeignKey`][ferro.ForeignKey] the owning side of a relation.
+[`FerroField`][ferro.FerroField] holds a column's database options, a
+foreign key among them, and `ForwardRelation`, `ReverseRelation` and
+`ManyToManyRelation` what [`Forward`][ferro.Forward],
+[`Reverse`][ferro.Reverse] and [`ManyToMany`][ferro.ManyToMany] declare.
 """
 
-import warnings
 from typing import (
     Any,
     Literal,
     TypeVar,
 )
 
-from ._annotation_utils import annotation_allows_none
 
 T = TypeVar("T")
 """A type variable for generic helpers."""
@@ -48,6 +48,12 @@ DbType = DbTypeToken | str
 
 Build the `varchar(N)` form with [`varchar`][ferro.varchar].
 """
+
+
+OnDelete = Literal["CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION"]
+"""What the database does to a row when the row its foreign key points at is deleted."""
+
+_ON_DELETE_ACTIONS = ("CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION")
 
 
 def varchar(length: int) -> str:
@@ -101,24 +107,6 @@ def _validate_retired(retired: bool, owner: str) -> bool:
     raise TypeError(f"{owner} retired must be True or False")
 
 
-class GeneratedExpression:
-    """The `generated=` lambda of a `Field`, carried in the field's metadata.
-
-    Pydantic serializes `json_schema_extra` into the model's JSON schema, and
-    a lambda has no JSON form, so the lambda rides the field's metadata
-    instead, where the metaclass reads it.
-    """
-
-    __slots__ = ("func",)
-
-    def __init__(self, func: Any) -> None:
-        self.func = func
-        """The lambda the database computes the column from."""
-
-    def __repr__(self) -> str:
-        return "GeneratedExpression(...)"
-
-
 def _validate_generated(generated: Any, owner: str) -> Any:
     """Validate the ``generated`` option (ADR-0058): a lambda, or ``None``."""
     if generated is None or callable(generated):
@@ -130,12 +118,36 @@ def _validate_generated(generated: Any, owner: str) -> Any:
     )
 
 
+def _validate_foreign_key(foreign_key: Any, owner: str) -> Any:
+    """Validate ``foreign_key``: a model class, its class name, or ``None``."""
+    if foreign_key is None or isinstance(foreign_key, type):
+        return foreign_key
+    if isinstance(foreign_key, str) and foreign_key:
+        return foreign_key
+    raise TypeError(
+        f"{owner} foreign_key must be a model class or its class name, not "
+        f"{type(foreign_key).__name__}"
+    )
+
+
+def _validate_on_delete(on_delete: Any, owner: str) -> Any:
+    """Validate ``on_delete``: one of the five referential actions, or ``None``."""
+    if on_delete is None or on_delete in _ON_DELETE_ACTIONS:
+        return on_delete
+    raise TypeError(
+        f"{owner} on_delete must be one of "
+        f"{', '.join(repr(action) for action in _ON_DELETE_ACTIONS)}, not {on_delete!r}"
+    )
+
+
 class FerroField:
     """Database options for one model field, given inside `Annotated[...]`.
 
-    [`Field`][ferro.Field] takes the same options and is the usual spelling.
-    `FerroField` carries only the database options, for an `Annotated`
-    declaration that keeps them apart from Pydantic's own `Field`. See
+    [`Field`][ferro.Field] takes the same options and is the usual spelling:
+    it stores them as one `FerroField` in the field's metadata, never in its
+    JSON schema. `FerroField` carries only the database options, for an
+    `Annotated` declaration that keeps them apart from Pydantic's own
+    `Field`. See
     [Field options](../guide/models-and-fields.md#field-options) for each
     option at work.
 
@@ -169,6 +181,8 @@ class FerroField:
         renamed_from: str | None = None,
         retired: bool = False,
         generated: Any = None,
+        foreign_key: "type | str | None" = None,
+        on_delete: OnDelete | None = None,
     ):
         """Declare the database options for a field.
 
@@ -204,10 +218,17 @@ class FerroField:
                 database computes the column on every write. Defaults to
                 `None`, a plain column. Give the field a `None` default
                 beside it, as [`Field`][ferro.Field] does for you.
+            foreign_key: The model whose primary key the column holds: the
+                class, or its class name for a self reference or a model
+                defined later. Defaults to `None`, a plain column.
+            on_delete: What the database does to this row when the row the
+                key points at is deleted: `"CASCADE"`, `"RESTRICT"`,
+                `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`. Defaults to
+                `None`, which is `"CASCADE"` on a foreign-key column.
 
         Raises:
-            TypeError: `nullable`, `renamed_from`, `retired` or `generated`
-                has a value of the wrong type.
+            TypeError: `nullable`, `renamed_from`, `retired`, `generated`,
+                `foreign_key` or `on_delete` has a value of the wrong type.
         """
         self.primary_key = primary_key
         """Whether the column is the table's primary key."""
@@ -229,143 +250,94 @@ class FerroField:
         """Whether the column is retired from the model."""
         self.generated = _validate_generated(generated, "FerroField")
         """The lambda the database computes the column from, or `None`."""
+        self.foreign_key = _validate_foreign_key(foreign_key, "FerroField")
+        """The model the column's key points at, its class name, or `None`."""
+        on_delete = _validate_on_delete(on_delete, "FerroField")
+        self.on_delete: str | None = (
+            "CASCADE" if on_delete is None and foreign_key is not None else on_delete
+        )
+        """The referential action on a foreign-key column, or `None` when unset.
+
+        A foreign-key column declared without one holds `"CASCADE"`.
+        """
 
 
-class ForeignKey:
-    """The owning side of a relation: a foreign key to another model.
+class ForwardRelation:
+    """A forward relation over a foreign-key column of its own model.
 
-    Declare it as `Annotated[Target, ForeignKey(...)]`. The table gets a
-    `<field>_id` column holding the target's primary key, and the target
-    model reads the relation back through the [`BackRef`][ferro.BackRef]
-    that `related_name` names. The models these examples run against declare
-    the pair like this, other fields left out:
-
-    ```python {test=compile reason="the reference prelude already declares these models"}
-    class Author(Model):
-        ...
-        posts: Relation[list["Post"]] = BackRef()
-
-
-    class Post(Model):
-        ...
-        author: Annotated[Author, ForeignKey(related_name="posts")]
-    ```
-
-    See [Relationships](../guide/relationships.md) for one-to-one, nullable
-    and self-referential relations.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        post = await Post.where(lambda post: post.views > 1000).first()
-        author = await post.author
-        assert author.name == "Ada Lovelace"
-        ```
+    [`Forward`][ferro.Forward] declares it; the class keeps it in
+    `__ferro_relations__`.
     """
 
     def __init__(
         self,
-        related_name: str | None = None,
-        on_delete: str = "CASCADE",
-        unique: bool = False,
-        index: bool = False,
-        nullable: FerroNullable = "infer",
-        renamed_from: str | None = None,
-        retired: bool = False,
-    ):
-        """Declare a foreign key to the model in the annotation.
+        fk_column: str,
+        to: Any,
+        nullable: bool,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
+    ) -> None:
+        """Store what the declaration says.
 
         Args:
-            related_name: The name of the [`BackRef`][ferro.BackRef] on the
-                target model that reads this relation back. Required unless
-                `retired=True`.
-            on_delete: What the database does to this row when the target row
-                is deleted: `"CASCADE"` (the default), `"RESTRICT"`,
-                `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`.
-            unique: Make the relation one-to-one with a unique constraint on
-                the `<field>_id` column. The constraint indexes the column, so
-                `index=True` beside it is ignored with a `UserWarning`.
-            index: Add a non-unique index on the `<field>_id` column. Postgres
-                does not index a foreign key column on its own.
-            nullable: `"infer"` (the default) makes the `<field>_id` column
-                nullable when the relation's annotation allows `None` or
-                `on_delete` is `"SET NULL"`; `True` or `False` forces it.
-            renamed_from: The relation's previous field name. The
-                `<field>_id` column and its foreign key constraint are renamed
-                with it (`writer` to `author` renames `writer_id` to
-                `author_id`). See [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
-            retired: Take the relation and its `<field>_id` column out of the
-                model while the column and its foreign key stay in the schema,
-                nullable, until a later release deletes the declaration.
-                Defaults to `False`. See
-                [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
-
-        Raises:
-            TypeError: `related_name` is missing on a relation that is not
-                retired, or an option has a value of the wrong type.
-            ValueError: `on_delete="SET NULL"` with `nullable=False`; the
-                database could not set the column to `NULL`.
+            fk_column: The foreign-key column the relation reads.
+            to: The model in the relation's annotation, or its name until
+                Ferro resolves it; `None` when the annotation names none.
+            nullable: Whether the annotation allows `None`.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the target its fix writes; relation resolution
+                raises it with the target named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a target declared later; `None` under
+                postponed annotations, where no target needs quotes.
         """
-        self.to = None  # Resolved later
-        """The target model class, set once Ferro resolves the relation."""
-        self.related_name = related_name
-        """The name of the reverse relation on the target model."""
-        self.on_delete = on_delete
-        """The referential action when the target row is deleted."""
-        self.unique = unique
-        """Whether the relation is one-to-one."""
-        self.index = index
-        """Whether the `<field>_id` column has a non-unique index."""
-        self.nullable = _validate_nullable_option(nullable, "ForeignKey")
-        """`"infer"`, or a forced `True` or `False`."""
-        self.renamed_from = _validate_renamed_from(renamed_from, "ForeignKey")
-        """The relation's previous field name, or `None`."""
-        self.retired = _validate_retired(retired, "ForeignKey")
-        """Whether the relation is retired from the model."""
-        if related_name is None and not self.retired:
-            raise TypeError(
-                "ForeignKey requires related_name, the BackRef on the target "
-                'model that reads this relation back (ForeignKey(related_name="posts")); '
-                "only a retired relation (retired=True) has none"
-            )
-        if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
-            raise ValueError(
-                "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"
-            )
-        if unique and index:
-            warnings.warn(
-                "ForeignKey(unique=True, index=True) is redundant; unique=True "
-                "already implies an index. Ignoring index=True.",
-                UserWarning,
-                stacklevel=2,
-            )
-            self.index = False
-        # Set by the metaclass: forward fields are not in ``model_fields``, so
-        # nullability inference reads the relation's annotation from here.
-        self.relation_annotation: Any | None = None
-        """The relation's annotation, set when the model class is defined."""
+        self.fk_column = fk_column
+        """The foreign-key column the relation reads."""
+        self.to = to
+        """The target model class, or its name until Ferro resolves it."""
+        self.nullable = nullable
+        """Whether the relation's annotation allows `None`."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its target, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""
 
 
-def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
-    """Decide whether a foreign key's `<field>_id` column is nullable.
+class ReverseRelation:
+    """A reverse relation over a foreign-key column of another model.
 
-    Args:
-        metadata: The relation's foreign key options.
-
-    Returns:
-        `True` or `False` when `nullable` forces it or `on_delete` is
-        `"SET NULL"`; otherwise whether the relation's annotation allows
-        `None`, or `None` when the annotation is not known yet.
+    [`Reverse`][ferro.Reverse] declares it; the class keeps it in
+    `__ferro_relations__`.
     """
-    if metadata.nullable is True:
-        return True
-    if metadata.nullable is False:
-        return False
-    if str(metadata.on_delete).upper() == "SET NULL":
-        return True
-    relation_annotation = getattr(metadata, "relation_annotation", None)
-    if relation_annotation is None:
-        return None
-    return annotation_allows_none(relation_annotation)
+
+    def __init__(
+        self,
+        attribute: str,
+        to: Any,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
+    ) -> None:
+        """Store what the declaration says.
+
+        Args:
+            attribute: The foreign-key column on the model `to`.
+            to: The model in the relation's annotation, or its name until
+                Ferro resolves it; `None` when the annotation names none.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the model its fix writes; relation resolution
+                raises it with the model named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a model declared later; `None` under
+                postponed annotations, where no model needs quotes.
+        """
+        self.attribute = attribute
+        """The foreign-key column on the other model that points back."""
+        self.to = to
+        """The other model's class, or its name until Ferro resolves it."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its model, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""
 
 
 class ManyToManyRelation:
@@ -378,26 +350,37 @@ class ManyToManyRelation:
 
     def __init__(
         self,
-        related_name: str,
-        through: str | None = None,
+        through: str,
         reverse_index: bool = True,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
+        renamed_from: str | None = None,
     ):
         """Store the options of a many-to-many relation.
 
         Args:
-            related_name: The name of the relation on the target model that
-                reads this one back.
-            through: The join table's name. Defaults to `None`, a name Ferro
-                derives from the two models.
+            through: The join table's name.
             reverse_index: Add an index on the join table's
                 `(target, source)` columns for queries from the other side.
                 Defaults to `True`; turn it off for a write-heavy join table.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the target its fix writes; relation resolution
+                raises it with the target named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a target declared later; `None` under
+                postponed annotations, where no target needs quotes.
+            renamed_from: The join table's previous name, which a migration
+                renames from. Defaults to `None`.
         """
         self.to = None  # Resolved later
         """The target model class, set once Ferro resolves the relation."""
-        self.related_name = related_name
-        """The name of the reverse relation on the target model."""
         self.through = through
-        """The join table's name, or `None` for the derived one."""
+        """The join table's name."""
         self.reverse_index = reverse_index
         """Whether the join table has an index for reverse queries."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its target, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""
+        self.renamed_from = renamed_from
+        """The join table's previous name, or `None`."""

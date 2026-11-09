@@ -16,11 +16,11 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     reset_engine,
 )
@@ -97,7 +97,7 @@ def _build_models():
     class Org(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         slug: Annotated[str, FerroField(unique=True)]
-        members: Relation[list["Member"]] = BackRef()
+        members: Relation[list["Member"]] = Reverse("org_id")
 
     class Member(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -105,7 +105,8 @@ def _build_models():
         extremely_long_column_name_used_to_verify_truncation_guard_x: Annotated[
             str, FerroField(index=True, unique=True)
         ]
-        org: Annotated[Org, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
+        org: Relation[Org] = Forward("org_id")
 
         __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("email", "org_id"),
@@ -229,11 +230,12 @@ def test_relation_to_custom_table_model_points_at_configured_table():
     class OrgTeam(Model):
         __ferro_table__: ClassVar[str] = "org_teams"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        players: Relation[list["TeamPlayer"]] = BackRef()
+        players: Relation[list["TeamPlayer"]] = Reverse("team_id")
 
     class TeamPlayer(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        team: Annotated[OrgTeam, ForeignKey(related_name="players")]
+        team_id: Annotated[int, FerroField(foreign_key=OrgTeam)]
+        team: Relation[OrgTeam] = Forward("team_id")
 
     envelope = compile_registry_schema_ir()
     player = next(
@@ -254,7 +256,8 @@ def test_relation_to_custom_table_model_points_at_configured_table():
 
 
 def test_m2m_join_artifacts_follow_custom_table_names():
-    """FF-E E2 exit gate: default join table/columns derive from table names."""
+    """FF-E E2 exit gate: the join columns derive from the table names, and the
+    join table keeps the name the old derivation gave it."""
     from ferro import ManyToMany
     from ferro.relations import resolve_relationships
     from ferro.registry import REGISTRY
@@ -262,18 +265,18 @@ def test_m2m_join_artifacts_follow_custom_table_names():
     class WikiPage(Model):
         __ferro_table__: ClassVar[str] = "wiki_pages"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        tags: Relation[list["WikiTag"]] = ManyToMany(related_name="pages")
+        tags: Relation[list["WikiTag"]] = ManyToMany(through="wiki_pages_tags")
 
     class WikiTag(Model):
         __ferro_table__: ClassVar[str] = "wiki_tags"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        pages: Relation[list[WikiPage]] = BackRef()
+        pages: Relation[list[WikiPage]] = Reverse("tags")
 
     resolve_relationships()
 
     assert "wiki_pages_tags" in REGISTRY.join_tables()
     bundle = REGISTRY.join_tables()["wiki_pages_tags"]
-    columns_by_name = {spec.name: spec for spec in bundle["columns"]}
+    columns_by_name = {spec.name: spec for spec in bundle.columns}
     assert set(columns_by_name) == {"wiki_pages_id", "wiki_tags_id"}
     assert columns_by_name["wiki_pages_id"].foreign_key.to_table == "wiki_pages"
     assert columns_by_name["wiki_tags_id"].foreign_key.to_table == "wiki_tags"
@@ -288,12 +291,13 @@ def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
 
     class FwdArticle(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated["FwdWriter", ForeignKey(related_name="articles")]
+        author_id: Annotated[int, FerroField(foreign_key="FwdWriter")]
+        author: Relation["FwdWriter"] = Forward("author_id")
 
     class FwdWriter(Model):
         __ferro_table__: ClassVar[str] = "staff_writers"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        articles: Relation[list[FwdArticle]] = BackRef()
+        articles: Relation[list[FwdArticle]] = Reverse("author_id")
 
     def _article_fk():
         envelope = compile_registry_schema_ir()
@@ -306,7 +310,7 @@ def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
     # Pre-resolution: metadata.to is still the string/ForwardRef, but the
     # target IS registered — _target_table_name's string branch must resolve
     # it through REGISTRY.resolve_reference, not lowercase the class name.
-    raw_to = FwdArticle.ferro_relations["author"].to
+    raw_to = FwdArticle.__ferro_relations__["author"].to
     assert isinstance(raw_to, (str, ForwardRef))
     fk = _article_fk()
     assert fk["to_table"] == "staff_writers"

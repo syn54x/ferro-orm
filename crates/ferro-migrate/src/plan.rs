@@ -24,6 +24,7 @@ use crate::{
 };
 use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
+use ferro_ddl_lowering::is_join_table;
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
     declared_check_body, declared_check_names, declared_row_policy_names, drifted_check_names,
@@ -3575,6 +3576,7 @@ pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
                     table: model.table_name.clone(),
                     field: None,
                     old: previous.clone(),
+                    join_table: is_join_table(model),
                 });
             }
             claim(&mut table_claims, previous, &model.table_name);
@@ -3589,6 +3591,7 @@ pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
                     table: model.table_name.clone(),
                     field: Some(col.name.clone()),
                     old: previous.clone(),
+                    join_table: false,
                 });
             }
             claim(&mut column_claims, previous, &col.name);
@@ -3598,14 +3601,22 @@ pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
                 table: Some(model.table_name.clone()),
                 old: previous,
                 claimants,
+                join_tables: Vec::new(),
             });
         }
     }
     if let Some((previous, claimants)) = table_claims.into_iter().find(|(_, c)| c.len() > 1) {
+        let join_tables = new
+            .models
+            .iter()
+            .filter(|m| is_join_table(m) && claimants.contains(&m.table_name))
+            .map(|m| m.table_name.clone())
+            .collect();
         return Err(HintError::Ambiguous {
             table: None,
             old: previous,
             claimants,
+            join_tables,
         });
     }
     // Label hints are checked over every enum, how ever it is stored.
@@ -4033,8 +4044,7 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     let col = |name: &str| renames.column(t_old, name).to_string();
     let mut out = model.clone();
     out.table_name = t_new.clone();
-    // A join table's model is named for its table.
-    if model.model_name == t_old {
+    if is_join_table(model) {
         out.model_name = t_new.clone();
     }
     let mut relabelled: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
@@ -6224,7 +6234,11 @@ mod live_table_hint_tests {
     #[test]
     fn the_pending_warning_names_the_tables_waiting_and_both_strategies() {
         assert_eq!(
-            pending_table_rename_warning("writer", "author", &["book".into()]),
+            pending_table_rename_warning(
+                &model("author", Some("writer")),
+                "writer",
+                &["book".into()]
+            ),
             crate::Report {
                 kind: crate::ReportKind::PendingTableRename,
                 subject: crate::Subject::table("author"),
@@ -6235,6 +6249,41 @@ mod live_table_hint_tests {
                     .into(),
                 recurs: true,
             }
+        );
+    }
+
+    /// A join table's model is named for its table.
+    fn join_table(table: &str, renamed_from: &str) -> SchemaModel {
+        SchemaModel {
+            model_name: table.into(),
+            ..model(table, Some(renamed_from))
+        }
+    }
+
+    #[test]
+    fn a_join_tables_hint_is_named_as_its_many_to_many_declares_it() {
+        assert_eq!(
+            pending_table_rename_warning(
+                &join_table("author_tags", "writer_tags"),
+                "writer_tags",
+                &[]
+            )
+            .text,
+            "join table \"author_tags\" declares ManyToMany(renamed_from=\"writer_tags\"), and \
+             the database holds \"writer_tags\" and no \"author_tags\": \"author_tags\" was not \
+             created. The rename runs under connect(..., migrate_updates=True) or in a migration \
+             from ferro migrate new."
+        );
+        let twice = declared(vec![
+            model("author", Some("writer")),
+            join_table("author_tags", "writer"),
+        ]);
+        let refusal = refuse_hints(&twice).expect_err("refused");
+        assert_eq!(
+            refusal.to_string(),
+            "table \"author\" declares __ferro_renamed_from__ = \"writer\" and join table \
+             \"author_tags\" declares ManyToMany(renamed_from=\"writer\"): one table becomes one \
+             table; keep the hint on the table \"writer\" became"
         );
     }
 }

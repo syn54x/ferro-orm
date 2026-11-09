@@ -148,30 +148,15 @@ pub enum RevisionRefusal {
     Refused(crate::Refusal),
     /// A SQLite column added `NOT NULL` with no value for the rows already
     /// there: SQLite cannot add it in place.
-    SqliteRequiredColumn {
-        /// The op's kind.
-        kind: String,
-        /// `table.column`.
-        subject: String,
-    },
+    SqliteRequiredColumn(Box<MigrationOp>),
     /// A SQLite column added `NOT NULL` with a literal default: `ADD COLUMN`
     /// takes it only with a `DEFAULT` it keeps for good, where ferro persists
     /// none (ADR-0027), so only a table rebuild adds it, which a revision
     /// cannot write.
-    SqliteKeptDefault {
-        /// The op's kind.
-        kind: String,
-        /// `table.column`.
-        subject: String,
-    },
+    SqliteKeptDefault(Box<MigrationOp>),
     /// A change SQLite can only make by rebuilding the table, which a
     /// revision cannot write.
-    Rebuild {
-        /// The op's kind.
-        kind: String,
-        /// What it changes.
-        subject: String,
-    },
+    Rebuild(Box<MigrationOp>),
     /// An op whose rendering blocks ([`Report::blocks`]): it has no statement
     /// to write.
     Blocked(Box<Report>),
@@ -192,12 +177,24 @@ impl RevisionRefusal {
         match self {
             RevisionRefusal::HintRefused(_) => "hint_refused",
             RevisionRefusal::Refused(_) => "refused",
-            RevisionRefusal::SqliteRequiredColumn { .. } => "sqlite_required_column",
-            RevisionRefusal::SqliteKeptDefault { .. } => "sqlite_kept_default",
-            RevisionRefusal::Rebuild { .. } => "rebuild",
+            RevisionRefusal::SqliteRequiredColumn(_) => "sqlite_required_column",
+            RevisionRefusal::SqliteKeptDefault(_) => "sqlite_kept_default",
+            RevisionRefusal::Rebuild(_) => "rebuild",
             RevisionRefusal::Blocked(_) => "blocked",
             RevisionRefusal::SnapshotOnly { .. } => "snapshot_only",
             RevisionRefusal::Render(_) => "render",
+        }
+    }
+
+    /// The planner op the refusal names, when it names one. Every emitter
+    /// reads that op's one verdict, so a caller compares what each emitter
+    /// did with it by the op's kind and subject, never by the sentence.
+    pub fn op(&self) -> Option<&MigrationOp> {
+        match self {
+            RevisionRefusal::SqliteRequiredColumn(op)
+            | RevisionRefusal::SqliteKeptDefault(op)
+            | RevisionRefusal::Rebuild(op) => Some(op),
+            _ => None,
         }
     }
 }
@@ -209,26 +206,28 @@ impl std::fmt::Display for RevisionRefusal {
                 f.write_str(&report.text)
             }
             RevisionRefusal::Refused(refusal) => write!(f, "{refusal}"),
-            RevisionRefusal::SqliteRequiredColumn { kind, subject } => write!(
+            RevisionRefusal::SqliteRequiredColumn(op) => write!(
                 f,
                 "{}. Give it a default, or write the change as a migration, which \
                  generates the backfill: `ferro migrate new`",
-                cannot_add_required(kind, subject)
+                cannot_add_required(&kind_name(op), &subject(op))
             ),
-            RevisionRefusal::SqliteKeptDefault { kind, subject } => write!(
+            RevisionRefusal::SqliteKeptDefault(op) => write!(
                 f,
-                "{kind} on {subject} adds a NOT NULL column, which SQLite's ADD COLUMN takes \
+                "{} on {} adds a NOT NULL column, which SQLite's ADD COLUMN takes \
                  only with a DEFAULT it keeps for good, and ferro persists no server default; \
                  the table must be rebuilt, which an Alembic revision cannot write. Make the \
                  field optional, or write the change as a migration, which rebuilds the \
-                 table: `ferro migrate new`"
+                 table: `ferro migrate new`",
+                kind_name(op),
+                subject(op)
             ),
-            RevisionRefusal::Rebuild { kind, subject } => write!(
+            RevisionRefusal::Rebuild(op) => write!(
                 f,
                 "{} (batch mode has no foreign-key pragma handling, so the drop cascades \
                  into ON DELETE CASCADE children). Write this change as a migration: \
                  `ferro migrate new`",
-                needs_rebuild(kind, subject)
+                needs_rebuild(&kind_name(op), &subject(op))
             ),
             RevisionRefusal::SnapshotOnly { kind } => write!(
                 f,
@@ -246,9 +245,10 @@ impl std::error::Error for RevisionRefusal {}
 impl serde::Serialize for RevisionRefusal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("RevisionRefusal", 2)?;
+        let mut out = serializer.serialize_struct("RevisionRefusal", 3)?;
         out.serialize_field("kind", self.kind())?;
         out.serialize_field("text", &self.to_string())?;
+        out.serialize_field("op", &self.op())?;
         out.end()
     }
 }
@@ -377,25 +377,20 @@ fn upgrade_refusal(planned: &PlannedOp, dialect: Dialect) -> Option<RevisionRefu
         return Some(RevisionRefusal::Refused(refusal.clone()));
     }
     if demands_column_values(planned) && dialect == Dialect::Sqlite {
-        return Some(RevisionRefusal::SqliteRequiredColumn {
-            kind: kind_name(&planned.op),
-            subject: subject(&planned.op),
-        });
+        return Some(RevisionRefusal::SqliteRequiredColumn(Box::new(
+            planned.op.clone(),
+        )));
     }
     if planned.verdict.execution == Execution::Rebuild
         && matches!(planned.op, MigrationOp::AddColumn { .. })
         && dialect == Dialect::Sqlite
     {
-        return Some(RevisionRefusal::SqliteKeptDefault {
-            kind: kind_name(&planned.op),
-            subject: subject(&planned.op),
-        });
+        return Some(RevisionRefusal::SqliteKeptDefault(Box::new(
+            planned.op.clone(),
+        )));
     }
     if planned.verdict.execution == Execution::Rebuild {
-        return Some(RevisionRefusal::Rebuild {
-            kind: kind_name(&planned.op),
-            subject: subject(&planned.op),
-        });
+        return Some(RevisionRefusal::Rebuild(Box::new(planned.op.clone())));
     }
     None
 }

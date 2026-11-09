@@ -1,5 +1,7 @@
 # Unified column-fact derivation across declaration paths
 
+> **Superseded in part by ADR-0061 (2026-11-08, #874)**: the raw path is gone. A `json_schema_extra` key naming a field option (`primary_key`, `unique`, `index`, `autoincrement`, `db_type`, `db_check`, `ferro_nullable`) is refused at class definition, naming the `Field()` argument, and the column compiler reads every option from the field's metadata alone. The unified autoincrement rule below still holds: explicit if given, otherwise `primary_key AND integer-typed`, for `Field()` and `FerroField()` alike.
+
 Ferro accepts column facts from two declaration paths: `ferro.Field()` /
 `FerroField` (the **ferro path**) and raw Pydantic
 `json_schema_extra={"primary_key": True}` (the **raw path**). Historically each

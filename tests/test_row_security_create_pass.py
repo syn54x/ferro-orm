@@ -18,7 +18,7 @@ It lives in ``test_row_security_reconcile.py`` / ``_rebuild.py`` / ``_orphans.py
 import datetime
 import json
 import uuid
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 import pytest
 
@@ -353,36 +353,6 @@ def test_distinct_policy_names_that_truncate_together_are_rejected():
                 RowPolicy(name=long_a, column="ledger_id", setting=SETTING),
                 RowPolicy(name=long_b, column="ledger_id", setting=SETTING),
             )
-
-
-def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass():
-    """A forward-referenced FK's shadow column only learns its real storage
-    when relationships resolve. The cast check re-runs there, so a target whose
-    PK turns out to be unsupported fails pointing at the declaration — and it
-    stays a TypeError, the class-definition contract, not an internal error."""
-    from ferro import BackRef, ForeignKey, Relation
-    from ferro.relations import resolve_relationships
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        owner: Annotated["Owner", ForeignKey(related_name="docs")]
-
-        # Passes at class-body time: the shadow column is provisionally integer.
-        __ferro_rls__: ClassVar = RowSecurity(
-            RowPolicy(column="owner_id", setting="pinch.owner")
-        )
-
-    class Owner(Model):
-        id: datetime.datetime = Field(primary_key=True)
-        docs: Relation[list["Doc"]] = BackRef()
-
-    with pytest.raises(TypeError) as excinfo:
-        resolve_relationships()
-
-    message = str(excinfo.value)
-    assert "Doc.__ferro_rls__" in message
-    assert "owner_id" in message
-    assert "timestamptz" in message
 
 
 def test_using_on_a_for_insert_policy_is_rejected():

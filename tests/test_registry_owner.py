@@ -8,7 +8,7 @@ a test reset wipes everything — are the Registry's locality, not a convention
 spread across callers and fixtures.
 """
 
-from ferro.registry import REGISTRY, ir_fingerprint
+from ferro.registry import REGISTRY, JoinTableBundle, ir_fingerprint
 
 
 class _FakeModel:
@@ -62,10 +62,14 @@ def test_missing_envelope_names_is_store_arithmetic():
         REGISTRY.restore(snap)
 
 
+def _bundle() -> JoinTableBundle:
+    return JoinTableBundle(("tests.fake.RegFake", "links"), (), (), ())
+
+
 def test_clear_join_tables_evicts_their_envelopes_too():
     snap = REGISTRY.snapshot()
     try:
-        REGISTRY.add_join_table("jt_a_b", {"columns": []})
+        REGISTRY.add_join_table("jt_a_b", _bundle())
         REGISTRY.persist_envelope("jt_a_b", {"payload": {"model_name": "jt_a_b"}})
         REGISTRY.clear_join_tables()
         assert "jt_a_b" not in REGISTRY.join_tables()
@@ -79,7 +83,7 @@ def test_snapshot_restore_round_trips_every_store():
     try:
         REGISTRY.register(_FakeModel)
         REGISTRY.defer_relation("tests.fake.RegFake", "other", object())
-        REGISTRY.add_join_table("jt_x_y", {"columns": []})
+        REGISTRY.add_join_table("jt_x_y", _bundle())
         REGISTRY.set_modelset({"payload": {"models": []}})
         assert REGISTRY.is_dirty()
     finally:

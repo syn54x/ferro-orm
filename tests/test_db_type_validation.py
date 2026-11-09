@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import IntEnum, StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import pydantic
 import pytest
 
-from ferro import Field, Model
+from ferro import FerroField, Field, Model
 
 
 class FileFormat(StrEnum):
@@ -37,7 +37,7 @@ def test_text_on_strenum_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         format: FileFormat = Field(db_type="text")
 
-    assert Doc.ferro_fields["format"].db_type == "text"
+    assert Doc.__ferro_fields__["format"].db_type == "text"
 
 
 def test_text_on_str_is_accepted():
@@ -45,7 +45,7 @@ def test_text_on_str_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         name: str = Field(db_type="text")
 
-    assert Doc.ferro_fields["name"].db_type == "text"
+    assert Doc.__ferro_fields__["name"].db_type == "text"
 
 
 def test_varchar_with_length_on_str_is_accepted():
@@ -53,7 +53,7 @@ def test_varchar_with_length_on_str_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         code: str = Field(db_type="varchar(255)")
 
-    assert Doc.ferro_fields["code"].db_type == "varchar(255)"
+    assert Doc.__ferro_fields__["code"].db_type == "varchar(255)"
 
 
 def test_bigint_on_int_is_accepted():
@@ -61,7 +61,7 @@ def test_bigint_on_int_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         value: int = Field(db_type="bigint")
 
-    assert Counter.ferro_fields["value"].db_type == "bigint"
+    assert Counter.__ferro_fields__["value"].db_type == "bigint"
 
 
 def test_smallint_on_intenum_is_accepted():
@@ -69,7 +69,7 @@ def test_smallint_on_intenum_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         priority: Priority = Field(db_type="smallint")
 
-    assert Task.ferro_fields["priority"].db_type == "smallint"
+    assert Task.__ferro_fields__["priority"].db_type == "smallint"
 
 
 def test_uuid_on_uuid_field_is_accepted():
@@ -77,7 +77,7 @@ def test_uuid_on_uuid_field_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         external_id: UUID = Field(db_type="uuid")
 
-    assert Record.ferro_fields["external_id"].db_type == "uuid"
+    assert Record.__ferro_fields__["external_id"].db_type == "uuid"
 
 
 def test_text_on_uuid_field_is_accepted():
@@ -87,7 +87,7 @@ def test_text_on_uuid_field_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         external_id: UUID = Field(db_type="text")
 
-    assert Record.ferro_fields["external_id"].db_type == "text"
+    assert Record.__ferro_fields__["external_id"].db_type == "text"
 
 
 def test_timestamptz_on_datetime_is_accepted():
@@ -95,7 +95,7 @@ def test_timestamptz_on_datetime_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         occurred_at: dt.datetime = Field(db_type="timestamptz")
 
-    assert Event.ferro_fields["occurred_at"].db_type == "timestamptz"
+    assert Event.__ferro_fields__["occurred_at"].db_type == "timestamptz"
 
 
 def test_date_on_date_is_accepted():
@@ -103,7 +103,7 @@ def test_date_on_date_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         occurred_on: dt.date = Field(db_type="date")
 
-    assert Event.ferro_fields["occurred_on"].db_type == "date"
+    assert Event.__ferro_fields__["occurred_on"].db_type == "date"
 
 
 def test_time_on_time_is_accepted():
@@ -111,7 +111,7 @@ def test_time_on_time_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         occurred_at: dt.time = Field(db_type="time")
 
-    assert Event.ferro_fields["occurred_at"].db_type == "time"
+    assert Event.__ferro_fields__["occurred_at"].db_type == "time"
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ def test_db_check_with_db_type_on_strenum_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         format: FileFormat = Field(db_type="text", db_check=True)
 
-    metadata = Doc.ferro_fields["format"]
+    metadata = Doc.__ferro_fields__["format"]
     assert metadata.db_type == "text"
     assert metadata.db_check is True
 
@@ -222,7 +222,7 @@ def test_db_check_with_db_type_on_intenum_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         priority: Priority = Field(db_type="smallint", db_check=True)
 
-    assert Task.ferro_fields["priority"].db_check is True
+    assert Task.__ferro_fields__["priority"].db_check is True
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ def test_optional_annotation_does_not_block_validation():
         id: int | None = Field(default=None, primary_key=True)
         format: FileFormat | None = Field(default=None, db_type="text")
 
-    assert Doc.ferro_fields["format"].db_type == "text"
+    assert Doc.__ferro_fields__["format"].db_type == "text"
 
 
 def test_optional_annotation_still_rejects_incoherent_db_type():
@@ -259,9 +259,9 @@ def test_existing_field_usage_unaffected():
         email: str = Field(unique=True, index=True)
         format: FileFormat = FileFormat.PDF  # no ferro metadata at all
 
-    assert User.ferro_fields["email"].db_type is None
-    assert User.ferro_fields["email"].db_check is False
-    assert "format" not in User.ferro_fields
+    assert User.__ferro_fields__["email"].db_type is None
+    assert User.__ferro_fields__["email"].db_check is False
+    assert "format" not in User.__ferro_fields__
 
 
 # Literal[...] db_check support is deferred per the plan; document the
@@ -272,43 +272,43 @@ def test_db_check_on_literal_is_accepted():
         id: int | None = Field(default=None, primary_key=True)
         status: Literal["draft", "live"] = Field(db_type="text", db_check=True)
 
-    assert Doc.ferro_fields["status"].db_check is True
+    assert Doc.__ferro_fields__["status"].db_check is True
 
 
 # ---------------------------------------------------------------------------
-# Path-blind validation (ADR-0003) -- the raw json_schema_extra path validates
-# identically to the ferro path, at class-definition time.
+# Path-blind validation (ADR-0003) -- `FerroField()` inside `Annotated` validates
+# identically to `Field()`, at class-definition time.
 # ---------------------------------------------------------------------------
 
 
-def test_raw_path_unknown_token_raises():
+def test_annotated_ferro_field_unknown_token_raises():
     with pytest.raises(TypeError, match="banana"):
 
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
-            name: str = pydantic.Field(json_schema_extra={"db_type": "banana"})
+            name: Annotated[str, FerroField(db_type="banana")]
 
 
-def test_raw_path_incompatible_token_raises():
+def test_annotated_ferro_field_incompatible_token_raises():
     with pytest.raises(TypeError, match="value.*db_type"):
 
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
-            value: int = pydantic.Field(json_schema_extra={"db_type": "text"})
+            value: Annotated[int, FerroField(db_type="text")]
 
 
-def test_raw_path_non_string_token_raises():
+def test_annotated_ferro_field_non_string_token_raises():
     with pytest.raises(TypeError, match="string token"):
 
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
-            name: str = pydantic.Field(json_schema_extra={"db_type": 123})
+            name: Annotated[str, FerroField(db_type=123)]
 
 
-def test_raw_path_compatible_token_is_accepted():
+def test_annotated_ferro_field_compatible_token_is_accepted():
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
-        name: str = pydantic.Field(json_schema_extra={"db_type": "text"})
+        name: Annotated[str, FerroField(db_type="text")]
 
     assert Doc.__ferro_columns__["name"].db_type == "text"
 
@@ -319,7 +319,7 @@ def test_empty_token_raises_on_both_paths():
 
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
-            name: str = pydantic.Field(json_schema_extra={"db_type": ""})
+            name: Annotated[str, FerroField(db_type="")]
 
     with pytest.raises(TypeError, match="canonical vocabulary"):
 
@@ -382,10 +382,10 @@ def test_json_on_dict_is_accepted():
     assert Doc.__ferro_columns__["data"].db_type == "json"
 
 
-def test_jsonb_on_raw_path_is_accepted():
+def test_jsonb_on_annotated_ferro_field_is_accepted():
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
-        data: dict = pydantic.Field(json_schema_extra={"db_type": "jsonb"})
+        data: Annotated[dict, FerroField(db_type="jsonb")]
 
     assert Doc.__ferro_columns__["data"].db_type == "jsonb"
 
@@ -398,12 +398,12 @@ def test_jsonb_on_int_raises():
             value: int = Field(db_type="jsonb")
 
 
-def test_jsonb_on_int_raw_path_raises():
+def test_jsonb_on_int_annotated_ferro_field_raises():
     with pytest.raises(TypeError, match="value.*db_type"):
 
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
-            value: int = pydantic.Field(json_schema_extra={"db_type": "jsonb"})
+            value: Annotated[int, FerroField(db_type="jsonb")]
 
 
 def test_jsonb_on_set_raises():

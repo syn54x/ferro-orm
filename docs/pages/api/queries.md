@@ -17,8 +17,8 @@ The [Queries guide](../guide/queries.md) covers each feature with worked example
 
 - `~` negates any predicate, rendering SQL `NOT (...)`: [Negation and NULL values](../guide/queries.md#negation-and-null-values).
 - A lambda that follows a foreign key adds one `INNER JOIN` per relation path; `left_join()` keeps rows without the relation: [Querying across relationships](../guide/queries.md#querying-across-relationships).
-- A `BackRef` or many-to-many relation in a predicate takes one verb, `.exists()`, rendered as a correlated `EXISTS`: [Existence tests](../guide/queries.md#existence-tests-on-reverse-many-to-many-relations).
-- `include()` returns each result with a forward relation loaded, so reading it needs no `await`: [Populating relations with `include()`](../guide/queries.md#populating-relations-with-include).
+- A reverse (`Reverse`) or many-to-many (`ManyToMany`) relation in a predicate takes one verb, `.exists()`, rendered as a correlated `EXISTS`: [Existence tests](../guide/queries.md#existence-tests-on-reverse-many-to-many-relations).
+- `include()` returns each result with a forward relation loaded, so reading its columns runs no query; without it the relation is an unloaded instance that `.load()` fills: [Loading relations with `include()`](../guide/queries.md#loading-relations-with-include).
 - `nulls=` on `order_by()` defaults to `NULLS LAST` on every backend: [Ordering, limit and offset](../guide/queries.md#ordering-limit-offset).
 
 ## `select()` overloads
@@ -28,7 +28,7 @@ The [Queries guide](../guide/queries.md) covers each feature with worked example
 | Call | Returns | Result of `.all()` |
 | :--- | :--- | :--- |
 | `Post.select()` | `Query[Post]` | `list[Post]`: the full query, unchanged. |
-| `Post.select(lambda post: (post.id, post.author.name))` | `ProjectedQuery[Post]` | `Rows[Row]`: one record per row; a field may follow forward foreign keys at any depth and takes the leaf column's name (one field: `select(lambda post: post.views)`). |
+| `Post.select(lambda post: (post.id, post.author.name))` | `ProjectedQuery[Post]` | `Rows[Row]`: one record per row; a field may follow forward relations at any depth and takes the leaf column's name (one field: `select(lambda post: post.views)`). |
 | `Post.select(lambda post: {"author_email": post.author.email})` | `ProjectedQuery[Post]` | `Rows[Row]`: the dict keys name the output fields; the values are field references or aggregates. |
 | `Post.select("id", "views")` | `ProjectedQuery[Post]` | `Rows[Row]`: root columns only, never a traversal, never mixed with a lambda. |
 

@@ -74,11 +74,8 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
     Model,
-    Relation,
     _core,
     clear_registry,
     connect,
@@ -145,13 +142,11 @@ def _build_fixture_models() -> None:
         avatar: bytes  # bytea/blob
         settings: dict  # json
         score: float  # double precision
-        members: Relation[list["Member"]] = BackRef()
-        projects: Relation[list["Project"]] = BackRef()
 
     class Member(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[Org, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
         __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("email", "org_id"),
@@ -160,7 +155,7 @@ def _build_fixture_models() -> None:
     class Project(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
         __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("org_id", "name"),
@@ -188,8 +183,7 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
     - The full derived-type family: Enum, datetime, date, time, UUID,
       Decimal, bytes, JSON, float
     - Single-column ``FerroField(index=True)`` / ``FerroField(unique=True)``
-    - Shadow-column ``ForeignKey(index=True)`` (the issue-32 surface)
-    - ``ForeignKey`` without ``index=True`` (default, no extra index)
+    - A foreign-key column with ``index=True`` (the issue-32 surface)
     - ``__ferro_composite_indexes__`` and ``__ferro_composite_uniques__``
     - Mixed FK target (Org is referenced from two distinct tables)
     """
@@ -245,12 +239,11 @@ def _build_migration_v1_models() -> None:
     class MigOrg(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         slug: Annotated[str, FerroField(unique=True)]
-        members: Relation[list["MigMember"]] = BackRef()
 
     class MigMember(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=MigOrg, index=True)]
 
     return MigOrg, MigMember
 
@@ -263,12 +256,11 @@ def _build_migration_v2_models() -> None:
         slug: Annotated[str, FerroField(unique=True)]
         name: Annotated[str | None, FerroField(index=True)] = None
         motto: str | None = None
-        members: Relation[list["MigMember"]] = BackRef()
 
     class MigMember(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=MigOrg, index=True)]
 
     return MigOrg, MigMember
 
@@ -911,14 +903,14 @@ class Finding:
 FINDINGS: dict[str, Finding] = {
     "C2-drop-a-foreign-key-column": Finding(
         reason=(
-            "pin (g): on SQLite the planner renders a plain DROP COLUMN for a "
+            "pins (f) and (g): on SQLite the planner renders a plain DROP COLUMN for a "
             "foreign-key column, which SQLite refuses at execution (the column "
             "is in the table's FOREIGN KEY definition); the pass fails naming "
             "`ferro migrate new` instead of the renderer refusing the op "
             "(SqliteInPlace) before anything runs"
         ),
         raises=OperationalError,
-        pins=frozenset({"g"}),
+        pins=frozenset({"f", "g"}),
         dialects=frozenset({"sqlite"}),
     ),
 }
@@ -1093,6 +1085,7 @@ REBUILD_CASES = (
     "A10-change-a-table-check",
     "A10-drop-a-table-check",
     "B3-rename-a-model",
+    "B3-rename-a-join-table",
     "C1-add-an-optional-foreign-key",
     "C1-add-a-required-foreign-key",
     "C2-drop-a-foreign-key-column",
@@ -2051,12 +2044,25 @@ def _executed_literals(code: str) -> list[str]:
     ]
 
 
-def _plan_live(live: str, envelope: dict, dialect: str, facts: str) -> list[dict]:
+def _plan_live(
+    live: str, envelope: dict, dialect: str, facts: str, *, render: bool = True
+) -> list[dict]:
     return json.loads(
         _core._plan_from_ir(
-            live, json.dumps(envelope), dialect, DESTRUCTIVE, True, facts
+            live, json.dumps(envelope), dialect, DESTRUCTIVE, render, facts
         )
     )["operations"]
+
+
+_SAID_OF_AN_OP = frozenset(
+    {"verdict", "statements", "reports", "row_security_statements"}
+)
+
+
+def _bare_op(op: dict) -> dict:
+    """A plan op without what the planner says of it (its verdict and its
+    rendering): the op as a revision refusal names it."""
+    return {key: value for key, value in op.items() if key not in _SAID_OF_AN_OP}
 
 
 def _run_statements(
@@ -2067,24 +2073,48 @@ def _run_statements(
         db.execute(statement)
 
 
-def _pass_declines(url: str) -> bool:
-    """Whether the reconciliation pass, run for real, declines the change
-    and points at ``ferro migrate new``: it refuses so, or it warns so and
-    leaves the table as it is (ADR-0014's SQLite posture)."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            asyncio.run(
-                connect(
-                    url,
-                    name="p538_pass_run",
-                    migrate_updates=True,
-                    migrate_destructive=True,
-                )
-            )
-        except Exception as refusal:  # noqa: BLE001 - the refusal is the answer
-            return "ferro migrate new" in str(refusal)
-    return any("ferro migrate new" in str(w.message) for w in caught)
+def _the_pass_declines_the_rebuild(
+    case_id: str,
+    backend: str,
+    refusal: dict,
+    live: str,
+    facts: str,
+    after: dict,
+    databases: list,
+) -> None:
+    """The reconciliation pass, run for real on the second of ``databases``
+    (the first stays as the refused revision left it), does with the op the
+    bridge refused what the planner rendered for it: no statement (a decline,
+    reported by the plan's reports, ADR-0014), or, for ADR-0034's SQLite
+    exception, the column added keeping its literal ``DEFAULT``. Every other
+    op it runs as the plan renders it."""
+    plan = json.loads(
+        _core._plan_from_ir(live, json.dumps(after), backend, DESTRUCTIVE, True, facts)
+    )
+    rendered = next(op for op in plan["operations"] if _bare_op(op) == refusal["op"])
+    run = databases[1]
+    report = asyncio.run(_run_the_pass(run.url))
+    executed, planned = _ran_and_planned(report, plan["operations"], facts)
+    assert executed == planned
+    warned = Counter(
+        _report_key(w.kind, dataclasses.asdict(w.subject)) for w in report.warnings
+    )
+    reported = Counter(
+        _report_key(r["kind"], r["subject"])
+        for r in [
+            *plan["reports"],
+            *(r for op in plan["operations"] for r in op["reports"]),
+        ]
+    )
+    assert reported <= warned, (reported, warned)
+    kept = KEPT_DEFAULTS.get((case_id, backend))
+    if rendered["statements"]:
+        assert refusal["kind"] == "sqlite_kept_default", refusal
+        assert kept is not None, (case_id, rendered)
+        defaults = column_defaults(run)
+        assert {column: defaults[column] for column in kept} == kept
+    else:
+        assert kept is None, (case_id, rendered)
 
 
 ROWS_HELD = {
@@ -2118,13 +2148,23 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
 
     Where the pass carries no change out, neither does the bridge: a value
     existing rows lack is the plain op marked ``# ferro: data-dependent``
-    (the pass refuses naming ``ferro migrate new``), and a change SQLite can
-    only make by a table rebuild is refused naming ``ferro migrate new``
-    (the pass declines it too, by a warning or a refusal naming the same
-    command), but for ADR-0034's SQLite exception: a required column with a
-    literal default, which the pass adds keeping that literal as its
-    ``DEFAULT`` (``KEPT_DEFAULTS``) and a revision, which cannot rebuild,
-    refuses."""
+    where the pass's plan refuses to render. On SQLite a revision that holds
+    an op the bridge cannot write is refused whole (ADR-0041, ADR-0050),
+    while the pass runs the native ops and declines the rest (ADR-0014).
+    That split is compared by what each side did, never by a sentence:
+
+    - the refusal the bridge raised is the core's, and the op it names is
+      one of the planner's, by kind and subject;
+    - a ``rebuild`` or ``sqlite_kept_default`` refusal names an op whose
+      verdict is a rebuild. The pass, run for real, executes exactly the
+      plan's statements and warns every report the plan carries (by kind
+      and subject), so it runs nothing for an op that renders no statement;
+      an op that does render one is ADR-0034's SQLite exception
+      (``KEPT_DEFAULTS``: the pass adds the column keeping its literal
+      ``DEFAULT``);
+    - a ``sqlite_required_column`` refusal names an op that demands values
+      of existing rows, and the pass refuses the same plan before it runs
+      anything."""
     expect_finding(request, case_id, db_backend, "f")
     case = CASEBOOK[case_id]
     second, second_schema = second_db
@@ -2146,26 +2186,37 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     after = project.register(case.after)
     dropped = frozenset(_tables(before))
     live, facts = asyncio.run(_read_live(db_url, after, dropped))
+    plan_refusal = None
     try:
         planned = _plan_live(live, after, db_backend, facts)
     except ValueError as refusal:
         if "ferro migrate new" not in str(refusal):
             raise
-        planned = None
+        planned, plan_refusal = None, refusal
 
     try:
         upgrade, _ = autogenerate(db_url, postgres_base_url, db_schema_name)
-    except RuntimeError as refusal:
-        assert "autogenerate refused" in str(refusal), refusal
-        assert "`ferro migrate new`" in str(refusal), refusal
-        kept = KEPT_DEFAULTS.get((case_id, db_backend))
-        if kept is not None:
-            assert "keeps for good" in str(refusal), refusal
-            asyncio.run(connect(second, name="p538_pass_run", migrate_updates=True))
-            defaults = column_defaults(databases[1])
-            assert {column: defaults[column] for column in kept} == kept
-            return
-        assert _pass_declines(second), str(refusal)
+    except RuntimeError as bridge_refusal:
+        refusal = _core._plan_revision(live, facts, json.dumps(after), db_backend)[
+            "refusal"
+        ]
+        assert refusal is not None, bridge_refusal
+        assert str(bridge_refusal) == f"ferro: autogenerate refused: {refusal['text']}"
+        verdicts = _plan_live(live, after, db_backend, facts, render=False)
+        refused = [op for op in verdicts if _bare_op(op) == refusal["op"]]
+        assert len(refused) == 1, (refusal, verdicts)
+        verdict = refused[0]["verdict"]
+        if refusal["kind"] == "sqlite_required_column":
+            assert verdict["demands_values"], (refusal, verdict)
+            with pytest.raises(ValueError) as pass_refusal:
+                asyncio.run(_run_the_pass(second))
+            assert str(pass_refusal.value) == str(plan_refusal)
+        else:
+            assert refusal["kind"] in ("rebuild", "sqlite_kept_default"), refusal
+            assert verdict["execution"] == "rebuild", (refusal, verdict)
+            _the_pass_declines_the_rebuild(
+                case_id, db_backend, refusal, live, facts, after, databases
+            )
         if rows_of:
             # Neither emitter changed a row: the relabel is the generated
             # migration's.
@@ -2225,6 +2276,23 @@ def _report_key(kind, subject: dict) -> tuple[str, tuple]:
     return name, tuple(sorted((k, v) for k, v in subject.items() if v is not None))
 
 
+def _ran_and_planned(
+    report: PassReport, operations: list[dict], facts: str
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """The ``schema`` statements the pass executed and the ones the plan's
+    ``operations`` render, each grouped by the table (or enum type) they
+    belong to."""
+    planned = _by_subject(
+        (_op_subject(op), sql) for op in operations for sql in op["statements"]
+    )
+    executed = _by_subject(
+        (s.subject, s.sql)
+        for s in report.statements
+        if s.role == "schema" and not _create_pass_type_guard(s, planned, facts)
+    )
+    return executed, planned
+
+
 async def _run_the_pass(url: str) -> PassReport:
     await connect(url, name="p_g_pass")
     try:
@@ -2280,14 +2348,7 @@ def test_pin_g_the_pass_executes_the_plan_it_renders(
         return
     report = asyncio.run(_run_the_pass(db_url))
 
-    planned = _by_subject(
-        (_op_subject(op), sql) for op in plan["operations"] for sql in op["statements"]
-    )
-    executed = _by_subject(
-        (s.subject, s.sql)
-        for s in report.statements
-        if s.role == "schema" and not _create_pass_type_guard(s, planned, facts)
-    )
+    executed, planned = _ran_and_planned(report, plan["operations"], facts)
     assert executed == planned
 
     added = {op["table"] for op in plan["operations"] if op["kind"] == "AddTable"}

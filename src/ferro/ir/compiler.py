@@ -20,7 +20,6 @@ from .._core import (
     _ddl_single_unique_name,
     _ddl_table_check_constraint_name,
 )
-from ..base import ForeignKey
 from ..checks import TableCheckSpec, compile_table_checks
 from ..generated import GeneratedColumnSpec, compile_generated_columns
 from ..columns import (
@@ -33,7 +32,7 @@ from ..columns import (
 )
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
-from ..registry import REGISTRY, ir_fingerprint
+from ..registry import REGISTRY, JoinTableBundle, ir_fingerprint
 from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
 # Schema IR v4 adds the optional column key `generated`, a generated column's
@@ -48,34 +47,24 @@ _IR_VERSION = 4
 class RenameHints:
     """A model's declared rename hints (ADR-0032).
 
-    ``table`` is ``__ferro_renamed_from__``; ``columns`` maps each column to
-    the name it had before (a ``ForeignKey`` hint's shadow column included);
-    ``foreign_keys`` maps a foreign key's shadow column to the relation field
-    it was declared under before.
+    ``table`` is ``__ferro_renamed_from__``; ``columns`` maps each column,
+    a foreign-key column included, to the name it had before.
     """
 
     table: str | None = None
     columns: Mapping[str, str] = field(default_factory=dict)
-    foreign_keys: Mapping[str, str] = field(default_factory=dict)
 
 
 def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
     """Collect ``model_cls``'s rename hints from its declarations."""
     columns: dict[str, str] = {}
-    foreign_keys: dict[str, str] = {}
-    for field_name, meta in (getattr(model_cls, "ferro_fields", {}) or {}).items():
+    for field_name, meta in (getattr(model_cls, "__ferro_fields__", {}) or {}).items():
         previous = getattr(meta, "renamed_from", None)
         if previous is not None:
             columns[field_name] = previous
-    for field_name, meta in (getattr(model_cls, "ferro_relations", {}) or {}).items():
-        previous = getattr(meta, "renamed_from", None)
-        if isinstance(meta, ForeignKey) and previous is not None:
-            columns[f"{field_name}_id"] = f"{previous}_id"
-            foreign_keys[f"{field_name}_id"] = previous
     return RenameHints(
         table=getattr(model_cls, "__ferro_renamed_from__", None),
         columns=columns,
-        foreign_keys=foreign_keys,
     )
 
 
@@ -273,16 +262,23 @@ def _table_check_entries(
     return entries
 
 
-def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
+def _fk_target_column(
+    model_name: str,
+    spec: ColumnSpec,
+    to_table: str,
+    columns: Mapping[str, ColumnSpec],
+) -> str:
     """The primary-key column a foreign key into ``to_table`` references.
 
-    Read from the registered model that owns the table, the source the shadow
-    column's type comes from. A target not yet defined, or not yet compiled
+    Read from the registered model that owns the table, the key a foreign-key
+    column points at. A target not yet defined, or not yet compiled
     (its columns not yet published), gets ``id`` until the resolved second pass
     recompiles the envelope.
 
     Raises:
-        TypeError: The target is compiled and declares no primary key.
+        DeclarationRefusal: The target is compiled and declares no primary
+            key; the refusal is the one relation resolution raises for it,
+            computed from ``columns``, every spec of the model compiling.
     """
     for model in REGISTRY.models().values():
         if getattr(model, "__ferro_table__", None) == to_table:
@@ -291,10 +287,12 @@ def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
             # (a self-reference compiles before them); only a published,
             # keyless target is an error.
             if pk is None and getattr(model, "__ferro_columns__", None):
-                raise TypeError(
-                    f"{model_name}.{column} references {model.__name__}, which "
-                    "declares no primary key. Declare a primary_key=True field "
-                    f"on {model.__name__}."
+                # Imported here: the relations package imports this module.
+                from ..relations import keyless_target_refusal
+
+                owner = REGISTRY.models().get(model_name)
+                raise keyless_target_refusal(
+                    model_name.rsplit(".", 1)[-1], spec.name, model, columns, owner
                 )
             return pk or "id"
     return "id"
@@ -342,7 +340,7 @@ def compile_schema_ir_payload(
     # Collapse same-named specs, last one wins — mirrors the historical
     # ``properties`` dict-literal merge (a self-referential M2M join table
     # derives an identical ``{table}_id`` name for both its source and target
-    # shadow-FK columns; the dict pipeline silently collapsed that duplicate
+    # foreign-key columns; the dict pipeline silently collapsed that duplicate
     # key, so specs must too, or the compiled table gains a duplicate column).
     deduped: dict[str, ColumnSpec] = {}
     for spec in columns:
@@ -384,16 +382,13 @@ def compile_schema_ir_payload(
                 "column": spec.name,
                 "to_table": spec.foreign_key.to_table,
                 "to_column": _fk_target_column(
-                    model_name, spec.name, spec.foreign_key.to_table
+                    model_name, spec, spec.foreign_key.to_table, deduped
                 ),
                 "on_delete": spec.foreign_key.on_delete,
                 "name": _fk_name(
                     resolved_table_name, spec.name, spec.foreign_key.to_table
                 ),
             }
-            previous_field = hints.foreign_keys.get(spec.name)
-            if previous_field is not None:
-                fk_entry["renamed_from"] = previous_field
             foreign_keys.append(fk_entry)
         if spec.index:
             indexes.append(
@@ -601,7 +596,7 @@ def compile_model_schema_ir(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
     # Table checks compile against THIS pass's specs (never the class's
-    # published ones), so a predicate can reference a shadow FK column at class
+    # published ones), so a predicate can reference a foreign-key column at class
     # definition and the resolved second pass re-lowers against fresh specs.
     table_checks = compile_table_checks(model_cls, model_name, schema_specs)
     # Generated expressions lower beside them, against the same fresh specs.
@@ -673,11 +668,7 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
     for model_name in sorted(REGISTRY.models()):
         models.append(_model_payload_from_envelope(model_name))
 
-    for table_name, bundle in sorted(
-        REGISTRY.join_tables().items(), key=lambda item: item[0]
-    ):
-        if not isinstance(bundle, dict):
-            continue
+    for table_name in sorted(REGISTRY.join_tables()):
         models.append(_model_payload_from_envelope(table_name))
 
     envelope = {
@@ -693,14 +684,14 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
     return envelope
 
 
-def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None:
+def _register_join_table_bundle(table_name: str, bundle: JoinTableBundle) -> None:
     register_model_with_ir(
         table_name,
-        bundle["columns"],
+        bundle.columns,
         table_name,
-        composite_uniques=bundle["composite_uniques"],
-        composite_indexes=bundle["composite_indexes"],
-        rename_hints=bundle.get("rename_hints"),
+        composite_uniques=bundle.composite_uniques,
+        composite_indexes=bundle.composite_indexes,
+        rename_hints=bundle.rename_hints,
     )
 
 
@@ -711,7 +702,7 @@ def _recompile_missing_registry_envelopes() -> None:
             compile_model_schema_ir(model_name, model_cls)
             continue
         bundle = REGISTRY.join_tables().get(model_name)
-        if isinstance(bundle, dict):
+        if bundle is not None:
             _register_join_table_bundle(model_name, bundle)
 
 
@@ -725,11 +716,8 @@ def _recompile_all_registered_envelopes() -> None:
     """
     for model_name, model_cls in sorted(REGISTRY.models().items()):
         compile_model_schema_ir(model_name, model_cls)
-    for table_name, bundle in sorted(
-        REGISTRY.join_tables().items(), key=lambda item: item[0]
-    ):
-        if isinstance(bundle, dict):
-            _register_join_table_bundle(table_name, bundle)
+    for table_name, bundle in sorted(REGISTRY.join_tables().items()):
+        _register_join_table_bundle(table_name, bundle)
 
 
 def compile_registry_schema_ir() -> dict[str, Any]:

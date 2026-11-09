@@ -1,5 +1,7 @@
 # Model instances are never partial; projection returns records via an explicit materialization plan
 
+> **Superseded in part by ADR-0063 (2026-11-08, #874)**: an instance is complete or unloaded. An unloaded instance stands behind a forward relation nothing loaded, holds only its primary key and refuses every other column with `InstanceNotLoaded` until `include()` or `.load()` fills it in place. Anything narrower than a row is still a projected record, and the materialization plan below stands.
+
 A model instance always carries a complete row (`GLOSSARY.md`: Complete-instance
 invariant). Selecting a subset of columns — or an aggregate that belongs to no
 model — returns a **projected record** (`Row`, in the list-like `Rows`

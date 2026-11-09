@@ -8,16 +8,15 @@ the guide shows and asserts the exact records that come back.
 import asyncio
 from collections import defaultdict
 from decimal import Decimal
-from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 # --8<-- [start:schema]
 class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
-    transactions: Relation[list["Transaction"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
 class Transaction(Model):
@@ -25,7 +24,8 @@ class Transaction(Model):
     amount: int
     price: Decimal | None = None
     memo: str
-    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+    account_id: int | None = Field(default=None, foreign_key=Account)
+    account: Relation[Account | None] = Forward("account_id")
 
 
 # --8<-- [end:schema]
@@ -36,13 +36,13 @@ async def seed() -> None:
     checking = await Account.create(id=1, label="Checking")
     savings = await Account.create(id=2, label="Savings")
     await Transaction.create(
-        id=1, amount=10, price=Decimal("1.25"), memo="coffee", account=checking
+        id=1, amount=10, price=Decimal("1.25"), memo="coffee", account_id=checking.id
     )
     await Transaction.create(
-        id=2, amount=20, price=Decimal("2.75"), memo="lunch", account=checking
+        id=2, amount=20, price=Decimal("2.75"), memo="lunch", account_id=checking.id
     )
     await Transaction.create(
-        id=3, amount=45, price=Decimal("5.00"), memo="dinner", account=savings
+        id=3, amount=45, price=Decimal("5.00"), memo="dinner", account_id=savings.id
     )
     await Transaction.create(id=4, amount=40, memo="orphan")  # no account, no price
 

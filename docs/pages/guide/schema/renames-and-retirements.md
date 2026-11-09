@@ -79,7 +79,7 @@ ALTER TYPE "status" RENAME VALUE 'canceled' TO 'cancelled';
 
 The table, the column, every index named after them and the label are renamed in place. The hints:
 
-- `Field(renamed_from="nickname")` renames a column; on a relation, `ForeignKey(..., renamed_from="writer")` renames its `*_id` column.
+- `Field(renamed_from="nickname")` renames a column. A foreign-key column is renamed the same way, with its own `Field(foreign_key=Author, renamed_from="writer_id")`; a relation's name reaches no schema, so renaming the relation needs no hint.
 - `__ferro_renamed_from__ = "author"` on a model renames its table, and every index and constraint named after it. On Postgres the `DO` block renames the table's `serial` sequence too, to `writer_id_seq`, the name a table created as `writer` gives it; it refuses, naming the object, if something else already holds that name.
 - `__ferro_renamed_labels__ = {"cancelled": "canceled"}` on a `StrEnum` maps each new label to its old one. On SQLite, where labels are text in the rows, the rows are rewritten in a [table rebuild](migrations.md#sqlite-table-rebuilds).
 - An enum *type*'s rename needs no hint: it is read off the columns that moved to it.
@@ -89,6 +89,39 @@ A hint is live only while the previous snapshot still holds the old name and lac
 Auto-migrate honours every hint under `migrate_updates` (on SQLite a label hint only warns, since the labels live in the rows). Without `migrate_updates`, a table hint makes the create pass hold the table back with a warning rather than create it empty. The [strategy coverage table](../../reference/migrations.md#what-each-strategy-covers) lists what each strategy does with a hint.
 
 The example `docs/examples/migrations_rename.py` in the repository runs this rename end to end, the revert included.
+
+### Renaming a join table
+
+A many-to-many's join table is the table `through=` names, and renaming the model leaves it alone. To rename the table itself, give `through=` the new name and `renamed_from=` the old one. Here `Author` has gained tags through a join table called `writer_tags`, which becomes `author_tags`:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/migrations_rename_join_table.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/migrations_rename_join_table_annotated.py:models"
+    ```
+
+`ferro migrate new rename_author_tags` renames the table and every name derived from it, so each link row stays:
+
+```sql
+-- 0002_rename_author_tags/01_schema.up.postgres.sql
+ALTER TABLE "writer_tags" RENAME TO "author_tags";
+
+ALTER INDEX "idx_writer_tags_tag_id_author_id" RENAME TO "idx_author_tags_tag_id_author_id";
+
+ALTER INDEX "uq_writer_tags_author_id_tag_id" RENAME TO "uq_author_tags_author_id_tag_id";
+
+ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_author_id_author" TO "fk_author_tags_author_id_author";
+
+ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO "fk_author_tags_tag_id_tag";
+```
+
+Without `renamed_from=`, the new name is a new table: `new` writes a `CREATE TABLE` and a destructive `DROP TABLE`, and the links are lost. The hint follows the rules of every other hint: it is live only while the old table stands alone, auto-migrate honours it under `migrate_updates`, and an old name the models still declare is refused the same way. A name that is not a table name, or is the name `through=` gives now, is refused at class definition with the declaration to write instead. The example `docs/examples/migrations_rename_join_table.py` runs this rename end to end.
 
 ## Renaming under a rolling deploy
 
@@ -139,11 +172,11 @@ In the next release, delete the declaration: `new` writes the `DROP COLUMN`, mar
 | B | nullable, indexed, `retired=True` | `DROP NOT NULL` | A writes `bio`; works |
 | C | deleted | `DROP COLUMN "bio"` (destructive) | B never names `bio`; works |
 
-- `ForeignKey(retired=True)` retires a relation and its `*_id` column; its foreign key constraint stays until the column is dropped. It needs no `related_name`, and a `BackRef` reading it back is refused: delete it.
+- A foreign-key column is retired like any column, with `retired=True` on an optional column: `writer_id: int | None = Field(default=None, foreign_key=Writer, retired=True)`. Its foreign key constraint stays until the column is dropped. A `Forward` or `Reverse` that names a retired column is refused: delete it.
 - Nothing else about the column changes while it is retired: its index, unique, check and foreign key, and every table check, row policy, composite index or unique that names it, stay as declared.
 - A [historical model](data-steps.md#historical-models) sees a retired column as an ordinary nullable column, so a data step can still read it.
 - Auto-migrate creates the column on a fresh database and, under `migrate_updates`, relaxes its `NOT NULL`; it never drops it. Alembic autogenerate writes the same `alter_column(..., nullable=True)`.
-- Refused at class definition, each naming the fix: retiring a field whose annotation does not allow `None` (declare it `str | None`), a field declared `nullable=False` (a retired column stays nullable), a primary key (drop `retired=True` and change the key first, see [Changing a primary key](migrations.md#changing-a-primary-key)), a field that also declares `renamed_from` (retire it or rename it, not both), a `BackRef` or a `ManyToMany`.
+- Refused at class definition, each naming the fix: retiring a field whose annotation does not allow `None` (declare it `str | None`), a field declared `nullable=False` (a retired column stays nullable), a primary key (drop `retired=True` and change the key first, see [Changing a primary key](migrations.md#changing-a-primary-key)), a field that also declares `renamed_from` (retire it or rename it, not both), a relation over a retired column or a `ManyToMany`.
 
 The example `docs/examples/migrations_retire.py` runs all three releases end to end.
 

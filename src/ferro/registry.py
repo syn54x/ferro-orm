@@ -37,7 +37,11 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from .columns import ColumnSpec
+    from .ir.compiler import RenameHints
 
 
 class FerroModelClass(Protocol):
@@ -55,6 +59,22 @@ class FerroModelClass(Protocol):
     __ferro_identity__: str
     __name__: str
     __qualname__: str
+
+
+@dataclass(frozen=True)
+class JoinTableBundle:
+    """A many-to-many's join table: what its envelope compiles from, and who declares it."""
+
+    declared_by: tuple[str, str]
+    """The declaring model's identity and the relation's field name."""
+    columns: tuple[ColumnSpec, ...]
+    """The two key columns, the declaring side's first."""
+    composite_uniques: tuple[tuple[str, ...], ...]
+    """The unique pair over both columns."""
+    composite_indexes: tuple[tuple[str, ...], ...]
+    """The reverse index, or none when the relation turns it off."""
+    rename_hints: RenameHints | None = None
+    """What the table and its columns were called before, if renamed."""
 
 
 _UNSET = object()
@@ -99,7 +119,7 @@ class RegistrySnapshot:
     """The compiled schema envelopes, keyed by model identity or join-table name."""
     fingerprints: dict[str, str]
     """The fingerprint of each envelope, under the same keys."""
-    join_tables: dict[str, Any]
+    join_tables: dict[str, JoinTableBundle]
     """The join-table bundles, keyed by table name."""
     pending_relations: list[Any] = field(repr=False)
     """The relation declarations waiting for resolution."""
@@ -195,7 +215,7 @@ class Registry:
         self._models: dict[str, FerroModelClass] = {}
         self._envelopes: dict[str, dict[str, Any]] = {}
         self._fingerprints: dict[str, str] = {}
-        self._join_tables: dict[str, Any] = {}
+        self._join_tables: dict[str, JoinTableBundle] = {}
         self._pending_relations: list[Any] = []
         self._modelset: dict[str, Any] | None = None
         self._modelset_fingerprint: str | None = None
@@ -213,16 +233,30 @@ class Registry:
         derived from ``cls`` here rather than caller-supplied: the registry
         key is a pure function of the model, so every emitter (the Rust
         runtime registry, the raw operations) keys the same model by the same
-        name. Idempotent by construction.
+        name. Idempotent by construction. A new class under an identity
+        already registered (a model redefined in the same process) releases
+        the join tables the old one declared, which its relations declare
+        again when they resolve.
 
         Args:
             cls: The model class.
         """
-        self._models[cls.__ferro_identity__] = cls
+        identity = cls.__ferro_identity__
+        previous = self._models.get(identity)
+        if previous is not None and previous is not cls:
+            self._release_join_tables(identity)
+        self._models[identity] = cls
         self._registration_generation += 1
 
+    def _release_join_tables(self, identity: str) -> None:
+        """Drop the join tables the model ``identity`` declares, and their envelopes."""
+        for name, bundle in list(self._join_tables.items()):
+            if bundle.declared_by[0] == identity:
+                del self._join_tables[name]
+                self.evict_envelope(name)
+
     def deregister(self, name: str) -> None:
-        """Evict one model from every per-model store (registry + envelopes).
+        """Evict one model from every per-model store: registry, envelopes, join tables.
 
         Takes a ``name`` (the canonical identity) rather than a class, unlike
         `register` — teardown paths iterate registry keys and hold the
@@ -234,14 +268,15 @@ class Registry:
         removed = name in self._models
         self._models.pop(name, None)
         self.evict_envelope(name)
+        self._release_join_tables(name)
         if removed:
             self._registration_generation += 1
 
     def models(self) -> dict[str, FerroModelClass]:
         """Return the registered models, keyed by canonical identity.
 
-        A read view: callers iterate, look up, and pass it on (shadow
-        foreign-key reconciliation, say) and never mutate it. Mutation goes
+        A read view: callers iterate, look up, and pass it on (relationship
+        resolution, say) and never mutate it. Mutation goes
         through `register` and `deregister`, which own the generation
         counter bump.
 
@@ -343,8 +378,8 @@ class Registry:
     def missing_envelope_names(self) -> list[str]:
         """Return the registered names whose envelope is absent.
 
-        It is the store-agreement arithmetic: registry keys and dict-bundle
-        join tables, minus envelope keys. A non-empty result means a cold
+        It is the store-agreement arithmetic: registry keys and join
+        tables, minus envelope keys. A non-empty result means a cold
         rehydrate must recompile first.
 
         Returns:
@@ -353,23 +388,39 @@ class Registry:
         missing = [name for name in self._models if name not in self._envelopes]
         missing.extend(
             table_name
-            for table_name, bundle in self._join_tables.items()
-            if isinstance(bundle, dict) and table_name not in self._envelopes
+            for table_name in self._join_tables
+            if table_name not in self._envelopes
         )
         return missing
 
     # -- join tables ---------------------------------------------------------
 
-    def add_join_table(self, name: str, bundle: Any) -> None:
+    def add_join_table(self, name: str, bundle: JoinTableBundle) -> None:
         """Record one generated join table's bundle.
+
+        A join table belongs to the one relation that declares it, named by
+        the bundle's ``declared_by`` (model identity, field). Relation
+        resolution refuses a second relation naming the table before it gets
+        here, so a bundle from another relation is an internal error, never
+        a silent overwrite that would let two relations share rows.
 
         Args:
             name: The join table's name.
             bundle: What the schema compiler needs to build its envelope.
+
+        Raises:
+            RuntimeError: Another relation already declares the table.
         """
+        held = self._join_tables.get(name)
+        if held is not None and held.declared_by != bundle.declared_by:
+            raise RuntimeError(
+                f"ferro: join table {name!r} is declared by {held.declared_by} "
+                f"and {bundle.declared_by}; relation resolution should "
+                "have refused the second"
+            )
         self._join_tables[name] = bundle
 
-    def join_tables(self) -> dict[str, Any]:
+    def join_tables(self) -> dict[str, JoinTableBundle]:
         """Return the join-table bundles, keyed by table name, as a read view.
 
         Returns:
@@ -396,8 +447,9 @@ class Registry:
         Args:
             identity: The declaring model's canonical identity.
             field_name: The relation field's name.
-            metadata: The relation's declaration (`ForeignKey`,
-                `ManyToManyRelation` or `"BackRef"`).
+            metadata: What the declaration records: a foreign-key column's
+                `FerroField`, or a `ForwardRelation`, `ReverseRelation` or
+                `ManyToManyRelation`.
         """
         self._pending_relations.append((identity, field_name, metadata))
 

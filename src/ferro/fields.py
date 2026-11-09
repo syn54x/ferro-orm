@@ -1,20 +1,40 @@
-"""`Field`, `BackRef` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
+"""`Field`, `Forward`, `Reverse` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
 
 from __future__ import annotations
 
+import ast
+import difflib
+import inspect
+import json
+import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, Unpack, overload
+from enum import Enum
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    ForwardRef,
+    Literal,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    overload,
+)
 
 from pydantic.fields import Field as PydanticField
-from pydantic.fields import _EmptyKwargs, _Unset
+from pydantic.fields import _Unset
 from pydantic_core import PydanticUndefined
 
 from .base import (
     DbType,
+    FerroField,
     FerroNullable,
+    OnDelete,
+    _validate_foreign_key,
     _validate_nullable_option,
+    _validate_on_delete,
     _validate_renamed_from,
-    GeneratedExpression,
     _validate_generated,
     _validate_retired,
 )
@@ -23,28 +43,221 @@ if TYPE_CHECKING:
     import re
 
     import annotated_types
-    from pydantic import types
+    from pydantic import Discriminator
     from pydantic.aliases import AliasChoices, AliasPath
     from pydantic.config import JsonDict
     from pydantic.fields import Deprecated, FieldInfo
 
-FERRO_FIELD_EXTRA_KEY = "ferro_field"
-"""The `json_schema_extra` key under which `Field` stores its database options."""
 _T = TypeVar("_T")
+
+
+class _RelationOptions:
+    """What one `Forward`, `Reverse` or `ManyToMany` declares, carried in the field's metadata.
+
+    The metaclass reads it from there, so it never reaches the field's JSON
+    schema the way `json_schema_extra` would.
+    """
+
+    __slots__ = ("options",)
+
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = options
+
+    def __repr__(self) -> str:
+        return f"_RelationOptions({self.options!r})"
+
+
+UPGRADING_URL = "https://ferro-orm.x54.sh/upgrading/#explicit-foreign-keys"
+"""The upgrading section every refusal of a removed relation declaration links."""
+
+# The relation keywords the explicit foreign-key column removed, per call, and
+# what replaces each one.
+_REMOVED_KEYWORDS = {
+    "Field": {
+        "back_ref": (
+            'a Field is a column; the reverse side of a relation is Reverse("<column>")'
+        ),
+        "many_to_many": 'a many-to-many is ManyToMany(through="<table>")',
+        "related_name": "the two sides of a relation never name each other",
+        "through": 'through= belongs on ManyToMany(through="<table>")',
+        "reverse_index": (
+            'reverse_index= belongs on ManyToMany(through="<table>", '
+            "reverse_index=False)"
+        ),
+    },
+    "ManyToMany": {
+        "related_name": 'the other model declares Reverse("<this attribute>")',
+    },
+}
+
+
+def _keywords(declare: Callable[..., Any]) -> list[str]:
+    """The keywords ``declare`` takes, read off its own signature."""
+    return [
+        parameter
+        for parameter, spec in inspect.signature(declare).parameters.items()
+        if spec.kind is not inspect.Parameter.VAR_KEYWORD
+    ]
+
+
+def _unknown_keyword(name: str, declare: Callable[..., Any] | None = None) -> TypeError:
+    """Refuse a keyword `Field()` or `ManyToMany()` does not take.
+
+    A relation keyword the explicit foreign-key column removed says what
+    replaces it and links the upgrading section. A many-to-many adds no
+    column, so a `Field` option given to it is refused as one; any other name
+    gets the closest keyword the call takes. The known names come from each
+    call's own signature, so an option added as a parameter is known here
+    with no second list.
+    """
+    declare = declare or Field
+    removed = _REMOVED_KEYWORDS[declare.__name__].get(name)
+    if removed is not None:
+        return TypeError(
+            f"{declare.__name__}({name}=...) is gone: {removed}. See {UPGRADING_URL}"
+        )
+    known = _keywords(declare)
+    close = difflib.get_close_matches(name, known, n=1)
+    takes = "through=, renamed_from= and reverse_index="
+    if declare is not Field and name in _keywords(Field):
+        hint = (
+            "A many-to-many adds no column, so it takes no column or field "
+            f"option: its options are {takes}"
+        )
+    elif close:
+        hint = f"Did you mean {close[0]!r}?"
+    elif declare is not Field:
+        hint = f"A many-to-many's options are {takes}"
+    else:
+        pydantic_names = inspect.signature(PydanticField).parameters
+        options = ", ".join(
+            parameter for parameter in known if parameter not in pydantic_names
+        )
+        hint = f"Ferro's field options are: {options}."
+    return TypeError(f"{declare.__name__}() got an unknown keyword {name!r}. {hint}")
+
+
+# A retired field and a generated column are never `__init__` parameters:
+# these two overloads mark them `init=False` for a type checker (PEP 681),
+# as the constructor refuses both by name.
+@overload
+def Field(
+    default: Any = ...,
+    *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
+    renamed_from: str | None = ...,
+    retired: Literal[True],
+    generated: Callable[[Any], Any] | None = ...,
+    default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None = ...,
+    alias: str | None = ...,
+    alias_priority: int | None = ...,
+    validation_alias: str | AliasPath | AliasChoices | None = ...,
+    serialization_alias: str | None = ...,
+    title: str | None = ...,
+    field_title_generator: Callable[[str, FieldInfo], str] | None = ...,
+    description: str | None = ...,
+    examples: list[Any] | None = ...,
+    exclude: bool | None = ...,
+    exclude_if: Callable[[Any], bool] | None = ...,
+    discriminator: str | Discriminator | None = ...,
+    deprecated: Deprecated | str | bool | None = ...,
+    json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
+    frozen: bool | None = ...,
+    validate_default: bool | None = ...,
+    repr: bool = ...,
+    init: Literal[False] = False,
+    init_var: bool | None = ...,
+    kw_only: bool | None = ...,
+    pattern: str | re.Pattern[str] | None = ...,
+    strict: bool | None = ...,
+    coerce_numbers_to_str: bool | None = ...,
+    gt: annotated_types.SupportsGt | None = ...,
+    ge: annotated_types.SupportsGe | None = ...,
+    lt: annotated_types.SupportsLt | None = ...,
+    le: annotated_types.SupportsLe | None = ...,
+    multiple_of: float | None = ...,
+    allow_inf_nan: bool | None = ...,
+    max_digits: int | None = ...,
+    decimal_places: int | None = ...,
+    min_length: int | None = ...,
+    max_length: int | None = ...,
+    union_mode: Literal["smart", "left_to_right"] = ...,
+    fail_fast: bool | None = ...,
+) -> Any: ...
+
+
+@overload
+def Field(
+    default: Any = ...,
+    *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
+    renamed_from: str | None = ...,
+    retired: bool = ...,
+    generated: Callable[[Any], Any],
+    default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None = ...,
+    alias: str | None = ...,
+    alias_priority: int | None = ...,
+    validation_alias: str | AliasPath | AliasChoices | None = ...,
+    serialization_alias: str | None = ...,
+    title: str | None = ...,
+    field_title_generator: Callable[[str, FieldInfo], str] | None = ...,
+    description: str | None = ...,
+    examples: list[Any] | None = ...,
+    exclude: bool | None = ...,
+    exclude_if: Callable[[Any], bool] | None = ...,
+    discriminator: str | Discriminator | None = ...,
+    deprecated: Deprecated | str | bool | None = ...,
+    json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
+    frozen: bool | None = ...,
+    validate_default: bool | None = ...,
+    repr: bool = ...,
+    init: Literal[False] = False,
+    init_var: bool | None = ...,
+    kw_only: bool | None = ...,
+    pattern: str | re.Pattern[str] | None = ...,
+    strict: bool | None = ...,
+    coerce_numbers_to_str: bool | None = ...,
+    gt: annotated_types.SupportsGt | None = ...,
+    ge: annotated_types.SupportsGe | None = ...,
+    lt: annotated_types.SupportsLt | None = ...,
+    le: annotated_types.SupportsLe | None = ...,
+    multiple_of: float | None = ...,
+    allow_inf_nan: bool | None = ...,
+    max_digits: int | None = ...,
+    decimal_places: int | None = ...,
+    min_length: int | None = ...,
+    max_length: int | None = ...,
+    union_mode: Literal["smart", "left_to_right"] = ...,
+    fail_fast: bool | None = ...,
+) -> Any: ...
 
 
 @overload
 def Field(
     default: Literal[Ellipsis],
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -61,7 +274,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -85,7 +298,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -93,14 +305,12 @@ def Field(
 def Field(
     default: Any,
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -117,7 +327,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -141,7 +351,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -149,14 +358,12 @@ def Field(
 def Field(
     default: _T,
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -173,7 +380,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -197,21 +404,18 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> _T: ...
 
 
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -229,7 +433,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -253,21 +457,18 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -285,7 +486,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -309,21 +510,18 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> _T: ...
 
 
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -340,7 +538,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -364,22 +562,18 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
 def Field(
     default: Any = PydanticUndefined,
     *,
+    foreign_key: type[Any] | str | None | Any = _Unset,
+    on_delete: OnDelete | Any = _Unset,
     primary_key: bool | Any = _Unset,
     autoincrement: bool | None | Any = _Unset,
     unique: bool | Any = _Unset,
     index: bool | Any = _Unset,
-    back_ref: bool | Any = _Unset,
-    many_to_many: bool | Any = _Unset,
-    related_name: str | None | Any = _Unset,
-    through: str | None | Any = _Unset,
-    reverse_index: bool | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
     db_type: DbType | None | Any = _Unset,
     db_check: bool | Any = _Unset,
@@ -399,7 +593,7 @@ def Field(
     examples: list[Any] | None = _Unset,
     exclude: bool | None = _Unset,
     exclude_if: Callable[[Any], bool] | None = _Unset,
-    discriminator: str | types.Discriminator | None = _Unset,
+    discriminator: str | Discriminator | None = _Unset,
     deprecated: Deprecated | str | bool | None = _Unset,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = _Unset,
     frozen: bool | None = _Unset,
@@ -423,19 +617,30 @@ def Field(
     max_length: int | None = _Unset,
     union_mode: Literal["smart", "left_to_right"] = _Unset,
     fail_fast: bool | None = _Unset,
-    **extra: Unpack[_EmptyKwargs],
+    **unknown: Any,
 ) -> Any:
     """Declare a model field with Pydantic's options and Ferro's database options.
 
     `Field` takes every argument of Pydantic's own `Field` and adds the
     database options Ferro reads: primary key, uniqueness, indexes, column
-    type, relations and rename hints. Use it as the field's default, or
+    type, foreign keys and rename hints. Use it as the field's default, or
     inside `Annotated[...]`. See
     [Field options](../guide/models-and-fields.md#field-options) for each
     database option at work.
 
     Args:
         default: The value the field takes when it is not set.
+        foreign_key: Make the column a foreign key to this model's primary
+            key: the class, or its class name for a self reference or a
+            model defined later. The column's type must be the target key's
+            type, and a type that stores differently needs the target's
+            `db_type`. See
+            [Relationships](../guide/relationships.md).
+        on_delete: What the database does to this row when the row the key
+            points at is deleted: `"CASCADE"` (the default), `"RESTRICT"`,
+            `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`. Needs
+            `foreign_key`, and `"SET NULL"` needs an annotation that allows
+            `None`.
         primary_key: Make the column the table's primary key.
         autoincrement: Whether the database generates the key. When not
             given, an integer primary key auto-increments.
@@ -444,17 +649,6 @@ def Field(
             the model (see
             [Composite uniques](../guide/models-and-fields.md#composite-uniques)).
         index: Add an index on the column.
-        back_ref: Mark the field as the reading side of a relation. Assigning
-            [`BackRef()`][ferro.BackRef] is the usual spelling.
-        many_to_many: Mark the field as a many-to-many relation.
-            [`ManyToMany(...)`][ferro.ManyToMany] is the usual spelling.
-        related_name: The name of the relation on the target model that reads
-            this one back.
-        through: The many-to-many join table's name. When not given, Ferro
-            derives one from the two models.
-        reverse_index: Add an index on the many-to-many join table's
-            `(target, source)` columns for queries from the other side. When
-            not given, the index is added.
         nullable: `"infer"` (the default) makes the column nullable when the
             annotation allows `None`; `True` or `False` forces `NULL` or
             `NOT NULL` in every schema Ferro emits, whatever the annotation
@@ -526,17 +720,23 @@ def Field(
             See [Union Mode](https://docs.pydantic.dev/latest/concepts/unions/#union-modes).
         fail_fast: If `True`, validation will stop on the first error. If `False`, all validation errors will be collected.
             This option can be applied only to iterable types (list, tuple, set, and frozenset).
-        **extra: Deprecated: extra fields to include in the JSON schema. Use
-            `json_schema_extra` instead.
+        **unknown: Refused: a keyword not listed here raises `TypeError`
+            naming the closest one that is. A relation keyword `Field` no
+            longer takes (`back_ref`, `many_to_many`, `related_name`,
+            `through`, `reverse_index`) names what replaces it; see
+            [Upgrading](../upgrading.md#explicit-foreign-keys).
 
     Returns:
-        A new [`FieldInfo`][pydantic.fields.FieldInfo]. The return annotation
-            is `Any` so that `Field` type-checks as any field's default.
+        A new [`FieldInfo`][pydantic.fields.FieldInfo] that carries the
+            database options in its `metadata`, as one
+            [`FerroField`][ferro.FerroField], and never in its JSON schema.
+            The return annotation is `Any` so that `Field` type-checks as any
+            field's default.
 
     Raises:
-        TypeError: A database option is given together with a callable
-            `json_schema_extra`, or `nullable`, `renamed_from` or `retired`
-            has a value of the wrong type.
+        TypeError: A keyword `Field` does not take, or `nullable`,
+            `renamed_from`, `retired`, `generated`, `foreign_key` or
+            `on_delete` has a value of the wrong type.
 
     Examples:
         ```python {test=run prelude=reference}
@@ -568,60 +768,51 @@ def Field(
             nickname: Annotated[str | None, Field(index=True)] = None
         ```
     """
-    ferro_kwargs: dict[str, Any] = {}
-    if primary_key is not _Unset:
-        ferro_kwargs["primary_key"] = primary_key
-    if autoincrement is not _Unset:
-        ferro_kwargs["autoincrement"] = autoincrement
-    if unique is not _Unset:
-        ferro_kwargs["unique"] = unique
-    if index is not _Unset:
-        ferro_kwargs["index"] = index
-    if back_ref is not _Unset:
-        ferro_kwargs["back_ref"] = back_ref
-    if many_to_many is not _Unset:
-        ferro_kwargs["many_to_many"] = many_to_many
-    if related_name is not _Unset:
-        ferro_kwargs["related_name"] = related_name
-    if through is not _Unset:
-        ferro_kwargs["through"] = through
-    if reverse_index is not _Unset:
-        ferro_kwargs["reverse_index"] = reverse_index
+    for name in unknown:
+        raise _unknown_keyword(name)
+
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
-        ferro_kwargs["nullable"] = nullable
-    if db_type is not _Unset:
-        ferro_kwargs["db_type"] = db_type
-    if db_check is not _Unset:
-        ferro_kwargs["db_check"] = db_check
     if renamed_from is not _Unset:
-        ferro_kwargs["renamed_from"] = _validate_renamed_from(renamed_from, "Field")
+        _validate_renamed_from(renamed_from, "Field")
     if retired is not _Unset:
-        ferro_kwargs["retired"] = _validate_retired(retired, "Field")
-    expression = None
-    if generated is not _Unset and generated is not None:
-        # The lambda has no JSON form, so it rides the field's metadata, never
-        # `json_schema_extra`, which Pydantic writes into the JSON schema.
-        expression = GeneratedExpression(_validate_generated(generated, "Field"))
+        _validate_retired(retired, "Field")
+    if generated is not _Unset:
+        _validate_generated(generated, "Field")
+    if foreign_key is not _Unset:
+        _validate_foreign_key(foreign_key, "Field")
+    if on_delete is not _Unset:
+        _validate_on_delete(on_delete, "Field")
+    if generated is None:
+        # `generated=None` is a plain column, the same as leaving it out.
+        generated = _Unset
+    # The options ride the field's metadata, never `json_schema_extra`, which
+    # Pydantic prints into the JSON schema.
+    column_options = {
+        option: value
+        for option, value in (
+            ("primary_key", primary_key),
+            ("autoincrement", autoincrement),
+            ("unique", unique),
+            ("index", index),
+            ("nullable", nullable),
+            ("db_type", db_type),
+            ("db_check", db_check),
+            ("renamed_from", renamed_from),
+            ("retired", retired),
+            ("generated", generated),
+            ("foreign_key", foreign_key),
+            ("on_delete", on_delete),
+        )
+        if value is not _Unset
+    }
+    if (
+        "generated" in column_options
+        and default is PydanticUndefined
+        and default_factory is _Unset
+    ):
         # The database fills the value; the instance holds None until then.
-        if default is PydanticUndefined and default_factory is _Unset:
-            default = None
-
-    schema_extra = json_schema_extra
-    if ferro_kwargs:
-        if callable(schema_extra):
-            raise TypeError(
-                "ferro.Field(..., primary_key=...) cannot be combined with callable "
-                "json_schema_extra"
-            )
-        base_extra: dict[str, Any]
-        if schema_extra is _Unset or schema_extra is None:
-            base_extra = {}
-        else:
-            base_extra = dict(schema_extra)
-        merged_extra: dict[str, Any] = base_extra
-        merged_extra[FERRO_FIELD_EXTRA_KEY] = ferro_kwargs
-        schema_extra = merged_extra
+        default = None
 
     info = PydanticField(
         default=default,
@@ -638,7 +829,7 @@ def Field(
         exclude_if=exclude_if,
         discriminator=discriminator,
         deprecated=deprecated,
-        json_schema_extra=schema_extra,
+        json_schema_extra=json_schema_extra,
         frozen=frozen,
         validate_default=validate_default,
         repr=repr,
@@ -660,105 +851,356 @@ def Field(
         max_length=max_length,
         union_mode=union_mode,
         fail_fast=fail_fast,
-        **extra,
     )
-    if expression is not None:
-        info.metadata.append(expression)
+    if column_options:
+        info.metadata.append(FerroField(**column_options))
     return info
 
 
-class BackRef:
-    """The reading side of a relation, assigned as the field's default.
+if TYPE_CHECKING:
+    # How a relation reads to a type checker: a field specifier that is never
+    # an `__init__` parameter (PEP 681). At runtime each one refuses `init`,
+    # and the constructor refuses a relation keyword itself. `through` is
+    # required here; at runtime it is optional, so Ferro's own refusals (a
+    # removed or unknown keyword, then a missing `through=` with the table to
+    # write) run before Python's argument binding could.
+    def ManyToMany(
+        *,
+        through: str,
+        renamed_from: str | None = None,
+        reverse_index: bool = True,
+        init: Literal[False] = False,
+    ) -> Any: ...
 
-    `BackRef()` is `Field(back_ref=True)`. Pair it with the
-    [`ForeignKey`][ferro.ForeignKey] or [`ManyToMany`][ferro.ManyToMany]
-    whose `related_name` names this field; the field adds no column. It
-    takes the keyword arguments of [`Field`][ferro.Field] except
-    `reverse_index`, which belongs on the `ManyToMany` side.
+    def Forward(column: str, *, init: Literal[False] = False) -> Any: ...
 
-    Examples:
-        ```python {test=run prelude=reference}
-        ada = await Author.where(lambda author: author.name == "Ada Lovelace").first()
-        titles = [post.title for post in await ada.posts.all()]
-        assert titles == ["Notes on the Analytical Engine"]
-        ```
-    """
+    def Reverse(attribute: str, *, init: Literal[False] = False) -> Any: ...
 
-    def __new__(cls, **kwargs: Any) -> Any:
-        if "reverse_index" in kwargs:
-            raise TypeError(
-                "BackRef() does not accept 'reverse_index'; this kwarg lives on the "
-                "forward ManyToMany(...) declaration. Set reverse_index there instead."
-            )
-        return Field(back_ref=True, **kwargs)
+else:
 
-    @classmethod
-    def __class_getitem__(cls, _item: Any) -> Any:
-        raise TypeError(
-            "BackRef[...] is no longer a type annotation. Use "
-            "Relation[list[T]] = BackRef() for collection back-references."
-        )
+    def ManyToMany(
+        *,
+        through: str | None = None,
+        renamed_from: str | None = None,
+        reverse_index: bool = True,
+        **unknown: Any,
+    ) -> Any:
+        """Declare a many-to-many relation, assigned as the field's default.
+
+        Annotate the field `Relation[list[Target]]` and name its join table.
+        Ferro creates that table, with one `<table>_id` column per model, a
+        unique index over the pair and an index for reads from the other side.
+        The target reads the relation back through a
+        [`Reverse`][ferro.Reverse] naming this field, which it may leave out.
+        See [Many-to-many](../guide/relationships.md#many-to-many).
+
+        Args:
+            through: The join table's name. Required: a model with no
+                `through=`, or one that is not a table name, is refused when
+                its class is defined, naming the table to write.
+            renamed_from: The join table's previous name, so that
+                `ferro migrate new` and auto-migrate rename the table and keep
+                its rows. See [Renaming a join
+                table](../guide/schema/renames-and-retirements.md#renaming-a-join-table).
+            reverse_index: Add an index on the join table's `(target, source)`
+                columns for queries from the other side. Defaults to `True`; turn
+                it off for a write-heavy join table.
+
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: Any other keyword, such as a column option (a
+                many-to-many adds no column) or `related_name`, which the
+                other model's [`Reverse`][ferro.Reverse] replaces.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, ManyToMany, Model, Relation, Reverse, create_tables
 
 
-def ManyToMany(
-    *,
-    related_name: str,
-    through: str | None = None,
-    reverse_index: bool = True,
-    **kwargs: Any,
+            class Tag(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
+                articles: Relation[list["Article"]] = Reverse("tags")
+
+
+            class Article(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
+
+
+            await create_tables()
+            history = await Tag.create(label="history")
+            article = await Article.create(title="Babbage's engines")
+            await article.tags.add(history)
+            assert [tag.label for tag in await article.tags.all()] == ["history"]
+            assert [found.title for found in await history.articles.all()] == [
+                "Babbage's engines"
+            ]
+            ```
+        """
+        return _many_to_many_field(through, renamed_from, reverse_index, unknown)
+
+    def Forward(column: str) -> Any:
+        """Declare a forward relation over a foreign-key column of this model.
+
+        Assign it to a field annotated `Relation[Target]`, or
+        `Relation[Target | None]` when the column allows `None`. On an
+        instance the relation reads as the instance the column points at: the
+        complete one an `include()` or `.load()` filled, or the session's
+        instance for that key, or an unloaded instance holding only the key,
+        which `.load()` fills in place. Assigning an instance to it sets the
+        column. It adds no
+        column; the foreign-key column is the field declared with
+        `Field(foreign_key=Target)`. See
+        [Loaded relations](../guide/relationships.md#loaded-relations).
+
+        Args:
+            column: The name of the foreign-key column on this model.
+
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: `column` is not a non-empty string.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, Forward, Model, Relation, create_tables
+
+
+            class Shelf(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
+
+
+            class Book(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                shelf_id: int = Field(foreign_key=Shelf, index=True)
+                shelf: Relation[Shelf] = Forward("shelf_id")
+
+
+            await create_tables()
+            history = await Shelf.create(label="History")
+            await Book.create(title="SPQR", shelf_id=history.id)
+            book = await Book.select().include(lambda book: book.shelf).first()
+            assert book.shelf.label == "History"
+            ```
+        """
+        return _relation_field("Forward", "forward", column)
+
+    def Reverse(attribute: str) -> Any:
+        """Declare a reverse relation over a foreign-key column of another model.
+
+        Assign it to a field annotated `Relation[list[Other]]`, where `Other`
+        declares the foreign-key column with `Field(foreign_key=ThisModel)`. On
+        an instance the relation is a query over the rows whose column holds
+        this instance's primary key. Neither side names the other: a
+        [`Forward`][ferro.Forward] needs no `Reverse`. See
+        [Relationships](../guide/relationships.md).
+
+        `attribute` may also name a [`ManyToMany`][ferro.ManyToMany] on the
+        other model, and the relation reads the rows its join table links.
+
+        Args:
+            attribute: The name of the foreign-key column, or of the
+                many-to-many, on the other model.
+
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: `attribute` is not a non-empty string.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, Model, Relation, Reverse, create_tables
+
+
+            class Shelf(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
+                books: Relation[list["Book"]] = Reverse("shelf_id")
+
+
+            class Book(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                shelf_id: int = Field(foreign_key=Shelf)
+
+
+            await create_tables()
+            history = await Shelf.create(label="History")
+            await Book.create(title="SPQR", shelf_id=history.id)
+            titles = [book.title for book in await history.books.all()]
+            assert titles == ["SPQR"]
+            ```
+        """
+        return _relation_field("Reverse", "reverse", attribute)
+
+
+def _many_to_many_field(
+    through: str | None,
+    renamed_from: str | None,
+    reverse_index: bool,
+    unknown: dict[str, Any],
 ) -> Any:
-    """Declare a many-to-many relation, assigned as the field's default.
-
-    Ferro creates the join table. Annotate the field
-    `Relation[list[Target]]`, and give the target a
-    [`BackRef`][ferro.BackRef] named by `related_name`. See
-    [Many-to-many](../guide/relationships.md#many-to-many).
-
-    Args:
-        related_name: The name of the relation on the target model that reads
-            this one back.
-        through: The join table's name. Defaults to `None`, a name Ferro
-            derives from the two models.
-        reverse_index: Add an index on the join table's `(target, source)`
-            columns for queries from the other side. Defaults to `True`; turn
-            it off for a write-heavy join table.
-        **kwargs: Other keyword arguments of [`Field`][ferro.Field].
-
-    Returns:
-        The field's metadata, as [`Field`][ferro.Field] returns it.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        from ferro import BackRef, Field, ManyToMany, Model, Relation, create_tables
+    """The `FieldInfo` a `ManyToMany(...)` declares, refusing every option it
+    would not use. ``retired`` rides along so the class refuses it, naming the
+    field."""
+    options: dict[str, Any] = {
+        "many_to_many": True,
+        "through": through,
+        "reverse_index": reverse_index,
+    }
+    if "retired" in unknown:
+        options["retired"] = unknown.pop("retired")
+    for name in unknown:
+        raise _unknown_keyword(name, ManyToMany)
+    _validate_renamed_from(renamed_from, "ManyToMany()")
+    if renamed_from is not None:
+        options["renamed_from"] = renamed_from
+    info = PydanticField()
+    info.metadata.append(_RelationOptions(options))
+    return info
 
 
-        class Tag(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            label: str
-            posts: Relation[list["Article"]] = BackRef()
+def _relation_field(spelling: str, kind: str, name: Any) -> Any:
+    """A `FieldInfo` whose metadata names the column a relation reads."""
+    if not isinstance(name, str) or not name:
+        raise TypeError(
+            f"{spelling}() takes the foreign-key column's name as a string, "
+            f'such as {spelling}("team_id"), not {name!r}'
+        )
+    info = PydanticField()
+    info.metadata.append(_RelationOptions({kind: name}))
+    return info
 
 
-        class Article(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            title: str
-            tags: Relation[list[Tag]] = ManyToMany(related_name="posts")
+# -- declaration lines, as a refusal writes them -------------------------------------
 
 
-        await create_tables()
-        history = await Tag.create(label="history")
-        article = await Article.create(title="Babbage's engines")
-        await article.tags.add(history)
-        assert [tag.label for tag in await article.tags.all()] == ["history"]
-        ```
+def annotation_text(annotation: Any) -> str:
+    """Write an annotation as it reads in source: `int | None`, `list[Player]`.
+
+    A forward reference loses its quotes, since a refusal prints the line
+    with the target named; a `Literal`'s values keep theirs.
     """
+    if isinstance(annotation, str):
+        return _unquoted(annotation)
+    if isinstance(annotation, ForwardRef):
+        return annotation_text(annotation.__forward_arg__)
+    if annotation is None or annotation is type(None):
+        return "None"
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return annotation_text(get_args(annotation)[0])
+    if origin is Union or origin is types.UnionType:
+        return " | ".join(annotation_text(arg) for arg in get_args(annotation))
+    if origin is Literal:
+        values = ", ".join(_literal_text(value) for value in get_args(annotation))
+        return f"Literal[{values}]"
+    if origin is not None:
+        name = getattr(origin, "__name__", None) or repr(origin)
+        arguments = ", ".join(annotation_text(arg) for arg in get_args(annotation))
+        return f"{name}[{arguments}]"
+    return getattr(annotation, "__name__", None) or repr(annotation)
 
-    return Field(
-        many_to_many=True,
-        related_name=related_name,
-        through=through,
-        reverse_index=reverse_index,
-        **kwargs,
+
+def _literal_text(value: Any) -> str:
+    if isinstance(value, Enum):
+        return f"{type(value).__name__}.{value.name}"
+    return (
+        json.dumps(value, ensure_ascii=False) if isinstance(value, str) else repr(value)
     )
 
 
-__all__ = ["Field", "BackRef", "ManyToMany", "FERRO_FIELD_EXTRA_KEY"]
+class _Unquote(ast.NodeTransformer):
+    """Write each quoted forward reference as the name it holds."""
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        if (
+            isinstance(node.value, (ast.Name, ast.Attribute))
+            and (getattr(node.value, "id", None) or getattr(node.value, "attr", None))
+            == "Literal"
+        ):
+            return node  # its values are strings, not references
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if isinstance(node.value, str):
+            try:
+                return self.visit(ast.parse(node.value, mode="eval").body)
+            except SyntaxError:
+                return node
+        return node
+
+
+def _unquoted(text: str) -> str:
+    """``text`` with its forward references unquoted: ``list["Player"]`` reads ``list[Player]``."""
+    try:
+        tree = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return text
+    return ast.unparse(_Unquote().visit(tree))
+
+
+def _option_text(value: Any) -> str:
+    if isinstance(value, type):
+        return value.__name__
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return repr(value)
+
+
+_NO_OPTIONS = FerroField()
+
+
+def field_options(meta: FerroField | None, **changes: Any) -> dict[str, Any]:
+    """The options `meta` declares, `changes` applied, in `Field()`'s order.
+
+    An option left at its default is left out, `on_delete="CASCADE"` (a
+    foreign-key column's default) included, so a change back to the default
+    drops the option.
+    """
+    options: dict[str, Any] = {}
+    for name in inspect.signature(Field).parameters:
+        if not hasattr(_NO_OPTIONS, name):
+            continue
+        value = changes[name] if name in changes else getattr(meta or _NO_OPTIONS, name)
+        if value == getattr(_NO_OPTIONS, name) or (
+            name == "on_delete" and value == "CASCADE"
+        ):
+            continue
+        options[name] = value
+    return options
+
+
+def field_line(
+    name: str,
+    annotation: str,
+    options: dict[str, Any],
+    default: Any = PydanticUndefined,
+) -> str:
+    """Write one field declaration: `team_id: int = Field(foreign_key=Team)`.
+
+    Args:
+        name: The field's name.
+        annotation: The annotation, as source text.
+        options: The `Field()` database options, in the order written.
+        default: The field's default, or `PydanticUndefined` for none.
+
+    Returns:
+        The declaration, as one line of source.
+    """
+    arguments = [] if default is PydanticUndefined else [f"default={default!r}"]
+    arguments += [
+        f"{option}={_option_text(value)}" for option, value in options.items()
+    ]
+    return f"{name}: {annotation} = Field({', '.join(arguments)})"
+
+
+__all__ = ["Field", "ManyToMany", "Forward", "Reverse"]

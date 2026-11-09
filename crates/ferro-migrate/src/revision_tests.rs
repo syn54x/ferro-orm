@@ -152,13 +152,12 @@ fn a_sqlite_rebuild_is_refused_naming_ferro_migrate_new() {
         Dialect::Sqlite,
     )
     .expect_err("a rebuild is refused");
-    assert_eq!(
-        refusal,
-        RevisionRefusal::Rebuild {
-            kind: "AddCheck".into(),
-            subject: "card".into()
-        }
-    );
+    assert_eq!(refusal.kind(), "rebuild");
+    // The refused op travels whole, so a caller matches it against the
+    // planner's ops by kind and subject, never by the sentence.
+    let wire = serde_json::to_value(&refusal).expect("a refusal serializes");
+    assert_eq!(wire["op"]["kind"], "AddCheck");
+    assert_eq!(wire["op"]["table"], "card");
     assert_eq!(
         refusal.to_string(),
         "AddCheck on card needs a SQLite table rebuild, which an Alembic revision cannot write \
@@ -179,14 +178,10 @@ fn a_required_sqlite_column_with_a_default_is_refused_for_the_default_it_would_k
         Dialect::Sqlite,
     )
     .expect_err("a NOT NULL add is a rebuild on SQLite");
-    assert_eq!(
-        refusal,
-        RevisionRefusal::SqliteKeptDefault {
-            kind: "AddColumn".into(),
-            subject: "card.tier".into()
-        }
-    );
     assert_eq!(refusal.kind(), "sqlite_kept_default");
+    let wire = serde_json::to_value(&refusal).expect("a refusal serializes");
+    assert_eq!(wire["op"]["kind"], "AddColumn");
+    assert_eq!(wire["op"]["table"], "card");
     assert_eq!(
         refusal.to_string(),
         "AddColumn on card.tier adds a NOT NULL column, which SQLite's ADD COLUMN takes only \

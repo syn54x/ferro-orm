@@ -8,7 +8,7 @@ shape is pinned separately by the ``not`` golden vectors.
 
 import pytest
 from typing import Annotated
-from ferro import BackRef, Model, ForeignKey, Relation, connect, FerroField, engines
+from ferro import Forward, Model, Relation, Reverse, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -192,15 +192,14 @@ async def test_null_rows_are_excluded_under_negation(db_url):
 class NegAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    transactions: Relation[list["NegTxn"]] = BackRef()
+    transactions: Relation[list["NegTxn"]] = Reverse("account_id")
 
 
 class NegTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: float
-    account: Annotated[NegAccount | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    account_id: Annotated[int | None, FerroField(foreign_key=NegAccount)] = None
+    account: Relation[NegAccount | None] = Forward("account_id")
 
 
 @pytest.mark.asyncio
@@ -212,8 +211,8 @@ async def test_not_over_traversed_leaf(db_url):
         await checking.save()
         savings = NegAccount(label="savings")
         await savings.save()
-        await NegTxn(amount=5.0, account=checking).save()
-        await NegTxn(amount=7.0, account=savings).save()
+        await NegTxn(amount=5.0, account_id=checking.id).save()
+        await NegTxn(amount=7.0, account_id=savings.id).save()
 
         rows = await NegTxn.where(lambda t: ~(t.account.label == "checking")).all()
         assert [r.amount for r in rows] == [7.0]

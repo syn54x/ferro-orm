@@ -78,10 +78,10 @@ _CHECKED_MOOD = (
 
 _TEAM_FK = (
     columns.TEAM
-    + '    members: Relation[list["Author"]] = BackRef()\n'
+    + '    members: Relation[list["Author"]] = Reverse("team_id")\n'
     + AUTHOR
-    + '    team: Annotated[Team | None, ForeignKey(related_name="members", '
-    'on_delete="SET NULL")] = None\n'
+    + columns.OPTIONAL_TEAM_ID
+    + '    team: Relation[Team | None] = Forward("team_id")\n'
 )
 
 _STAGING_HEAD = staging.HEAD
@@ -208,6 +208,11 @@ CASES: tuple[Case, ...] = (
         "B3-rename-a-model",
         renames.b3("writer", "postgres"),
         renames.b3("author", "postgres"),
+    ),
+    Case(
+        "B3-rename-a-join-table",
+        renames.JOIN_TABLE_BEFORE,
+        renames.JOIN_TABLE_AFTER,
     ),
     # -- C: foreign keys ----------------------------------------------------------
     Case("C1-add-an-optional-foreign-key", columns.TEAM + AUTHOR, _TEAM_FK),

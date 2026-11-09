@@ -3,10 +3,9 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import Field
 
 import ferro
-from ferro import BackRef, ManyToMany, Model, PassReport, Relation
+from ferro import Field, ManyToMany, Model, PassReport, Relation, Reverse
 from ferro.base import FerroField
 from tests._pg_sequence import pg_sequence_rename
 from tests._pass_harness import (
@@ -21,7 +20,7 @@ pytestmark = pytest.mark.backend_matrix
 
 
 class AutoMigratedUser(Model):
-    id: int = Field(json_schema_extra={"primary_key": True})
+    id: int = Field(primary_key=True)
     username: str
 
 
@@ -103,12 +102,12 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     class Actor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
     class Movie(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        actors: Relation[list["Actor"]] = BackRef()
+        actors: Relation[list["Actor"]] = Reverse("movies")
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == on(
@@ -197,12 +196,11 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     class UuidActor(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        movies: Relation[list["UuidMovie"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["UuidMovie"]] = ManyToMany(through="uuidactor_movies")
 
     class UuidMovie(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         title: str
-        actors: Relation[list["UuidActor"]] = BackRef()
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == [
@@ -270,12 +268,12 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     class UuidTag(Model):
         id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
         name: str = ""
-        posts: Relation[list["UuidPost"]] = BackRef()
+        posts: Relation[list["UuidPost"]] = Reverse("tags")
 
     class UuidPost(Model):
         id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
         title: str = ""
-        tags: Relation[list[UuidTag]] = ManyToMany(related_name="posts")
+        tags: Relation[list[UuidTag]] = ManyToMany(through="uuidpost_tags")
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == on(
@@ -1453,22 +1451,18 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registry):
-    """Issue #325: changing a ForeignKey's on_delete on an existing model must
+    """Issue #325: changing a foreign key's on_delete on an existing model must
     rebuild the live constraint, not silently keep the old action. The Pinch
     shape: CASCADE (the default) shipped, then the upgrade declares SET NULL —
     deleting the parent must sever the reference, never destroy the child."""
-    from ferro import ForeignKey
 
     class FkDriftConn(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        accounts: Relation[list["FkDriftAccount"]] = BackRef()
 
     class FkDriftAccount(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        connection: Annotated[
-            FkDriftConn | None, ForeignKey(related_name="accounts")
-        ] = None
+        connection_id: Annotated[int | None, FerroField(foreign_key=FkDriftConn)] = None
 
     # Phase A: the pre-upgrade release creates the schema (default CASCADE)
     # and populates it.
@@ -1486,7 +1480,7 @@ async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registr
     assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkDriftConn.create(name="c1")
-        await FkDriftAccount.create(connection=parent)
+        await FkDriftAccount.create(connection_id=parent.id)
     ferro.reset_engine()
 
     from ferro import clear_registry
@@ -1499,13 +1493,11 @@ async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registr
     class FkDriftConn(Model):  # noqa: F811 — intentional redefinition
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        accounts: Relation[list["FkDriftAccount"]] = BackRef()
 
     class FkDriftAccount(Model):  # noqa: F811 — intentional redefinition
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        connection: Annotated[
-            FkDriftConn | None,
-            ForeignKey(related_name="accounts", on_delete="SET NULL"),
+        connection_id: Annotated[
+            int | None, FerroField(foreign_key=FkDriftConn, on_delete="SET NULL")
         ] = None
 
     report = await auto_migrate(db_url, updates=True)
@@ -1536,18 +1528,14 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
     """Issue #325 on SQLite: FK constraints cannot be altered in place, so an
     on_delete change on an existing table must warn loudly (naming the
     constraint) instead of diverging silently."""
-    from ferro import ForeignKey
 
     class FkWarnConn(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        accounts: Relation[list["FkWarnAccount"]] = BackRef()
 
     class FkWarnAccount(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        connection: Annotated[
-            FkWarnConn | None, ForeignKey(related_name="accounts")
-        ] = None
+        connection_id: Annotated[int | None, FerroField(foreign_key=FkWarnConn)] = None
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == [
@@ -1563,7 +1551,7 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
     assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkWarnConn.create(name="c1")
-        await FkWarnAccount.create(connection=parent)
+        await FkWarnAccount.create(connection_id=parent.id)
     ferro.reset_engine()
 
     from ferro import clear_registry
@@ -1575,13 +1563,11 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
     class FkWarnConn(Model):  # noqa: F811 — intentional redefinition
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        accounts: Relation[list["FkWarnAccount"]] = BackRef()
 
     class FkWarnAccount(Model):  # noqa: F811 — intentional redefinition
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        connection: Annotated[
-            FkWarnConn | None,
-            ForeignKey(related_name="accounts", on_delete="SET NULL"),
+        connection_id: Annotated[
+            int | None, FerroField(foreign_key=FkWarnConn, on_delete="SET NULL")
         ] = None
 
     with pytest.warns(UserWarning, match=r"on_delete|fk_fkwarnaccount"):
@@ -1998,7 +1984,7 @@ async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
     async with ferro.engines.session():
         # Now define a model AFTER connect().
         class LateModel(Model):
-            id: int = Field(json_schema_extra={"primary_key": True})
+            id: int = Field(primary_key=True)
             label: str
 
         # create_tables() must compile + push the up-to-date registry IR before the
@@ -2040,7 +2026,7 @@ async def test_create_tables_fails_loud_when_modelset_cleared(db_url, clean_regi
     )
 
     class GuardModel(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=False)
@@ -2305,21 +2291,14 @@ async def test_self_fk_does_not_evict_component_from_create_order(
     whole component fall back to name order, and `aorderedref` (which sorts
     first but carries a required FK to it) failed on a fresh Postgres schema
     with `relation "zorderednode" does not exist`."""
-    from typing import Optional
-
-    from ferro import ForeignKey
 
     class ZOrderedNode(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        parent: Annotated[
-            Optional["ZOrderedNode"], ForeignKey(related_name="children")
-        ] = None
-        children: Relation[list["ZOrderedNode"]] = BackRef()
-        refs: Relation[list["AOrderedRef"]] = BackRef()
+        parent_id: Annotated[UUID | None, FerroField(foreign_key="ZOrderedNode")] = None
 
     class AOrderedRef(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        node: Annotated[ZOrderedNode, ForeignKey(related_name="refs")]
+        node_id: Annotated[UUID, FerroField(foreign_key=ZOrderedNode)]
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == on(
@@ -2348,8 +2327,8 @@ async def test_self_fk_does_not_evict_component_from_create_order(
     assert warning_texts(report) == []
     async with ferro.engines.session():
         root = await ZOrderedNode.create()
-        child = await ZOrderedNode.create(parent=root)
-        ref = await AOrderedRef.create(node=child)
+        child = await ZOrderedNode.create(parent_id=root.id)
+        ref = await AOrderedRef.create(node_id=child.id)
 
         fetched = await AOrderedRef.get(ref.id)
         assert fetched.node_id == child.id
@@ -2508,8 +2487,6 @@ async def test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_che
 async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
     db_url, clean_registry, recwarn
 ):
-    from ferro import ForeignKey
-
     class Author(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
@@ -2537,13 +2514,12 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
     class Author(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        books: Relation[list["Book"]] = BackRef()
 
     class Book(Model):  # noqa: F811 — gains a nullable FK
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[
-            Author | None, ForeignKey(related_name="books", on_delete="CASCADE")
+        author_id: Annotated[
+            int | None, FerroField(foreign_key=Author, on_delete="CASCADE")
         ] = None
 
     recwarn.clear()
@@ -2569,7 +2545,7 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
 
     async with ferro.engines.session():
         author = await Author.create(name="Ursula")
-        tethered = await Book.create(title="tethered", author=author)
+        tethered = await Book.create(title="tethered", author_id=author.id)
         await execute('DELETE FROM "author"')
         assert await Book.where(lambda book: book.id == tethered.id).first() is None
 
@@ -2579,13 +2555,12 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
     class Author(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        books: Relation[list["Book"]] = BackRef()
 
     class Book(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[
-            Author | None, ForeignKey(related_name="books", on_delete="CASCADE")
+        author_id: Annotated[
+            int | None, FerroField(foreign_key=Author, on_delete="CASCADE")
         ] = None
 
     recwarn.clear()
@@ -2609,12 +2584,11 @@ VF_UNIQUE = "uq_vfpost_slug"
 def _define_validity_models():
     from typing import ClassVar
 
-    from ferro import Check, ForeignKey
+    from ferro import Check
 
     class VfAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list["VfPost"]] = BackRef()
 
     class VfPost(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -2624,7 +2598,7 @@ def _define_validity_models():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str | None = None
         slug: Annotated[str | None, FerroField(unique=True)] = None
-        author: Annotated[VfAuthor | None, ForeignKey(related_name="posts")] = None
+        author_id: Annotated[int | None, FerroField(foreign_key=VfAuthor)] = None
 
     return VfAuthor, VfPost
 
@@ -3981,18 +3955,15 @@ async def test_two_tables_claiming_one_live_old_name_refuse_and_change_nothing(
 
 
 def _define_trn_author_with_books() -> None:
-    from ferro import ForeignKey
-
     class TrnAuthor(Model):
         __ferro_renamed_from__ = "trnwriter"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: Annotated[str, FerroField(index=True)]
-        books: Relation[list["TrnBook"]] = BackRef()
 
     class TrnBook(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[TrnAuthor, ForeignKey("books")]
+        author_id: Annotated[int, FerroField(foreign_key=TrnAuthor)]
 
 
 @pytest.mark.asyncio
@@ -4088,26 +4059,22 @@ async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename
 
 
 def _define_trn_author_with_books_and_appendices() -> None:
-    from ferro import ForeignKey
-
     # "TrnAppendix" sorts ahead of "TrnBook", the table it waits through, so
     # a single pass over the models would see it before it knew to hold it.
     class TrnAppendix(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         heading: str
-        book: Annotated["TrnBook", ForeignKey("appendices")]
+        book_id: Annotated[int, FerroField(foreign_key="TrnBook")]
 
     class TrnBook(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated["TrnAuthor", ForeignKey("books")]
-        appendices: Relation[list["TrnAppendix"]] = BackRef()
+        author_id: Annotated[int, FerroField(foreign_key="TrnAuthor")]
 
     class TrnAuthor(Model):
         __ferro_renamed_from__ = "trnwriter"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: Annotated[str, FerroField(index=True)]
-        books: Relation[list["TrnBook"]] = BackRef()
 
 
 @pytest.mark.asyncio
@@ -4719,20 +4686,18 @@ def _live_foreign_keys(db_url: str, db_backend: str, table: str) -> list[str]:
 async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive(
     db_url, db_backend, clean_registry
 ):
-    """``team: Annotated[DfkTeam, ForeignKey(...)]`` becomes ``team_id: int``:
+    """``team_id`` loses its ``foreign_key=DfkTeam`` and stays ``int | None``:
     the column stays and its constraint is ferro's. ``migrate_updates``
     leaves it (ADR-0013's ladder); ``migrate_destructive`` drops it on
     Postgres. SQLite cannot drop a table constraint in place: it warns,
     naming the reviewed path, and the constraint stays."""
-    from ferro import ForeignKey
 
     class DfkTeam(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        members: Relation[list["DfkMember"]] = BackRef()
 
     class DfkMember(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        team: Annotated[DfkTeam | None, ForeignKey(related_name="members")] = None
+        team_id: Annotated[int | None, FerroField(foreign_key=DfkTeam)] = None
 
     report = await auto_migrate(db_url)
     assert schema_steps(report) == on(

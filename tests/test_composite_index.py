@@ -6,11 +6,11 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRef,
     Field,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     engines,
@@ -738,12 +738,12 @@ async def test_use_case_m2m_reverse_query(db_url):
     class TagF1(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        articles: Relation[list["ArticleF1"]] = ManyToMany(related_name="tags")
+        articles: Relation[list["ArticleF1"]] = ManyToMany(through="tagf1_articles")
 
     class ArticleF1(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        tags: Relation[list["TagF1"]] = BackRef()
+        tags: Relation[list["TagF1"]] = Reverse("articles")
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():

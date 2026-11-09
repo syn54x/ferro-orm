@@ -3,11 +3,10 @@
 ```python
 class Account(Model):
     code: str = Field(primary_key=True)
-    entries: Relation[list["Entry"]] = BackRef()
 
 class Entry(Model):
     id: int | None = Field(default=None, primary_key=True)
-    account: Annotated[Account, ForeignKey(related_name="entries")]
+    account_id: str = Field(foreign_key=Account)
 ```
 
 ```sql
@@ -17,12 +16,10 @@ CONSTRAINT "fk_entry_account_id_account" FOREIGN KEY ("account_id") REFERENCES "
 
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
 import asyncio
-from typing import Annotated
-
 import pytest
 
 import ferro
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation
 from ferro.ir import compile_registry_schema_ir
 from tests._pass_harness import auto_migrate, schema_sql
 from tests.test_alembic_translator import _drift
@@ -45,11 +42,11 @@ pytestmark = pytest.mark.usefixtures("clean_registry")
 def declare_code_keyed() -> tuple[type[Model], type[Model]]:
     class Account(Model):
         code: str = Field(primary_key=True)
-        entries: Relation[list["Entry"]] = BackRef()
 
     class Entry(Model):
         id: int | None = Field(default=None, primary_key=True)
-        account: Annotated[Account, ForeignKey(related_name="entries")]
+        account_id: str = Field(foreign_key=Account)
+        account: Relation[Account] = Forward("account_id")
 
     return Account, Entry
 
@@ -71,11 +68,10 @@ def test_declared_ir_carries_the_target_primary_key_column():
 def test_a_target_keyed_id_still_gets_id():
     class Owner(Model):
         id: int | None = Field(default=None, primary_key=True)
-        pets: Relation[list["Pet"]] = BackRef()
 
     class Pet(Model):
         id: int | None = Field(default=None, primary_key=True)
-        owner: Annotated[Owner, ForeignKey(related_name="pets")]
+        owner_id: int = Field(foreign_key=Owner)
 
     fk = model_fks("Pet")[0]
     assert fk["to_column"] == "id"
@@ -85,11 +81,10 @@ def test_a_target_keyed_id_still_gets_id():
 def test_a_string_target_declared_later_is_recompiled_with_its_key(db_url):
     class Entry(Model):
         id: int | None = Field(default=None, primary_key=True)
-        account: Annotated["Account", ForeignKey(related_name="entries")]
+        account_id: str = Field(foreign_key="Account")
 
     class Account(Model):
         code: str = Field(primary_key=True)
-        entries: Relation[list["Entry"]] = BackRef()
 
     report = asyncio.run(auto_migrate(db_url))
     assert any('REFERENCES "account" ("code")' in s for s in schema_sql(report))
@@ -105,7 +100,7 @@ def test_create_and_traverse_on_a_code_keyed_target(db_url):
         assert any('REFERENCES "account" ("code")' in s for s in schema_sql(report))
         async with ferro.engines.session():
             account = await Account.create(code="A1")
-            entry = await Entry.create(account=account)
+            entry = await Entry.create(account_id=account.code)
             assert entry.account_id == "A1"
             rows = await Entry.where(lambda entry: entry.account.code == "A1").all()
             assert [r.account_id for r in rows] == ["A1"]
@@ -130,18 +125,16 @@ def test_migrate_new_renders_the_same_constraint(project, pkg, db):
     write_models(
         project,
         pkg,
-        """from typing import Annotated
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+        """from ferro import Field, Model
 
 
 class Account(Model):
     code: str = Field(primary_key=True)
-    entries: Relation[list["Entry"]] = BackRef()
 
 
 class Entry(Model):
     id: int | None = Field(default=None, primary_key=True)
-    account: Annotated[Account, ForeignKey(related_name="entries")]
+    account_id: str = Field(foreign_key=Account)
 """,
     )
     new("create_ledger")
@@ -183,10 +176,12 @@ def test_autogenerate_is_empty_against_the_auto_migrated_database(
 def test_a_resolved_target_without_a_primary_key_is_refused():
     class Ledger(Model):
         name: str
-        lines: Relation[list["Line"]] = BackRef()
 
-    with pytest.raises(TypeError, match="primary_key=True field on Ledger"):
+    with pytest.raises(
+        TypeError,
+        match=r"Ledger declares no primary key .* on Ledger, add `id: int \| None",
+    ):
 
         class Line(Model):
             id: int | None = Field(default=None, primary_key=True)
-            ledger: Annotated[Ledger, ForeignKey(related_name="lines")]
+            ledger_id: int = Field(foreign_key=Ledger)

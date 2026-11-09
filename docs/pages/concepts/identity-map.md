@@ -91,6 +91,61 @@ Three kinds of operation leave the map alone:
 - `Model.bulk_create([...])`, which returns a row count, not instances. Query the rows again if you need instances in the map.
 - Raw SQL (`fetch_all`, `fetch_one`), whose rows are plain dicts.
 
+## The unloaded instance
+
+A forward relation that nothing loaded reads as an *unloaded instance*: a real instance of the related model holding only its primary key. Inside a session, Ferro registers it in the map under that key, so it is the row's one object like any other. A later `get()` or query of that row fills the same object in place, and `post.author is await Author.get(author_id)` holds.
+
+This block runs inside a [session](../guide/connections.md#sessions) on `Author` and `Post`, the models the API reference uses. It adds an author and a post, drops both, then fetches the post again, so the session holds no author when `post.author` is first read:
+
+```python {test=run prelude=reference}
+lin = await Author.create(name="Lin Wei", email="lin@example.com")
+post = await Post.create(title="Notes on Pascal", author_id=lin.id)
+author_id, post_id = lin.id, post.id
+del lin, post  # the map keeps no instance alive
+
+post = await Post.get(post_id)
+author = post.author  # unloaded: built from author_id, registered under it
+print(repr(author))
+
+fetched = await Author.get(author_id)  # fills the registered instance
+print(repr(fetched))
+assert fetched is author
+assert post.author is author
+```
+
+<!-- prints: above -->
+```text
+Author(id=3, unloaded)
+Author(id=3, name='Lin Wei', email='lin@example.com')
+```
+
+The first `print` shows the key alone and sent no query. `Author.get()` ran its query, found the unloaded instance under that key and filled it, so `fetched`, `author` and `post.author` are one object. `await post.author.load()` fills it the same way.
+
+Outside a session there is no map to register in, so the unloaded instance is cached on the parent alone: reading `post.author` twice gives the same object, and a separate fetch of the author gives another.
+
+An unloaded instance never serializes as a partial row. Its own `model_dump()` and `model_dump_json()` raise `InstanceNotLoaded`. Any other path goes through Pydantic's serializer (a model that nests it, a `TypeAdapter`, a FastAPI response model), and Pydantic wraps the refusal in its own `PydanticSerializationError`, whose message carries the `InstanceNotLoaded` one:
+
+```python {test=run prelude=reference}
+from pydantic import TypeAdapter
+from pydantic_core import PydanticSerializationError
+
+from ferro import InstanceNotLoaded
+
+async with engines.session():  # a session that holds no author yet
+    post = await Post.get(1)
+    try:
+        TypeAdapter(Author).dump_python(post.author)
+    except PydanticSerializationError as error:
+        assert isinstance(error.__cause__, InstanceNotLoaded)
+        assert "await post.author.load()" in str(error)
+    else:
+        raise AssertionError("expected PydanticSerializationError")
+```
+
+In Python mode the `InstanceNotLoaded` is the error's `__cause__`; a JSON dump keeps only the message. Load the relation first, with `include()` on the query or `await post.author.load()`.
+
+`InstanceNotLoaded` is not an `AttributeError`, so nothing mistakes an unloaded column for an absent one. `hasattr(post.author, "name")` and `getattr(post.author, "name", None)` raise it rather than answering `False` or `None`, and a Pydantic model built with `from_attributes=True` fails validation with a `get_attribute_error` whose message carries the refusal, instead of filling `name` with its default. A name that is no column still raises a plain `AttributeError`.
+
 ## Eviction
 
 Because a re-fetch already refreshes a held instance, you rarely need to manage the map by hand. Two operations let you do so. These blocks run inside a [session](../guide/connections.md#sessions).

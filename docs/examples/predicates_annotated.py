@@ -13,32 +13,32 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
+from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 
 
 class Owner(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
     email: Annotated[str, Field(unique=True)]
-    accounts: Relation[list["Account"]] = BackRef()
+    accounts: Relation[list["Account"]] = Reverse("owner_id")
 
 
 class Account(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     label: str
-    owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["Transaction"]] = BackRef()
+    owner_id: Annotated[int | None, Field(foreign_key=Owner)] = None
+    owner: Relation[Owner | None] = Forward("owner_id")
+    transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
 class Category(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: Annotated[str, Field(unique=True)]
-    parent: Annotated[
-        "Category", ForeignKey(related_name="children", nullable=True)
-    ] = None
-    children: Relation[list["Category"]] = BackRef()
-    transactions: Relation[list["Transaction"]] = BackRef()
-    split_lines: Relation[list["SplitLine"]] = BackRef()
+    parent_id: Annotated[int | None, Field(foreign_key="Category")] = None
+    parent: Relation["Category | None"] = Forward("parent_id")
+    children: Relation[list["Category"]] = Reverse("parent_id")
+    transactions: Relation[list["Transaction"]] = Reverse("category_id")
+    split_lines: Relation[list["SplitLine"]] = Reverse("category_id")
 
 
 class Transaction(Model):
@@ -47,33 +47,37 @@ class Transaction(Model):
     amount: Decimal
     posted_on: date
     cleared_on: date | None = None
-    account: Annotated[Account, ForeignKey(related_name="transactions")]
-    category: Annotated[Category | None, ForeignKey(related_name="transactions")] = None
-    lines: Relation[list["SplitLine"]] = BackRef()
-    transfer_out: "Transfer" = BackRef()
-    transfer_in: "Transfer" = BackRef()
-    tags: Relation[list["Tag"]] = BackRef()
+    account_id: Annotated[int, Field(foreign_key=Account)]
+    account: Relation[Account] = Forward("account_id")
+    category_id: Annotated[int | None, Field(foreign_key=Category)] = None
+    category: Relation[Category | None] = Forward("category_id")
+    lines: Relation[list["SplitLine"]] = Reverse("transaction_id")
+    transfer_out: Relation[list["Transfer"]] = Reverse("outflow_id")
+    transfer_in: Relation[list["Transfer"]] = Reverse("inflow_id")
+    tags: Relation[list["Tag"]] = Reverse("transactions")
 
 
 class SplitLine(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     amount: Decimal
-    transaction: Annotated[Transaction, ForeignKey(related_name="lines")]
-    category: Annotated[Category, ForeignKey(related_name="split_lines")]
+    transaction_id: Annotated[int, Field(foreign_key=Transaction)]
+    transaction: Relation[Transaction] = Forward("transaction_id")
+    category_id: Annotated[int, Field(foreign_key=Category)]
+    category: Relation[Category] = Forward("category_id")
 
 
 class Transfer(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
-    outflow: Annotated[
-        Transaction, ForeignKey(related_name="transfer_out", unique=True)
-    ]
-    inflow: Annotated[Transaction, ForeignKey(related_name="transfer_in", unique=True)]
+    outflow_id: Annotated[int, Field(foreign_key=Transaction, unique=True)]
+    outflow: Relation[Transaction] = Forward("outflow_id")
+    inflow_id: Annotated[int, Field(foreign_key=Transaction, unique=True)]
+    inflow: Relation[Transaction] = Forward("inflow_id")
 
 
 class Tag(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: Annotated[str, Field(unique=True)]
-    transactions: Relation[list[Transaction]] = ManyToMany(related_name="tags")
+    transactions: Relation[list[Transaction]] = ManyToMany(through="tag_transactions")
 
 
 # --8<-- [end:models]

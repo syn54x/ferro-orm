@@ -93,7 +93,7 @@ default · sqlite:///./app.db
 0002_author_nickname  02_idx_author_nickname  applied (0 ms)
 ```
 
-The database now has the `nickname` column and its index. `new` diffs the models against the newest migration's [schema snapshot](#reading-a-migration), never against a database, so it needs no connection and gives every developer the same files. A change that renders no DDL (a Python-side default, a back-reference) writes nothing and says `no schema change: nothing written`.
+The database now has the `nickname` column and its index. `new` diffs the models against the newest migration's [schema snapshot](#reading-a-migration), never against a database, so it needs no connection and gives every developer the same files. A change that renders no DDL (a Python-side default, a reverse relation) writes nothing and says `no schema change: nothing written`.
 
 The example `docs/examples/migrations_quickstart.py` in the repository runs the whole loop on SQLite: `init`, `new`, `up`, `check`, `drift`, `down`.
 
@@ -420,7 +420,7 @@ The recipe, for an `author` table keyed by an integer `id` that should be keyed 
 
     The drop is marked `-- ferro: destructive`. Its down restores the schema, not the rows: if reverting past it must be impossible, declare its down `-- ferro: irreversible <reason>`.
 
-3. **Take the old name back, if you want it.** Rename `Writer` to `Author` with `__ferro_renamed_from__ = "writer"` and the relation with `ForeignKey(..., renamed_from="writer")`, and generate the rename ([rename hints](renames-and-retirements.md#rename-hints)).
+3. **Take the old name back, if you want it.** Rename `Writer` to `Author` with `__ferro_renamed_from__ = "writer"` and the key column with `author_id: int = Field(foreign_key=Author, renamed_from="writer_id")`, rename the relation that names it to `Forward("author_id")`, and generate the rename ([rename hints](renames-and-retirements.md#rename-hints)).
 
 On a server that deploys with rolling restarts, ship each step as its own release, as the [two-release contract](deploying.md#rolling-deploys-and-the-two-release-contract) describes: code running during step 1 must write both keys.
 

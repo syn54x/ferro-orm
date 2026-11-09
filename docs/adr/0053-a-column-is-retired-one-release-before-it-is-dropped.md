@@ -19,6 +19,8 @@ A **retired column** stays in the schema snapshot, nullable, and leaves the runn
 
 A **retired label** keeps its `StrEnum` member, so rows that hold it still hydrate, stays in the Postgres type and in any `db_check` column check, and is refused on assignment (construction or attribute set), the loud and earliest point; hydration bypasses validation (I-2), so saving a hydrated row that still holds the label writes it back unchanged, which is not a write of the label. Deleting the member and the declaration generates today's label removal.
 
+Amended 2026-11-09 (#874): a foreign-key column is declared, so it is retired with `Field(foreign_key=Team, retired=True)` on an optional column (`team_id: int | None = Field(default=None, foreign_key=Team, retired=True)`), under the same rules as any column: it leaves the model, and stays in the snapshot, nullable, with its foreign key. `ForeignKey(retired=True)` is gone, and with it the refusal of a `BackRef` reading a retired relation back: the reverse side is a `Reverse` naming the column, which retires with it.
+
 ## Considered options
 
 - **A class-level mapping (`__ferro_retired_columns__ = {"source": str}`)**, or a `Retired[str]` type marker. Rejected: the column needs its type, `db_type`, index and check to stay in the snapshot, and the field already holds them; a second table of column facts, or a generic with nothing else to do, duplicates them.

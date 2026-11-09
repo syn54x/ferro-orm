@@ -147,8 +147,10 @@ def _plan_revision(
     it and ``irreversible`` the reason a ``raise`` replaces it. ``reports``
     are the planner's one-off reports the upgrade writes as comments, in
     ``_plan_from_ir``'s report shape. When no revision is written, the lists
-    are empty and ``refusal`` is ``{"kind", "text"}``, ``text`` the sentence
-    after ``ferro: autogenerate refused: ``. A plan that cannot render
+    are empty and ``refusal`` is ``{"kind", "text", "op"}``, ``text`` the
+    sentence after ``ferro: autogenerate refused: `` and ``op`` the planner op
+    it refuses, in ``_plan_from_ir``'s op shape (``None`` for a refusal that
+    names none). A plan that cannot render
     raises ``ValueError``."""
     ...
 
@@ -831,6 +833,13 @@ def register_instance(
     route: RouteHandle,
 ) -> None: ...
 def evict_instance(name: str, pk: str, route: RouteHandle) -> None: ...
+def unloaded_instance[M](
+    cls: type[M],
+    pk: object,
+    relation: tuple[str, str],
+    route: RouteHandle | None = None,
+) -> M: ...
+def prune_stale_relations(instance: object) -> None: ...
 def reset_engine() -> None: ...
 def set_default_connection(name: str) -> None: ...
 def connection_backend(using: str | None = None) -> str | None: ...

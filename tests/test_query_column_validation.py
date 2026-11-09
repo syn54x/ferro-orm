@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query import Query, QueryProxy
 from ferro.query.wire import OrderByEntry
 
@@ -33,24 +33,26 @@ class TestWhereColumnValidation:
         q = ValUser2.where(lambda u: u.name == "x")
         assert q.where_clause[0].column == "name"
 
-    def test_shadow_fk_column_is_valid(self):
+    def test_fk_column_is_valid(self):
         class ValAuthor(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         class ValPost(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            author: Annotated[ValAuthor, ForeignKey(related_name="val_posts")]
+            author_id: Annotated[int, FerroField(foreign_key=ValAuthor)]
+            author: Relation[ValAuthor] = Forward("author_id")
 
         q = Query(ValPost).where(lambda p: p.author_id == 1)
         assert q.where_clause[0].column == "author_id"
 
-    def test_error_lists_shadow_fk_in_valid_columns(self):
+    def test_error_lists_fk_column_in_valid_columns(self):
         class ValAuthor2(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         class ValPost2(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            author: Annotated[ValAuthor2, ForeignKey(related_name="val_posts2")]
+            author_id: Annotated[int, FerroField(foreign_key=ValAuthor2)]
+            author: Relation[ValAuthor2] = Forward("author_id")
 
         with pytest.raises(AttributeError, match="author_id"):
             Query(ValPost2).where(lambda p: p.authr_id == 1)
@@ -217,7 +219,8 @@ class TestOrderByValidation:
 
         class ObPost(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            author: Annotated[ObAuthor, ForeignKey(related_name="ob_posts")]
+            author_id: Annotated[int, FerroField(foreign_key=ObAuthor)]
+            author: Relation[ObAuthor] = Forward("author_id")
 
         q = ObPost.select().order_by(lambda p: p.author.name, "desc", nulls="last")
         assert q.order_by_clause == [
@@ -234,9 +237,10 @@ class TestOrderByValidation:
         class ObAggTxn(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             amount: int = 0
-            account: Annotated[
-                ObAggAccount | None, ForeignKey(related_name="ob_agg_txns")
-            ] = None
+            account_id: Annotated[int | None, FerroField(foreign_key=ObAggAccount)] = (
+                None
+            )
+            account: Relation[ObAggAccount | None] = Forward("account_id")
 
         grouped = ObAggTxn.select(
             lambda t: {"acct": t.account_id, "total": t.amount.sum()}

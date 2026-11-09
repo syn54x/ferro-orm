@@ -9,7 +9,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, Field, FerroField, ForeignKey, Model, Relation, now
+from ferro import Field, FerroField, Forward, Model, Relation, Reverse, now
 from ferro.query.nodes import QueryProxy, ValueExpr
 from ferro.relations import resolve_relationships
 
@@ -19,7 +19,7 @@ def models(clean_registry: None) -> dict[str, type]:
     class Account(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str = ""
-        users: Relation[list["User"]] = BackRef()
+        users: Relation[list["User"]] = Reverse("account_id")
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -28,7 +28,8 @@ def models(clean_registry: None) -> dict[str, type]:
         score: int = 0
         bonus: int = 0
         name: str = ""
-        account: Annotated[Account | None, ForeignKey(related_name="users")] = None
+        account_id: Annotated[int | None, FerroField(foreign_key=Account)] = None
+        account: Relation[Account | None] = Forward("account_id")
         updated_at: datetime | None = None
         born: date | None = None
         opens_at: time | None = None

@@ -31,7 +31,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Model
 from tests._pg_sequence import pg_sequence_rename
 from tests.test_generate_columns import (  # noqa: F401 - fixtures
     no_bytecode,
@@ -75,14 +75,13 @@ def build_rename_hint_models() -> None:
 
     class Publisher(Model):
         id: int | None = Field(default=None, primary_key=True)
-        books: Relation[list["Book"]] = BackRef()
 
     class Book(Model):
         __ferro_renamed_from__ = "volume"
         id: int | None = Field(default=None, primary_key=True)
         full_name: str = Field(index=True, renamed_from="name")
         subtitle: Annotated[str, Field(renamed_from="tagline")]
-        house: Annotated[Publisher, ForeignKey("books", renamed_from="press")]
+        house_id: int = Field(foreign_key=Publisher, renamed_from="press_id")
 
     _ = (Publisher, Book)
 
@@ -127,7 +126,8 @@ class Author(Model):
 def b3(table: str, backend: str, hint: bool = True) -> str:
     """B3's models with the parent model's table named ``table``: a unique,
     a table check, a child foreign key, a many-to-many join table, and on
-    Postgres a row policy."""
+    Postgres a row policy. The join table's name is declared, so it stays
+    ``writer_tags`` whatever the parent's table is called (ADR-0062)."""
     model = table.capitalize()
     rls = (
         "    __ferro_rls__: ClassVar = RowSecurity(\n"
@@ -145,14 +145,12 @@ def b3(table: str, backend: str, hint: bool = True) -> str:
 class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    {table}s: Relation[list["{model}"]] = BackRef()
 
 
 class {model}(Model):
 {renamed}    id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
-    books: Relation[list["Book"]] = BackRef()
-    tags: Relation[list["Tag"]] = ManyToMany(related_name="{table}s")
+    tags: Relation[list["Tag"]] = ManyToMany(through="writer_tags")
     __ferro_checks__: ClassVar[tuple[Check, ...]] = (
         Check("named", lambda {table}: {table}.name != None),
     )
@@ -161,7 +159,7 @@ class {model}(Model):
 class Book(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
-    writer: Annotated[{model}, ForeignKey("books")]
+    writer_id: Annotated[int, FerroField(foreign_key={model})]
 """
     )
 
@@ -319,10 +317,11 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
     new("rename_writer")
 
     up = statements(schema_file(project, 2, "up", db.backend))
+    # The join table keeps its declared name; its key column and the names
+    # derived from that column follow the renamed table (ADR-0062).
     structural = [
         'ALTER TABLE "writer" RENAME TO "author"',
-        'ALTER TABLE "writer_tags" RENAME TO "author_tags"',
-        'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"',
+        'ALTER TABLE "writer_tags" RENAME COLUMN "writer_id" TO "author_id"',
     ]
     if db.backend == "postgres":
         # Table and column renames first, then each table's derived names
@@ -336,25 +335,23 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
             'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
             'ALTER POLICY "rls_writer_id" ON "author" RENAME TO "rls_author_id"',
             'ALTER INDEX "idx_writer_tags_tag_id_writer_id" RENAME TO '
-            '"idx_author_tags_tag_id_author_id"',
+            '"idx_writer_tags_tag_id_author_id"',
             'ALTER INDEX "uq_writer_tags_writer_id_tag_id" RENAME TO '
-            '"uq_author_tags_author_id_tag_id"',
-            'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO '
-            '"fk_author_tags_tag_id_tag"',
-            'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_writer_id_writer" '
-            'TO "fk_author_tags_author_id_author"',
+            '"uq_writer_tags_author_id_tag_id"',
+            'ALTER TABLE "writer_tags" RENAME CONSTRAINT "fk_writer_tags_writer_id_writer" '
+            'TO "fk_writer_tags_author_id_author"',
             'ALTER TABLE "book" RENAME CONSTRAINT "fk_book_writer_id_writer" TO '
             '"fk_book_writer_id_author"',
         ]
     else:
-        assert up[:3] == structural
+        assert up[:2] == structural
         # `author`'s rebuild builds its unique under the new name.
         assert (
             'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name")'
             in up
         )
         # One rebuild per table whose constraint name moved, in one step.
-        assert sorted(rebuilt(up)) == ["author", "author_tags", "book"]
+        assert sorted(rebuilt(up)) == ["author", "book", "writer_tags"]
 
     def key_default(table: str) -> str:
         return db.rows(
@@ -365,7 +362,7 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
 
     round_trip(project, db)
     assert db.rows('SELECT "name" FROM "author"') == [("Ann",)]
-    assert db.rows('SELECT "author_id", "tag_id" FROM "author_tags"') == [(1, 1)]
+    assert db.rows('SELECT "author_id", "tag_id" FROM "writer_tags"') == [(1, 1)]
     assert db.rows('SELECT "title", "writer_id" FROM "book"') == [("Odes", 1)]
     assert "writer" not in db.tables()
     if db.backend == "postgres":
@@ -466,6 +463,139 @@ def test_a_hint_after_its_migration_is_no_schema_change(
     assert listing(project / "migrations") == written
 
 
+# -- B3: rename a join table --------------------------------------------------------
+
+JOIN_TABLE_BEFORE = (
+    IMPORTS
+    + """
+class Tag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    label: str
+
+
+class Author(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    tags: Relation[list["Tag"]] = ManyToMany(through="writer_tags")
+"""
+)
+
+JOIN_TABLE_AFTER = JOIN_TABLE_BEFORE.replace(
+    'ManyToMany(through="writer_tags")',
+    'ManyToMany(through="author_tags", renamed_from="writer_tags")',
+)
+
+
+def _two_links(db) -> None:
+    db.execute('INSERT INTO "author" ("name") VALUES (\'Ann\')')
+    db.execute("INSERT INTO \"tag\" (\"label\") VALUES ('poetry'), ('prose')")
+    db.execute(
+        'INSERT INTO "writer_tags" ("author_id", "tag_id") VALUES (1, 1), (1, 2)'
+    )
+
+
+@backend_matrix
+def test_a_join_table_renamed_from_its_old_name_keeps_its_rows(
+    project, pkg, db, capsys
+):
+    start(project, pkg, db, JOIN_TABLE_BEFORE)
+    _two_links(db)
+    write_models(project, pkg, JOIN_TABLE_AFTER)
+    new("rename_writer_tags")
+
+    up = statements(schema_file(project, 2, "up", db.backend))
+    assert up[0] == 'ALTER TABLE "writer_tags" RENAME TO "author_tags"'
+    assert 'DROP TABLE "writer_tags"' not in up
+    assert not any(
+        sql.startswith('CREATE TABLE IF NOT EXISTS "author_tags"') for sql in up
+    )
+    if db.backend == "postgres":
+        # Every name derived from the table follows it.
+        assert up[1:] == [
+            'ALTER INDEX "idx_writer_tags_tag_id_author_id" RENAME TO '
+            '"idx_author_tags_tag_id_author_id"',
+            'ALTER INDEX "uq_writer_tags_author_id_tag_id" RENAME TO '
+            '"uq_author_tags_author_id_tag_id"',
+            'ALTER TABLE "author_tags" RENAME CONSTRAINT '
+            '"fk_writer_tags_author_id_author" TO "fk_author_tags_author_id_author"',
+            'ALTER TABLE "author_tags" RENAME CONSTRAINT '
+            '"fk_writer_tags_tag_id_tag" TO "fk_author_tags_tag_id_tag"',
+        ]
+    else:
+        # The renamed constraint names need the renamed table rebuilt.
+        assert rebuilt(up) == ["author_tags"]
+    assert "destructive" not in schema_file(project, 2, "up", db.backend).read_text()
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert "writer_tags" not in db.tables()
+    links = 'SELECT "author_id", "tag_id" FROM "author_tags" ORDER BY "tag_id"'
+    assert db.rows(links) == [(1, 1), (1, 2)]
+    capsys.readouterr()
+    assert run("migrate", "drift", "--url", db.url) == 0
+    assert "no drift against 0002_rename_writer_tags" in capsys.readouterr().out
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert db.rows(links.replace("author_tags", "writer_tags")) == [(1, 1), (1, 2)]
+
+
+def test_a_join_table_renamed_from_a_declared_table_is_refused_by_the_generator(
+    project, pkg
+):
+    from tests.test_many_to_many_through import DECLARED_TABLE_REFUSAL
+
+    from_tag = JOIN_TABLE_AFTER.replace(
+        'renamed_from="writer_tags"', 'renamed_from="tag"'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, from_tag)
+
+    assert f"rename hint refused: {DECLARED_TABLE_REFUSAL}" in err
+
+
+def test_two_join_tables_renamed_from_one_name_are_refused_naming_the_relations(
+    project, pkg
+):
+    twice = JOIN_TABLE_AFTER + (
+        "    labels: Relation[list[Tag]] = "
+        'ManyToMany(through="author_labels", renamed_from="writer_tags")\n'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, twice)
+
+    assert (
+        'join table "author_labels" declares ManyToMany(renamed_from="writer_tags") '
+        'and join table "author_tags" declares '
+        'ManyToMany(renamed_from="writer_tags"): one table becomes one table; keep '
+        'the hint on the table "writer_tags" became'
+    ) in err
+
+
+def test_a_join_table_renamed_without_its_hint_names_the_hint_on_sqlite(project, pkg):
+    """The model rename carries the join table's key column, which SQLite
+    rebuilds the table to rename, but the table itself is gone from the
+    models under its old name."""
+    renamed = b3("author", "sqlite").replace(
+        'through="writer_tags"', 'through="author_tags"'
+    )
+
+    err = refused(project, pkg, "sqlite", b3("writer", "sqlite"), renamed)
+
+    assert err.splitlines()[-1].endswith(
+        "cannot rebuild table 'writer_tags': it is missing from the new snapshot. "
+        "If the join table was renamed, declare "
+        'ManyToMany(renamed_from="writer_tags") on the many-to-many that names it '
+        "now; if it was dropped, drop it in a migration of its own before this change"
+    )
+    # Followed, the fix renames the join table and its key column.
+    hinted = renamed.replace(
+        'through="author_tags"', 'through="author_tags", renamed_from="writer_tags"'
+    )
+    write_models(project, pkg, hinted)
+    new("rename_writer")
+    up = statements(schema_file(project, 2, "up", "sqlite"))
+    assert 'ALTER TABLE "writer_tags" RENAME TO "author_tags"' in up
+    assert 'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"' in up
+
+
 # -- a rename and a type change in one edit ------------------------------------------
 
 
@@ -552,6 +682,38 @@ def test_a_drop_and_an_add_without_a_hint_is_destructive_and_names_renamed_from(
         )
         assert 'ALTER TABLE "author" DROP COLUMN "name"' in up
         assert not any("RENAME" in sql for sql in up)
+
+
+KEY_COLUMN_BEFORE = """
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    author_id: int = Field(foreign_key=Author)
+"""
+
+
+def test_a_dropped_and_an_added_key_column_names_the_columns_renamed_from(project, pkg):
+    write_config(project, pkg)
+    write_models(project, pkg, KEY_COLUMN_BEFORE)
+    new("create")
+    write_models(
+        project,
+        pkg,
+        KEY_COLUMN_BEFORE.replace(
+            "    author_id: int = Field(foreign_key=Author)\n",
+            "    writer_id: int = Field(foreign_key=Author)\n",
+        ),
+    )
+    code, out, _ = _new_capturing("writer_id")
+    assert code == 0
+    assert (
+        'post: if "author_id" became "writer_id", declare renamed_from="author_id"'
+        in out
+    )
 
 
 # -- the declaration surface --------------------------------------------------------

@@ -570,7 +570,7 @@ def resolve_join_hops(
         hops.append(
             QueryJoinHop(
                 relation=relation,
-                from_column=spec.shadow_column,
+                from_column=spec.fk_column,
                 to_table=target.__ferro_table__,
                 to_column=_target_pk_column(target),
                 target=target,
@@ -584,7 +584,7 @@ def _where_node_traverses(node: QueryNode) -> bool:
     """True if any leaf under ``node`` carries a non-empty relation path (#273).
 
     Used by the mutate guardrails to reject relation traversal on
-    ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
+    ``update()``/``delete()``. A join-free foreign-key column leaf (``t.account ==
     instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
     A negation traverses iff its child does (``~`` never adds a path). An
     existence test always counts as traversal: it correlates a subquery to
@@ -740,6 +740,7 @@ def _literal_set(
     """
     compiled: list[SetAssignment] = []
     for column, value in (assignments or {}).items():
+        _reject_relation(model_cls, column, role="target")
         validate_query_column(model_cls, column)
         _refuse_generated_target(model_cls, column)
         _reject_kwargs_value_expr(value)
@@ -765,6 +766,12 @@ def _refuse_generated_target(model_cls: type, column: str) -> None:
 
 
 def _reject_relation(model_cls: type, name: str, *, role: str) -> None:
+    forward = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    if role == "target" and name in forward:
+        raise TypeError(
+            f"update() cannot write {model_cls.__name__}.{name}, a relation. "
+            f"Name its foreign-key column, {forward[name].fk_column}, instead."
+        )
     if name in _relation_names(model_cls):
         raise TypeError(
             f"update() cannot assign a relation {name!r} as a SET {role}; "
@@ -1038,7 +1045,7 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         ValueError: If ``limit()``/``offset()``/``after()``/``before()`` was set, the query
             traverses a relation (a joined/explicit-edge path, or a where-clause
             leaf carrying a non-empty path — portable SQL has no
-            ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter stays
+            ``UPDATE/DELETE ... JOIN``; a join-free foreign-key column filter stays
             allowed), or the query carries ``include()``. Rejected here, before
             any DB round-trip (the Rust guard from #270 stays as boundary
             defense).
@@ -1071,8 +1078,8 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         raise ValueError(
             f"{operation}() does not support include(): a mutation is a "
             "single-table write shape and returns no instances to "
-            "populate. Drop the .include(...) call, or fetch the "
-            "populated rows first and mutate by primary-key set."
+            "load. Drop the .include(...) call, or fetch the "
+            "loaded rows first and mutate by primary-key set."
         )
 
 

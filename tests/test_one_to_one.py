@@ -6,8 +6,9 @@ from ferro import (
     connect,
     engines,
     FerroField,
-    ForeignKey,
-    BackRef,
+    Forward,
+    Relation,
+    Reverse,
     reset_engine,
     clear_registry,
 )
@@ -32,34 +33,36 @@ async def test_one_to_one_relationship(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         # 1. Create User and Profile
         alice = await User.create(username="alice")
-        p1 = await Profile.create(bio="Alice's Bio", user=alice)
+        p1 = await Profile.create(bio="Alice's Bio", user_id=alice.id)
 
-        # 2. Verify reverse lookup (1:1 should return object directly)
-        # Note: RelationshipDescriptor returns query.first() which is a coroutine
-        alice_profile = await alice.profile
+        # 2. Verify reverse lookup: a one-to-one reverse relation is a
+        # query read with .first()
+        alice_profile = await alice.profile.first()
         assert alice_profile is not None
         assert alice_profile.bio == "Alice's Bio"
         assert alice_profile.id == p1.id
 
-        # 3. Verify forward lookup (already working)
-        p1_user = await p1.user
+        # 3. Verify forward lookup: the session's alice, with no query
+        p1_user = p1.user
+        assert p1_user is alice
         assert p1_user.username == "alice"
 
         # 4. Verify Uniqueness Enforcement
         with pytest.raises(Exception):
             # Should fail because alice already has a profile
-            await Profile.create(bio="Another bio", user=alice)
+            await Profile.create(bio="Another bio", user_id=alice.id)
 
 
 @pytest.mark.asyncio
@@ -68,12 +71,13 @@ async def test_one_to_one_unique_index_in_sqlite(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
 
@@ -104,12 +108,13 @@ async def test_one_to_one_unique_index_in_postgres(
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
 

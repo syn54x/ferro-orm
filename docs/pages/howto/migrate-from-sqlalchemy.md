@@ -33,7 +33,7 @@ The SQLAlchemy block inserts the row on `commit()`. The Ferro block inserts it i
 | Get by primary key | `session.get(User, pk)` returns `None` if missing | `User.get(pk)` raises; `User.get_or_none(pk)` returns `None` |
 | Sessions | `async_sessionmaker`, `session.add`, `commit` | `async with engines.session():` once per request; no `add` or `commit` |
 | Transactions | `async with session.begin():` | `async with transaction():` |
-| Relationships | `relationship()` + `ForeignKey` columns | `Annotated[..., ForeignKey(...)]` + `BackRef` / `ManyToMany` |
+| Relationships | `mapped_column()` with a `ForeignKey` + `relationship()` | `Field(foreign_key=...)` + `Forward` / `Reverse` / `ManyToMany` |
 | Async | Native | Native (async-only) |
 | Migrations | Alembic | `ferro migrate`, or Alembic through `get_metadata()` and `ferro_options()` |
 
@@ -88,7 +88,7 @@ The two declare the same tables; the later sections reuse these models. What cha
 - There is no `__tablename__`: the table name comes from the class name (`user`).
 - The auto-increment primary key is `int | None` with `default=None`: it is `None` until the row is inserted.
 - Validation and serialization come from Pydantic, so the model doubles as your API schema.
-- The `ForeignKey` annotation declares both the relation and the `author_id` column; Ferro creates the shadow column.
+- `author_id` is declared with `Field(foreign_key=User)`, where SQLAlchemy passes `mapped_column()` a `ForeignKey`, and `Forward("author_id")` names it where `relationship()` would. `User.posts` is `Reverse("author_id")`, naming the same column.
 - Declare fields on each concrete model. A `Model` base class does not pass its fields on; shared behavior goes in plain mixins, as in the [Timestamps how-to](timestamps.md).
 
 See the [Models and fields guide](../guide/models-and-fields.md) for every field option.
@@ -168,13 +168,13 @@ The user `ada` exists, so `created` is `False` and the stored row is unchanged. 
 
 ## Relationships
 
-Relations are lazy and awaitable. A forward foreign key returns the instance, and a `BackRef` returns a chainable query:
+A forward relation reads as the related instance, and a reverse relation (`Reverse`) is a chainable query. Nothing loads on attribute access: `.load()` fetches a forward relation's row, and `include()` loads it with the query:
 
 ```python
 --8<-- "docs/examples/from_sqlalchemy.py:relationships"
 ```
 
-`post.author` returns the `User`, and `ada.posts` returns her posts, newest first. Many-to-many uses `ManyToMany(related_name=...)` on one side and `BackRef()` on the other; see the [Relationships guide](../guide/relationships.md).
+`await post.author.load()` returns the `User`, and `ada.posts` returns her posts, newest first. Many-to-many uses `ManyToMany(through="<join table>")` on one side and `Reverse("<attribute>")` on the other; see the [Relationships guide](../guide/relationships.md).
 
 ## Transactions
 
@@ -220,7 +220,7 @@ Once the models are all Ferro, move to Ferro's own [migrations](../guide/schema/
 
 Some SQLAlchemy features map differently, or have no Ferro counterpart today:
 
-- **Eager loading** (`selectinload` / `joinedload`): forward-FK paths populate with [`include()`](../guide/queries.md#populating-relations-with-include) in one statement; `BackRef` and many-to-many collections still load lazily per access.
+- **Eager and lazy loading** (`joinedload` / `selectinload`, and a lazy `relationship()`): forward relations load with [`include()`](../guide/queries.md#loading-relations-with-include) in one statement, or one at a time with `await post.author.load()`. `Reverse` and `ManyToMany` collections are queries you run, such as `await ada.posts.all()`.
 - **Partial column selects** (`select(User.id, User.name)`): [`select(lambda user: (user.id, user.username))`](../guide/queries.md#selecting-a-column-subset) returns projected records; traversal and output aliases use the dict form.
 - **`func.sum` / `avg` / `min` / `max` and `group_by()`**: aggregate methods on columns (`order.amount.sum()`), with [grouping derived from the projection](../guide/aggregations.md). There is deliberately no `group_by()` chainer. `having()` is not built yet; filter groups in Python or use [raw SQL](../guide/raw-sql.md).
 - **Atomic update expressions**: written as a recipe, not SQLAlchemy's `update().values(...)`: `update(lambda counter: {"n": counter.n + 1, "updated_at": now})`. Keyword `update()` accepts literals only. `update()` recipes support Postgres `.merge()`; `.concat()` is planned.

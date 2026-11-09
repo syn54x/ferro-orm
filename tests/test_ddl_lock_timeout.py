@@ -512,12 +512,11 @@ PARENT_AND_CHILD = """
 class Parent(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
-    children: Relation[list["Child"]] = BackRef()
 
 
 class Child(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    parent: Annotated[Parent, ForeignKey(related_name="children")]
+    parent_id: Annotated[int, FerroField(foreign_key=Parent)]
 """
 
 

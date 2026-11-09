@@ -26,7 +26,7 @@ from .checks import (
     _check_literal_token,
     _CheckProxy,
     _iter_code_objects,
-    _relation_shadow_columns,
+    _relation_fk_columns,
     _reverse_relation_names,
 )
 from .query.nodes import (
@@ -137,9 +137,13 @@ class _ValueProxy(_CheckProxy):
     _subject = "generated expression"
 
     def __getattr__(self, name: str) -> Any:
-        shadow = self._relations.get(name)
-        if shadow is not None or name in self._reverse_relations:
-            hint = f"; read the shadow column {shadow!r} instead" if shadow else ""
+        fk_column = self._relations.get(name)
+        if fk_column is not None or name in self._reverse_relations:
+            hint = (
+                f"; read the foreign-key column {fk_column!r} instead"
+                if fk_column
+                else ""
+            )
             raise TypeError(
                 f"generated expression reads the relation {name!r}: {_DIALECT}, "
                 f"and a relation is another table{hint}"
@@ -300,7 +304,9 @@ def _refuse_unequal_family(
 def _declared_generated(model_cls: type[Any]) -> dict[str, Callable[..., Any]]:
     return {
         field_name: meta.generated
-        for field_name, meta in (getattr(model_cls, "ferro_fields", {}) or {}).items()
+        for field_name, meta in (
+            getattr(model_cls, "__ferro_fields__", {}) or {}
+        ).items()
         if getattr(meta, "generated", None) is not None
     }
 
@@ -332,7 +338,7 @@ def compile_generated_columns(
     proxy = _ValueProxy(
         model_cls,
         columns,
-        _relation_shadow_columns(model_cls, columns),
+        _relation_fk_columns(model_cls, columns),
         _reverse_relation_names(model_cls),
     )
     specs: dict[str, GeneratedColumnSpec] = {}

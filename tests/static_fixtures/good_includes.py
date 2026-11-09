@@ -2,13 +2,13 @@
 
 test_static_contracts.py asserts this file produces no diagnostics — an
 included query stays ``Query[T]``-shaped (``.all()`` still ``list[T]``, no
-distinct loaded type, ADR-0008), and populated access types as the field's
+distinct loaded type, ADR-0008), and loaded access types as the field's
 declared annotation.
 """
 
-from typing import Annotated
+from typing import Annotated, assert_type
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 
 
 class GIAccount(Model):
@@ -19,7 +19,8 @@ class GIAccount(Model):
 class GITxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[GIAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=GIAccount)]
+    account: Relation[GIAccount] = Forward("account_id")
 
 
 async def _include_chain_stays_query_shaped() -> None:
@@ -36,9 +37,12 @@ async def _include_chain_stays_query_shaped() -> None:
 
     one: GITxn | None = await GITxn.select().include(lambda t: t.account).first()
 
-    # Populated access is a plain attribute matching the declared annotation.
+    # Loaded access is a plain attribute matching the declared annotation.
     label: str = txns[0].account.label
 
     n: int = await GITxn.select().include(lambda t: t.account).count()
+
+    # A relation nothing loaded is filled in place by .load(), typed as itself.
+    assert_type(await txns[0].account.load(), GIAccount)
 
     del one, label, n

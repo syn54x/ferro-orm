@@ -1,5 +1,6 @@
 import ast
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -205,12 +206,162 @@ def test_junk_lambda_predicates_fail_the_type_checker():
 
 def test_include_chains_pass_the_type_checker():
     """An included query stays Query[T]-shaped: .all() is list[T], .first()
-    is T | None, and populated access types as the declared annotation
+    is T | None, and loaded access types as the declared annotation
     (#286, ADR-0008 — no distinct loaded type)."""
     result = _run_ty(FIXTURES / "good_includes.py")
     assert result.returncode == 0, (
         f"include chains must type-check cleanly:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_explicit_foreign_key_reads_pass_the_type_checker():
+    """A foreign-key column reads as its annotation, `Relation[Team]` as
+    `Team`, `Relation[Player | None]` as `Player | None`, and a reverse
+    relation's `.all()` as `list[Player]`, with no ignore comment (#876)."""
+    fixture = FIXTURES / "good_explicit_fk.py"
+    source = fixture.read_text(encoding="utf-8")
+    for read in (
+        "assert_type(player.team_id, int)",
+        "assert_type(player.team, Team)",
+        "assert_type(player.mentor, Player | None)",
+        "assert_type(await team.players.all(), list[Player])",
+    ):
+        assert read in source
+    assert "ignore" not in source
+
+    result = _run_ty(fixture)
+    assert result.returncode == 0, (
+        f"explicit foreign-key reads must type-check cleanly:\n{result.stdout}\n"
+        f"{result.stderr}"
+    )
+
+
+def test_relation_assignment_passes_the_type_checker():
+    """A forward relation takes its target, an unloaded relation read from
+    another instance, and `None` when its key column is nullable (#880)."""
+    result = _run_ty(FIXTURES / "good_relation_assignment.py")
+    assert result.returncode == 0, (
+        f"relation assignment must type-check cleanly:\n{result.stdout}\n"
+        f"{result.stderr}"
+    )
+
+
+def test_relation_assignment_misuse_fails_the_type_checker():
+    """`player.team = 5`, `player.team = None` on a required relation and
+    `team.players = [player]` on a reverse relation are each a static error
+    (#880)."""
+    result = _run_ty(FIXTURES / "bad_relation_assignment.py")
+    assert result.returncode != 0, "bad_relation_assignment.py must fail ty"
+    assert result.stdout.count("invalid-assignment") == 3, result.stdout
+    for line in (24, 25, 26):
+        assert f"bad_relation_assignment.py:{line}:" in result.stdout
+
+
+def _diagnostics(stdout: str, rule: str, line: int) -> list[str]:
+    return [
+        diagnostic
+        for diagnostic in stdout.splitlines()
+        if f"error[{rule}]" in diagnostic
+        and f"bad_constructor_keys.py:{line}:" in diagnostic
+    ]
+
+
+def test_constructor_keys_fail_the_type_checker_as_the_runtime_refuses_them():
+    """A model's constructor parameters, to `ty`, are exactly the keywords
+    `Model.__init__` accepts: a required foreign-key column is a
+    `missing-argument` whatever a relation keyword carries, and a relation,
+    a many-to-many, a generated column and a retired field are each an
+    `unknown-argument` (#894)."""
+    result = _run_ty(FIXTURES / "bad_constructor_keys.py")
+    assert result.returncode != 0, "bad_constructor_keys.py must fail ty"
+    expected = {
+        # line: (rule, the name it reports)
+        49: [("missing-argument", "`team_id`"), ("unknown-argument", "`team`")],
+        53: [("missing-argument", "`team_id`")],
+        57: [("unknown-argument", "`players`")],
+        61: [("unknown-argument", "`tags`")],
+        65: [("unknown-argument", "`total`")],
+        69: [("unknown-argument", "`bio`")],
+    }
+    for line, diagnostics in expected.items():
+        for rule, name in diagnostics:
+            found = _diagnostics(result.stdout, rule, line)
+            assert len(found) == 1 and name in found[0], (
+                f"line {line}: expected one {rule} naming {name}:\n{result.stdout}"
+            )
+    total = sum(len(diagnostics) for diagnostics in expected.values())
+    assert f"Found {total} diagnostics" in result.stdout, result.stdout
+
+
+def test_constructions_the_runtime_accepts_pass_the_type_checker():
+    """Leaving out a generated column, a retired field, a relation, a
+    defaulted field and a `PrivateAttr` while passing every required
+    `Field(...)` column type-checks cleanly (#894)."""
+    result = _run_ty(FIXTURES / "good_constructor_keys.py")
+    assert result.returncode == 0, (
+        f"constructions must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        lambda ferro: ferro.Forward("team_id", init=False),
+        lambda ferro: ferro.Reverse("team_id", init=False),
+        lambda ferro: ferro.ManyToMany(through="post_tags", init=False),
+    ],
+    ids=["Forward", "Reverse", "ManyToMany"],
+)
+def test_a_relation_takes_no_init_keyword_at_runtime(declare):
+    """`init: Literal[False]` is in the relation's signature for the type
+    checker only; at runtime the keyword stays refused (#894)."""
+    import ferro
+
+    with pytest.raises(TypeError, match="init"):
+        declare(ferro)
+
+
+def test_model_metaclass_names_ferro_field_specifiers():
+    """`ModelMetaclass` carries its own `dataclass_transform`, naming
+    Pydantic's three field specifiers and Ferro's four (#894). Pydantic's
+    private `NoInitField` is a name for the checker only, as Pydantic's own
+    metaclass holds its specifiers."""
+    from pydantic.fields import Field as PydanticField
+    from pydantic.fields import PrivateAttr
+
+    import ferro
+    from ferro.metaclass import ModelMetaclass
+
+    transform = vars(ModelMetaclass)["__dataclass_transform__"]
+    assert transform["kw_only_default"] is True
+    specifiers = transform["field_specifiers"]
+    assert len(specifiers) == 7
+    assert specifiers[:2] == (PydanticField, PrivateAttr)
+    assert specifiers[3:] == (
+        ferro.Field,
+        ferro.Forward,
+        ferro.Reverse,
+        ferro.ManyToMany,
+    )
+
+
+def test_ferro_imports_without_pydantics_private_no_init_field():
+    """Ferro does not import Pydantic's private `NoInitField` at runtime, so
+    a Pydantic without it (before 2.9) still imports Ferro (#894)."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pydantic\n"
+            "pydantic.BaseModel\n"
+            "import pydantic._internal._model_construction as construction\n"
+            "del construction.NoInitField\n"
+            "import ferro\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_projected_chains_pass_the_type_checker():

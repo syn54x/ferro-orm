@@ -1,0 +1,326 @@
+{
+  "indexed": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": true,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_player_team_id_team",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "team_id"
+            ],
+            "name": "idx_player_team_id",
+            "unique": false
+          }
+        ],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Player",
+        "table_name": "player",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "required": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_player_team_id_team",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Player",
+        "table_name": "player",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "self-reference": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "mentor_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "mentor_id",
+            "name": "fk_player_mentor_id_player",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "player"
+          }
+        ],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Player",
+        "table_name": "player",
+        "uniques": []
+      }
+    ]
+  },
+  "set-null": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_player_team_id_team",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Player",
+        "table_name": "player",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "unique": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_player_team_id_team",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Player",
+        "table_name": "player",
+        "uniques": [
+          {
+            "columns": [
+              "team_id"
+            ],
+            "name": "uq_player_team_id"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "tests.test_foreign_key_columns._define.<locals>.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  }
+}

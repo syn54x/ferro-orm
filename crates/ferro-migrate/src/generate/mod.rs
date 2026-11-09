@@ -928,7 +928,7 @@ pub fn generate_with(
             }
         }
         let ops: Vec<MigrationOp> = placed.plan.ops().cloned().collect();
-        for line in renames::suggestions(&ops, before, target) {
+        for line in renames::suggestions(&ops) {
             if !suggestions.contains(&line) {
                 suggestions.push(line);
             }
@@ -2673,6 +2673,7 @@ mod tests {
             table: "author".into(),
             field: None,
             old: "author".into(),
+            join_table: false,
         };
         let hinted = Plan {
             reports: vec![crate::plan::hint_refusal_warning(&refusal)],
@@ -4850,6 +4851,47 @@ mod tests {
         assert_eq!(
             migration.notes,
             ["author: if \"name\" became \"full_name\", declare renamed_from=\"name\""]
+        );
+    }
+    /// `post` whose foreign-key column is `column`, its foreign key hinted
+    /// as renamed from `renamed_from` the way an old snapshot records it.
+    fn post_keyed(column: &str, renamed_from: Option<&str>) -> SchemaModel {
+        let mut post = post();
+        post.columns[1].name = column.into();
+        post.foreign_keys[0] = SchemaForeignKey {
+            renamed_from: renamed_from.map(Into::into),
+            column: column.into(),
+            name: Some(format!("fk_post_{column}_author")),
+            ..post.foreign_keys[0].clone()
+        };
+        post
+    }
+
+    #[test]
+    fn a_foreign_keys_old_rename_hint_alone_plans_nothing() {
+        let parent = snapshot_of(
+            &IrEnvelope {
+                // Rename hints are recorded from schema ir_version 2 on.
+                ir_version: 2,
+                ..ir(vec![author(), post_keyed("author_id", Some("writer"))])
+            },
+            None,
+        );
+        let target = ir(vec![author(), post_keyed("author_id", None)]);
+        // `None` is a layout with no op: nothing to write.
+        assert_eq!(generate(Some(&parent), &target, &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn a_dropped_and_an_added_key_column_suggest_the_columns_renamed_from() {
+        let migration = edit(
+            vec![author(), post_keyed("author_id", None)],
+            vec![author(), post_keyed("writer_id", None)],
+            &BOTH,
+        );
+        assert_eq!(
+            migration.notes,
+            ["post: if \"author_id\" became \"writer_id\", declare renamed_from=\"author_id\""]
         );
     }
 }

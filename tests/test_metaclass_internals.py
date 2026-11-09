@@ -6,125 +6,82 @@ before and after refactoring.
 """
 
 import sys
-from typing import Annotated, ForwardRef, Union
+from typing import Annotated, ForwardRef
 from unittest.mock import Mock
 
 import pytest
 from pydantic.fields import FieldInfo
 
-from ferro import BackRef, Model, Relation
-from ferro.base import FerroField, ForeignKey, ManyToManyRelation
-from ferro.fields import FERRO_FIELD_EXTRA_KEY
+from ferro import Field, ManyToMany, Model, Relation, Reverse
+from ferro.base import FerroField, ManyToManyRelation, ReverseRelation
 from ferro.metaclass import ModelMetaclass
 
 
-class TestFieldFerroPayload:
-    """Test _field_ferro_payload static method."""
+@pytest.mark.usefixtures("clean_registry")
+class TestRelationMarkers:
+    """A field's relation marker, read through a class definition."""
 
-    def test_non_field_info_returns_false(self):
-        """Non-FieldInfo objects should return an empty payload."""
-        assert ModelMetaclass._field_ferro_payload("not a field") == {}
-        assert ModelMetaclass._field_ferro_payload(123) == {}
-        assert ModelMetaclass._field_ferro_payload(None) == {}
+    def test_a_field_with_column_options_only_declares_no_relation(self):
+        class Badge(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            code: str = Field(index=True)
 
-    def test_field_info_with_non_dict_extra_returns_false(self):
-        """FieldInfo with non-dict json_schema_extra should return an empty payload."""
-        field = FieldInfo(annotation=int, default=None)
-        field.json_schema_extra = "not a dict"
-        assert ModelMetaclass._field_ferro_payload(field) == {}
+        assert Badge.__ferro_relations__ == {}
 
-    def test_field_info_with_back_ref_true_returns_payload(self):
-        """FieldInfo with Ferro extra should return that payload."""
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
-        assert ModelMetaclass._field_ferro_payload(field) == {"back_ref": True}
+    def test_an_assigned_reverse_declares_a_reverse_relation(self):
+        class Squad(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            members: Relation[list["Member"]] = Reverse("squad_id")  # noqa: F821
 
-    def test_field_info_with_many_to_many_returns_payload(self):
-        """FieldInfo with many_to_many metadata should return that payload."""
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={
-                FERRO_FIELD_EXTRA_KEY: {
-                    "many_to_many": True,
-                    "related_name": "users",
-                }
-            },
-        )
-        assert ModelMetaclass._field_ferro_payload(field)["related_name"] == "users"
+        relation = Squad.__ferro_relations__["members"]
+        assert isinstance(relation, ReverseRelation)
+        assert relation.attribute == "squad_id"
 
-
-class TestRelationshipFieldPayload:
-    """Test relationship Field metadata helpers."""
-
-    def test_backref_type_annotation_raises_migration_error(self):
-        """BackRef[...] in annotation should now raise migration guidance."""
-        with pytest.raises(
-            TypeError, match="Relation\\[list\\[T\\]\\] = BackRef\\(\\)"
-        ):
-            BackRef[int]
-
-    def test_string_with_backref_is_legacy(self):
-        """String annotation containing 'BackRef' should be detected as legacy."""
-        hint = "BackRef[User]"
-        assert ModelMetaclass._annotation_looks_like_back_ref(hint) is True
-
-    def test_forward_ref_with_backref_is_legacy(self):
-        """ForwardRef containing 'BackRef' should be detected as legacy."""
-        hint = ForwardRef("BackRef[User]")
-        assert ModelMetaclass._annotation_looks_like_back_ref(hint) is True
-
-    def test_field_with_back_ref_true(self):
-        """Field(back_ref=True) in namespace should be returned as payload."""
-        hint = Relation[list[int]]
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
-        namespace = {"field": field}
-        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
-        assert payload == {"back_ref": True}
-
-    def test_annotated_with_field_back_ref(self):
-        """Annotated[..., Field(back_ref=True)] should be returned as payload."""
-        field_info = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
-        hint = Annotated[Relation[list[int]], field_info]
-        namespace = {}
-        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
-        assert payload == {"back_ref": True}
-
-    def test_neither_type_nor_field(self):
-        """Regular field should return no relationship payload."""
-        hint = int
-        namespace = {}
-        assert (
-            ModelMetaclass._relationship_field_payload("field", hint, namespace) == {}
-        )
-
-    def test_relation_target_from_annotation(self):
-        """Relation[list[T]] should expose T for relationship metadata."""
-        assert (
-            ModelMetaclass._relation_target_from_annotation(
-                "field", Relation[list[int]]
+    def test_an_assigned_many_to_many_declares_its_join_table(self):
+        class Course(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            pupils: Relation[list["Pupil"]] = ManyToMany(  # noqa: F821
+                through="enrollments"
             )
-            is int
-        )
 
-    def test_relation_target_from_string_annotation(self):
-        """String Relation[list[T]] annotations should expose T."""
-        assert (
-            ModelMetaclass._relation_target_from_annotation(
-                "field", 'Relation[list["Course"]]'
-            )
-            == "Course"
+        relation = Course.__ferro_relations__["pupils"]
+        assert isinstance(relation, ManyToManyRelation)
+        assert relation.through == "enrollments"
+
+    def test_a_retired_many_to_many_is_refused(self):
+        with pytest.raises(TypeError, match="a ManyToMany cannot be retired"):
+
+            class Course(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                pupils: Relation[list["Pupil"]] = ManyToMany(  # noqa: F821
+                    through="enrollments", retired=True
+                )
+
+    @pytest.mark.parametrize(
+        ("marker", "written"),
+        [
+            (Reverse("squad_id"), 'Reverse("squad_id")'),
+            (
+                ManyToMany(through="squad_members"),
+                'ManyToMany(through="squad_members")',
+            ),
+        ],
+        ids=["reverse", "many-to-many"],
+    )
+    def test_a_marker_in_annotated_metadata_is_refused(self, marker, written):
+        class Member(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            squad_id: int = Field(foreign_key="Squad")
+
+        with pytest.raises(TypeError) as refusal:
+
+            class Squad(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                members: Annotated[Relation[list[Member]], marker]
+
+        assert str(refusal.value) == (
+            "Squad.members: a relation is an assignment, not Annotated metadata. "
+            f"Write: members: Relation[list[Member]] = {written}"
         )
 
 
@@ -183,20 +140,6 @@ class TestResolveDeferredAnnotations:
         # key on the stable "ferro:" note prefix, not churn-prone prose
         assert any("ferro:" in note for note in notes)
 
-    def test_annotate_func_backref_error_still_short_circuits(self):
-        """A BackRef[...] eval error must raise as-is, not via the #155 note path."""
-
-        def annotate_func(format_type):
-            raise TypeError("BackRef[...] is not a valid annotation")
-
-        namespace = {"__annotate_func__": annotate_func, "__qualname__": "Demo"}
-        with pytest.raises(TypeError, match=r"BackRef\[\.\.\.\]") as exc_info:
-            ModelMetaclass._resolve_deferred_annotations(namespace)
-        # short-circuit path adds no ferro note
-        assert not any(
-            "ferro:" in note for note in getattr(exc_info.value, "__notes__", [])
-        )
-
 
 def test_unevaluable_annotation_surfaces_real_error_not_misleading():
     """#155: a model whose annotation cannot be evaluated must raise the real
@@ -215,69 +158,6 @@ def test_unevaluable_annotation_surfaces_real_error_not_misleading():
         assert any(
             "_Broken" in note for note in getattr(exc_info.value, "__notes__", [])
         )
-
-
-class TestInjectShadowFields:
-    """Test _inject_shadow_fields static method."""
-
-    def test_no_foreign_keys_no_changes(self):
-        """No ForeignKeys should leave annotations/namespace unchanged."""
-        annotations = {"name": str}
-        namespace = {}
-        local_relations = {"posts": ManyToManyRelation(related_name="users")}
-
-        ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
-
-        assert annotations == {"name": str}
-        assert namespace == {}
-
-    def test_foreign_key_injects_id_field(self):
-        """ForeignKey should inject {field_name}_id annotation and default."""
-        annotations = {"name": str}
-        namespace = {}
-        fk = ForeignKey(related_name="posts")
-        fk.to = "User"
-        local_relations = {"owner": fk}
-
-        ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
-
-        assert "owner_id" in annotations
-        assert annotations["owner_id"] == Union[int, str, None]
-        assert "owner_id" in namespace
-        assert isinstance(namespace["owner_id"], FieldInfo)
-
-    def test_foreign_key_injects_id_field_concrete_pk(self):
-        """Concrete FK target: shadow type follows related model PK annotation."""
-
-        class ShadowOwner(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            name: str
-
-        annotations = {"name": str}
-        namespace = {}
-        fk = ForeignKey(related_name="items")
-        fk.to = ShadowOwner
-        local_relations = {"owner": fk}
-
-        ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
-
-        assert annotations["owner_id"] == (int | None)
-        assert "owner_id" in namespace
-
-    def test_multiple_foreign_keys(self):
-        """Multiple ForeignKeys should inject multiple shadow fields."""
-        annotations = {"name": str}
-        namespace = {}
-        fk1 = ForeignKey(related_name="posts")
-        fk1.to = "User"
-        fk2 = ForeignKey(related_name="posts")
-        fk2.to = "Category"
-        local_relations = {"owner": fk1, "category": fk2}
-
-        ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
-
-        assert "owner_id" in annotations
-        assert "category_id" in annotations
 
 
 class TestPrepareNamespaceForPydantic:
@@ -330,7 +210,7 @@ class TestParseFerroFieldMetadata:
 
     def test_no_ferro_fields_returns_empty(self):
         """Model without FerroField metadata should return empty dict."""
-        mock_cls = Mock()
+        mock_cls = Mock(__name__="Mocked")
         mock_cls.model_fields = {"name": FieldInfo(annotation=str, default=None)}
 
         result = ModelMetaclass._parse_ferro_field_metadata(mock_cls)
@@ -340,7 +220,7 @@ class TestParseFerroFieldMetadata:
     def test_annotated_ferro_field(self):
         """FerroField in Annotated metadata should be detected."""
         ferro_meta = FerroField(primary_key=True)
-        mock_cls = Mock()
+        mock_cls = Mock(__name__="Mocked")
         field_info = FieldInfo(annotation=int, default=None)
         # Simulate Pydantic's metadata field
         field_info.metadata = [ferro_meta]
@@ -352,12 +232,9 @@ class TestParseFerroFieldMetadata:
         assert result["id"] is ferro_meta
 
     def test_wrapped_ferro_field(self):
-        """FerroField in json_schema_extra should be detected."""
-        mock_cls = Mock()
-        field_info = FieldInfo(annotation=int, default=None)
-        field_info.json_schema_extra = {
-            FERRO_FIELD_EXTRA_KEY: {"primary_key": True, "autoincrement": True}
-        }
+        """The FerroField a Field(...) leaves in its metadata should be detected."""
+        mock_cls = Mock(__name__="Mocked")
+        field_info = Field(default=None, primary_key=True, autoincrement=True)
         mock_cls.model_fields = {"id": field_info}
 
         result = ModelMetaclass._parse_ferro_field_metadata(mock_cls)
@@ -365,14 +242,13 @@ class TestParseFerroFieldMetadata:
         assert "id" in result
         assert isinstance(result["id"], FerroField)
         assert result["id"].primary_key is True
+        assert result["id"].autoincrement is True
 
     def test_dual_declaration_raises_error(self):
         """FerroField declared twice should raise TypeError."""
-        ferro_meta = FerroField(primary_key=True)
-        mock_cls = Mock()
-        field_info = FieldInfo(annotation=int, default=None)
-        field_info.metadata = [ferro_meta]
-        field_info.json_schema_extra = {FERRO_FIELD_EXTRA_KEY: {"primary_key": True}}
+        mock_cls = Mock(__name__="Mocked")
+        field_info = Field(default=None, primary_key=True)
+        field_info.metadata.append(FerroField(primary_key=True))
         mock_cls.model_fields = {"id": field_info}
 
         with pytest.raises(

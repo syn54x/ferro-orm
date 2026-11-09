@@ -131,8 +131,8 @@ class PostFactory:
     @classmethod
     async def create(cls, **fields: Any) -> Post:
         cls.count += 1
-        if "author" not in fields:
-            fields["author"] = await UserFactory.create()
+        if "author_id" not in fields:
+            fields["author_id"] = (await UserFactory.create()).id
         defaults = {"title": f"Post {cls.count}", "content": "Test content"}
         return await Post.create(**(defaults | fields))
 
@@ -140,7 +140,7 @@ class PostFactory:
 async def test_post_gets_an_author(db):
     post = await PostFactory.create(title="Custom title")
 
-    author = await post.author
+    author = await post.author.load()
     assert post.title == "Custom title"
     assert author.username.startswith("user")
 ```

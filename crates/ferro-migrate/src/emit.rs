@@ -472,7 +472,7 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
 /// ```text
 /// class Author(Model):
 ///     email: str | None = Field(unique=True, index=True)   ADD COLUMN "email" …
-///     team: Annotated[Team, ForeignKey(...)]               + uq_author_email, idx_author_email
+///     team_id: int = Field(foreign_key=Team)               + uq_author_email, idx_author_email
 ///                                                          + ck_author_email (a db_check)
 ///                                                          + fk_author_team_id_team
 /// ```

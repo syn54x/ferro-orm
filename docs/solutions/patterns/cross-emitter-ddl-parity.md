@@ -144,7 +144,7 @@ the entry.
    emitter's output with `_core._plan_from_ir(..., render=True)` for every
    casebook case on both dialects, as pin (a) does for the generator.
    The casebook covers single-column index, composite index, single-column
-   unique, composite unique, FK with shadow column, default values and
+   unique, composite unique, foreign key with its foreign-key column, default values and
    nullability; add a case for anything it lacks.
 4. Update the bulleted emitter list in `AGENTS.md` § I-1.
 

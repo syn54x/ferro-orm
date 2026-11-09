@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import ferro
-from ferro import BackRef, Field, ManyToMany, Model, Relation
+from ferro import Field, ManyToMany, Model, Relation, Reverse
 from ferro.raw import fetch_all
 from tests._pass_harness import auto_migrate
 
@@ -23,12 +23,12 @@ def slug_models():
     class Tag(Model):
         slug: str | None = Field(default=None, primary_key=True)
         label: str = ""
-        posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+        posts: Relation[list["Post"]] = ManyToMany(through="tag_posts")
 
     class Post(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        tags: Relation[list[Tag]] = BackRef()
+        tags: Relation[list[Tag]] = Reverse("posts")
 
     class Author(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -88,12 +88,12 @@ async def test_uuid_keyed_target(db_url):
     class Badge(Model):
         uid: Annotated[UUID, Field(primary_key=True)] = Field(default_factory=uuid4)
         label: str = ""
-        owners: Relation[list["Member"]] = ManyToMany(related_name="badges")
+        owners: Relation[list["Member"]] = ManyToMany(through="badge_owners")
 
     class Member(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        badges: Relation[list[Badge]] = BackRef()
+        badges: Relation[list[Badge]] = Reverse("owners")
 
     await auto_migrate(db_url)
     async with ferro.engines.session():

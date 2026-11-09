@@ -7,7 +7,7 @@ biting (#279).
 
 from typing import Annotated
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Model
 
 
 class BadPAccount(Model):
@@ -17,7 +17,7 @@ class BadPAccount(Model):
 class BadPTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[BadPAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=BadPAccount)]
 
 
 async def _row_where_model_expected() -> None:

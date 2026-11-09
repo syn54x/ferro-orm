@@ -447,26 +447,27 @@ async def test_save_only_rejects_unknown_name(db_url):
 
 
 async def test_save_only_rejects_relation_name(db_url):
-    from ferro import BackRef, ForeignKey, Relation
+    from ferro import Forward, Relation, Reverse
 
     class SaveOnlyAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list["SaveOnlyPost"]] = BackRef()
+        posts: Relation[list["SaveOnlyPost"]] = Reverse("author_id")
 
     class SaveOnlyPost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[SaveOnlyAuthor, ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key=SaveOnlyAuthor)]
+        author: Relation[SaveOnlyAuthor] = Forward("author_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         author = await SaveOnlyAuthor.create(id=1, name="ada")
-        post = await SaveOnlyPost.create(id=1, title="first", author=author)
+        post = await SaveOnlyPost.create(id=1, title="first", author_id=author.id)
         post.title = "second"
         with pytest.raises(ValueError, match="author_id") as excinfo:
             await post.save(only={"author"})
-        assert "author" in str(excinfo.value)
+        assert "Use the foreign-key column 'author_id'." in str(excinfo.value)
 
         with pytest.raises(ValueError, match="posts"):
             await author.save(only={"posts"})
@@ -779,22 +780,23 @@ async def test_save_exclude_rejects_unknown_name(db_url):
 
 
 async def test_save_exclude_rejects_relation_name(db_url):
-    from ferro import BackRef, ForeignKey, Relation
+    from ferro import Forward, Relation, Reverse
 
     class SaveExcludeAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list["SaveExcludePost"]] = BackRef()
+        posts: Relation[list["SaveExcludePost"]] = Reverse("author_id")
 
     class SaveExcludePost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated[SaveExcludeAuthor, ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key=SaveExcludeAuthor)]
+        author: Relation[SaveExcludeAuthor] = Forward("author_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         author = await SaveExcludeAuthor.create(id=1, name="ada")
-        post = await SaveExcludePost.create(id=1, title="first", author=author)
+        post = await SaveExcludePost.create(id=1, title="first", author_id=author.id)
         post.title = "second"
         with pytest.raises(ValueError, match="author_id") as excinfo:
             await post.save(exclude={"author"})

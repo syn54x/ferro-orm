@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from ferro._core import RouteHandle
     from ferro.models import Model
 
+from .._core import unloaded_instance
 from ..registry import REGISTRY
 
 
@@ -21,19 +23,47 @@ def _instance_origin_outside_transaction(instance: object) -> str | None:
     return _instance_origin(instance)
 
 
-class RelationshipDescriptor(BaseModel):
-    """The attribute behind a reverse (`BackRef`) or many-to-many relation.
+def _first_read_route(instance: object) -> "RouteHandle | None":
+    """The route whose session shares a forward relation's instance.
 
-    On an instance, a to-many relation reads as a
-    [`Relation`][ferro.Relation] query over the related rows, and a
-    one-to-one reverse relation as an awaitable of the related instance or
-    `None`. See [Relationships](../guide/relationships.md).
+    The parent's own connection, inside the session or transaction around
+    the read; `None` when neither the parent nor a session names one, and
+    the instance is cached on the parent alone. A parent from another
+    connection than the session's gets its own connection outside the
+    session: a read never raises, and `.load()` reports the conflict.
+    """
+    from ..state import (
+        _CURRENT_SESSION,
+        _CURRENT_TRANSACTION,
+        resolve_relation_read_scope,
+    )
+
+    origin = _instance_origin_outside_transaction(instance)
+    if (
+        origin is None
+        and _CURRENT_SESSION.get() is None
+        and _CURRENT_TRANSACTION.get() is None
+    ):
+        return None
+    return resolve_relation_read_scope(using=origin)
+
+
+class RelationshipDescriptor(BaseModel):
+    """The attribute behind a reverse (`Reverse`) or many-to-many relation.
+
+    On an instance, the relation reads as a [`Relation`][ferro.Relation]
+    query over the related rows at every cardinality; a one-to-one reverse
+    relation reads its instance, or `None`, with `.first()`. See
+    [Relationships](../guide/relationships.md).
     """
 
     target_model_name: str
     """The related model's name."""
     field_name: str
-    """The name of the related model's foreign key field that points back."""
+    """The relation's own field name."""
+    fk_column: str | None = None
+    """The related model's foreign-key column that points back; `None` for
+    a many-to-many relation."""
     is_one_to_one: bool = False
     """Whether at most one related row exists."""
     is_m2m: bool = False
@@ -78,12 +108,7 @@ class RelationshipDescriptor(BaseModel):
                 label=f"{type(instance).__name__.lower()}.{self.field_name}",
             )
 
-        fk_field = f"{self.field_name}_id"
-        if self.is_one_to_one:
-            return self._target_model.where(
-                lambda related, f=fk_field, v=pk_val: getattr(related, f) == v
-            ).first()
-
+        fk_field = self.fk_column
         from ..query.builder import Relation
 
         return Relation(
@@ -93,17 +118,21 @@ class RelationshipDescriptor(BaseModel):
 
 
 class ForwardDescriptor(BaseModel):
-    """The attribute behind a foreign key relation, loaded when awaited.
+    """The attribute behind a forward relation, read as the related instance.
 
-    On an instance, the relation reads as an awaitable of the related
-    instance, or `None` when the foreign key is empty. A query with
-    `include()` fills the relation in instead, as a plain attribute.
+    On an instance, the relation reads as the instance its foreign-key column
+    points at: the complete one an `include()` or `.load()` filled, or the
+    session's instance for that key, or an unloaded instance holding only the
+    key, which `.load()` fills in place. An empty key reads as `None`. See
+    [Relationships](../guide/relationships.md).
     """
 
     target_model_name: str
     """The related model's name."""
     field_name: str
-    """The relation's field name; its foreign key column is `<field_name>_id`."""
+    """The relation's field name."""
+    fk_column: str
+    """The foreign-key column the relation reads."""
     _target_model: Model | None = None
 
     def __get__(self, instance, owner):
@@ -113,14 +142,17 @@ class ForwardDescriptor(BaseModel):
         if self._target_model is None:
             self._target_model = REGISTRY.resolve_reference(self.target_model_name)
 
-        async def _fetch():
-            id_val = getattr(instance, f"{self.field_name}_id")
-            if id_val is None:
-                return None
-
-            origin = _instance_origin_outside_transaction(instance)
-            if origin is not None:
-                return await self._target_model.using(origin).get_or_none(id_val)
-            return await self._target_model.get_or_none(id_val)
-
-        return _fetch()
+        key = getattr(instance, self.fk_column)
+        if key is None:
+            return None
+        related = unloaded_instance(
+            self._target_model,
+            key,
+            (type(instance).__name__, self.field_name),
+            _first_read_route(instance),
+        )
+        # Cached under the relation name, as include() caches a loaded one, so
+        # the next read is a plain attribute and a refresh keeps it while the
+        # key still points at it.
+        instance.__dict__[self.field_name] = related
+        return related

@@ -5,9 +5,7 @@ import asyncio
 from ferro import ModelDoesNotExist, connect, engines, transaction
 
 # --8<-- [start:models]
-from typing import Annotated
-
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class User(Model):
@@ -15,13 +13,14 @@ class User(Model):
     username: str = Field(unique=True)
     email: str
     age: int
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key=User)
+    author: Relation[User] = Forward("author_id")
 
 
 # --8<-- [end:models]
@@ -78,10 +77,10 @@ async def main() -> None:
         # --8<-- [end:upserts]
 
         # --8<-- [start:relationships]
-        post = await Post.create(title="Notes on the engine", author=ada)
-        await Post.create(title="Poetical science", author=ada)
+        post = await Post.create(title="Notes on the engine", author_id=ada.id)
+        await Post.create(title="Poetical science", author_id=ada.id)
 
-        author = await post.author
+        author = await post.author.load()
         assert author.username == "ada"
 
         recent = await ada.posts.order_by(lambda post: post.id, "desc").limit(5).all()
