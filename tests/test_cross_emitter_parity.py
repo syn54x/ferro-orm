@@ -74,11 +74,8 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
     Model,
-    Relation,
     _core,
     clear_registry,
     connect,
@@ -145,13 +142,11 @@ def _build_fixture_models() -> None:
         avatar: bytes  # bytea/blob
         settings: dict  # json
         score: float  # double precision
-        members: Relation[list["Member"]] = BackRef()
-        projects: Relation[list["Project"]] = BackRef()
 
     class Member(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[Org, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
         __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("email", "org_id"),
@@ -160,7 +155,7 @@ def _build_fixture_models() -> None:
     class Project(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
         __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("org_id", "name"),
@@ -188,8 +183,7 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
     - The full derived-type family: Enum, datetime, date, time, UUID,
       Decimal, bytes, JSON, float
     - Single-column ``FerroField(index=True)`` / ``FerroField(unique=True)``
-    - Shadow-column ``ForeignKey(index=True)`` (the issue-32 surface)
-    - ``ForeignKey`` without ``index=True`` (default, no extra index)
+    - A foreign-key column with ``index=True`` (the issue-32 surface)
     - ``__ferro_composite_indexes__`` and ``__ferro_composite_uniques__``
     - Mixed FK target (Org is referenced from two distinct tables)
     """
@@ -245,12 +239,11 @@ def _build_migration_v1_models() -> None:
     class MigOrg(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         slug: Annotated[str, FerroField(unique=True)]
-        members: Relation[list["MigMember"]] = BackRef()
 
     class MigMember(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=MigOrg, index=True)]
 
     return MigOrg, MigMember
 
@@ -263,12 +256,11 @@ def _build_migration_v2_models() -> None:
         slug: Annotated[str, FerroField(unique=True)]
         name: Annotated[str | None, FerroField(index=True)] = None
         motto: str | None = None
-        members: Relation[list["MigMember"]] = BackRef()
 
     class MigMember(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
-        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=MigOrg, index=True)]
 
     return MigOrg, MigMember
 
