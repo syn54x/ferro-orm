@@ -214,7 +214,7 @@ def new(
 
     Returns:
         The new migration's directory, or `None` when the models change
-            nothing that renders DDL (a Python default, a back-reference, a
+            nothing that renders DDL (a Python default, a reverse relation, a
             method edit) and no hand step was asked for.
 
     Raises:

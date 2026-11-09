@@ -232,7 +232,7 @@ A data step never sees the models in your codebase today, which will have moved 
 
 - `ctx.models.Author` reaches a model by its class name; `ctx.models.table("author_tags")` reaches any table by name, a many-to-many join table included.
 - Each class is the table as it stands between the migration's expand and contract steps: the union of the previous snapshot's columns and this migration's. A column only this migration adds is nullable there (`slug` is `str | None` in the backfill above), and a renamed column appears once, under its new name.
-- It carries columns only: no relations, methods or validators. A foreign key is its plain `*_id` column (`book.author_id`).
+- It carries columns only: no relations, methods or validators. A forward relation is only its foreign-key column (`book.author_id`).
 - A json-family column is typed `dict[str, Any] | list[Any]` with its `db_type`, and a column of a type Ferro cannot name is `Any`. Your own models may not declare those shapes; historical models carry them because they describe what the database holds, not what a model should declare.
 - Querying a model from your codebase inside a step raises, naming the historical model to use instead.
 

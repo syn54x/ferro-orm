@@ -1,20 +1,28 @@
-"""Checks over docs examples: query lambdas, error checks and retired terms.
+"""Checks over docs examples: query lambdas, error checks and retired relations.
 
-Three mistakes compile and run but teach the wrong thing:
+Four mistakes compile and run but teach the wrong thing:
 
 - ``Post.where(lambda p: p.published)``: a query lambda with a one-letter
   parameter. The docs name it after the model, ``lambda post: post.published``.
 - A ``try`` whose ``except`` asserts on the error but has no ``else`` that
   raises. When the error stops happening, the block still passes.
-- A retired relation term, one of the five in ``_RETIRED_TERMS``, such as
-  ``BackRef(``. The upgrading guide and the changelog keep them as dated
-  records.
+- A retired relation term: a code form of the old API such as ``BackRef(``,
+  or a term the glossary lists under ``_Avoid_`` for *Foreign-key column*,
+  *Forward relation*, *Reverse relation* or *Loaded relation*, such as
+  "shadow column" or "back-reference".
+- Awaiting a forward relation, ``await book.shelf``, or prose saying that
+  awaiting one loads it. The relation is the instance; ``.load()`` fills it.
+
+Dated records keep the old words and are exempt: the upgrading guide, the
+changelog, ``docs/plans``, ``docs/brainstorms``, ``docs/research``,
+``docs/rfc`` and the ADRs written before the relation vocabulary.
 
 The checks read Python files (with the fences in their docstrings) and the
-Python fences of Markdown pages; the retired-terms check also reads Markdown
-prose, docstring prose and comments. Run them from the command line:
+Python fences of Markdown pages; the retired-terms and awaited-relation
+checks also read Markdown prose, docstring prose and, for terms, comments.
+Run them from the command line:
 
-    python -m tests._docs_checks docs/examples docs/pages src/ferro
+    python -m tests._docs_checks docs/examples docs/pages src/ferro GLOSSARY.md docs/adr
 
 Each violation prints as ``path:line: message``; any violation exits 1.
 """
@@ -214,46 +222,120 @@ def unfailing_error_checks(path: Path) -> list[Violation]:
     return sorted(violations, key=lambda violation: violation.line)
 
 
-# Each retired term and what to write instead. A pattern is matched in prose;
-# the three code forms are also found as calls in Python (`_retired_calls`).
-_RETIRED_TERMS = (
-    (
-        "ForeignKey(",
-        re.compile(r"ForeignKey\("),
-        'Field(foreign_key=...) and Forward("<column>")',
-    ),
-    ("BackRef(", re.compile(r"BackRef\("), 'Reverse("<column>")'),
-    (
-        "related_name=",
-        re.compile(r"related_name="),
-        "the column name in Forward, Reverse or ManyToMany(through=...)",
-    ),
-    (
-        "shadow column",
-        re.compile(r"shadow column", re.IGNORECASE),
-        "foreign-key column",
-    ),
-    (
-        "populated relation",
-        re.compile(r"populated relation", re.IGNORECASE),
-        "loaded relation",
-    ),
+# The code forms of the retired relation API and what to write instead. They
+# are matched in prose and found as calls in Python (`_retired_calls`).
+_RETIRED_CODE_FORMS = {
+    "ForeignKey(": 'Field(foreign_key=...) and Forward("<column>")',
+    "BackRef(": 'Reverse("<column>")',
+    "related_name=": "the column name in Forward, Reverse or ManyToMany(through=...)",
+}
+# The glossary entries whose `_Avoid_` terms the docs never use: each term is
+# retired in favour of the entry's own name.
+_GLOSSARY = Path(__file__).resolve().parents[1] / "GLOSSARY.md"
+_RELATION_ENTRIES = (
+    "Foreign-key column",
+    "Forward relation",
+    "Reverse relation",
+    "Loaded relation",
 )
-_REPLACEMENTS = {term: replacement for term, _, replacement in _RETIRED_TERMS}
-# Dated records keep the old words.
-_RETIRED_VOCABULARY_EXEMPT = frozenset({"upgrading.md", "changelog.md"})
+_AVOID = "_Avoid_: "
+# Avoided terms that are Python names: the retired API's, which a refusal
+# documents by name (its call form is retired above), and another library's,
+# which a comparison names. Each names an API, not the concept.
+_PYTHON_NAMES = frozenset({"BackRef", "related_name", "select_related"})
+
+
+@cache
+def retired_terms() -> dict[str, str]:
+    """Map each retired relation term, lowercased, to what to write instead.
+
+    The code forms of the retired API, then every term the glossary lists
+    under `_Avoid_` for the relation entries, except the Python names in
+    `_PYTHON_NAMES`.
+    """
+    terms = {term.lower(): fix for term, fix in _RETIRED_CODE_FORMS.items()}
+    lines = _GLOSSARY.read_text(encoding="utf-8").splitlines()
+    for entry in _RELATION_ENTRIES:
+        start = lines.index(f"**{entry}**:")
+        avoid = next(line for line in lines[start:] if line.startswith(_AVOID))
+        for term in avoid.removeprefix(_AVOID).split(", "):
+            if term not in _PYTHON_NAMES:
+                terms.setdefault(term.lower(), entry.lower())
+    return terms
+
+
+def _replacement(found: str) -> str:
+    """What to write for the retired term ``found``, as the text spelled it."""
+    terms = retired_terms()
+    return terms.get(found.lower()) or terms[found.lower().replace("-", " ")]
+
+
+@cache
+def _retired_pattern() -> re.Pattern[str]:
+    # Longest first, so `BackRef(` is one match and never also `BackRef`. A
+    # space in a term also matches a hyphen ("foreign key relation" finds
+    # "foreign-key relation"); a hyphen matches only itself, since "belongs
+    # to" and "has many" are plain English where "Belongs-to" and "has-many"
+    # are names.
+    terms = sorted(retired_terms(), key=len, reverse=True)
+    return re.compile(
+        "|".join(re.escape(term).replace(r"\ ", "[- ]") for term in terms),
+        re.IGNORECASE,
+    )
+
+
+# Dated records keep the old words: the upgrading guide, the changelog, the
+# planning notes and every ADR merged before the relation vocabulary. ADRs
+# from this number on were written with it.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DATED_RECORDS = frozenset({"upgrading.md", "changelog.md"})
+_DATED_DIRECTORIES = frozenset({"plans", "brainstorms", "research", "rfc"})
+_FIRST_CURRENT_ADR = 61
+
+
+def _repo_parts(path: Path) -> tuple[str, ...]:
+    """``path``'s parts from the repo root, such as ``("docs", "adr", ...)``.
+
+    A path outside the repo is read as written, relative to where the lint
+    runs.
+    """
+    try:
+        return path.resolve().relative_to(_REPO_ROOT).parts
+    except ValueError:
+        return path.parts
+
+
+def _dated_record(path: Path) -> bool:
+    if path.name.lower() in _DATED_RECORDS:
+        return True
+    if _adr(path):
+        return path.name[:4].isdigit() and int(path.name[:4]) < _FIRST_CURRENT_ADR
+    parts = _repo_parts(path)
+    return len(parts) > 2 and parts[0] == "docs" and parts[1] in _DATED_DIRECTORIES
+
+
+def _adr(path: Path) -> bool:
+    return _repo_parts(path)[:2] == ("docs", "adr")
+
+
+def _docs_file(path: Path) -> bool:
+    return _repo_parts(path)[:1] == ("docs",)
+
+
+_INLINE_CODE = re.compile(r"`[^`]*`")
 
 
 def _retired(path: Path, line: int, term: str) -> Violation:
-    return Violation(path, line, f'"{term}" is retired; write "{_REPLACEMENTS[term]}"')
+    fix = _replacement(term)
+    return Violation(path, line, f'"{term}" is retired; write "{fix}"')
 
 
 def _retired_in_prose(path: Path, lines: dict[int, str]) -> list[Violation]:
     return [
-        _retired(path, number, term)
+        _retired(path, number, match.group())
         for number, text in lines.items()
-        for term, pattern, _ in _RETIRED_TERMS
-        for _ in pattern.finditer(text)
+        if not text.lstrip().startswith(_AVOID)
+        for match in _retired_pattern().finditer(text)
     ]
 
 
@@ -307,20 +389,12 @@ def _comments(source: str, first_line: int) -> dict[int, str]:
     }
 
 
-def retired_vocabulary(path: Path) -> list[Violation]:
-    """Report each use of a retired relation term in ``path``.
+def _prose(path: Path, text: str) -> dict[int, str]:
+    """The prose lines of ``path``, keyed by line number.
 
-    Prose (Markdown outside Python fences, a docstring outside its Python
-    fences, and every comment in Python code) is matched for every term.
-    Python is otherwise read as code: a call to
-    ``ForeignKey`` or ``BackRef`` that the source did not import from another
-    library, and any call with a ``related_name=`` keyword. A string literal
-    in code, such as a refusal message, is never matched. ``upgrading.md``
-    and ``changelog.md`` are dated records and exempt.
+    Markdown outside its Python fences, and a Python docstring outside its
+    Python fences. Comments are read separately (`_comments`).
     """
-    if path.name in _RETIRED_VOCABULARY_EXEMPT:
-        return []
-    text = path.read_text(encoding="utf-8")
     lines = dict(enumerate(text.splitlines(), start=1))
     if path.suffix == ".md":
         prose = lines
@@ -340,10 +414,94 @@ def retired_vocabulary(path: Path) -> list[Violation]:
     for fence in fences:
         for number in range(fence.start_line, fence.end_line + 1):
             prose.pop(number, None)
+    return prose
+
+
+def retired_vocabulary(path: Path) -> list[Violation]:
+    """Report each use of a retired relation term in ``path``.
+
+    Prose (Markdown outside Python fences, a docstring outside its Python
+    fences, and every comment in Python code) is matched for every term in
+    `retired_terms`, except on a glossary `_Avoid_` line. Python is otherwise
+    read as code: a call to ``ForeignKey`` or ``BackRef`` that the source did
+    not import from another library, and any call with a ``related_name=``
+    keyword. A string literal in code, such as a refusal message, is never
+    matched. Dated records (`_dated_record`) are exempt, and a current ADR's
+    code (its fences and inline code) quotes the form its decision replaced,
+    so only its prose is matched.
+    """
+    if _dated_record(path):
+        return []
+    prose = _prose(path, path.read_text("utf-8"))
+    if _adr(path):
+        prose = {number: _INLINE_CODE.sub("", text) for number, text in prose.items()}
+        return _retired_in_prose(path, prose)
     violations = _retired_in_prose(path, prose)
     for source, first_line in _sources(path):
         violations += _retired_calls(path, _parse(source, path, first_line))
         violations += _retired_in_prose(path, _comments(source, first_line))
+    return sorted(violations, key=lambda violation: violation.line)
+
+
+# An await word, then a load or a return, in one clause with no call between:
+# "awaiting it loads the target", "Await `post.author` to load it",
+# "Awaiting `post.author` returns the Author". Not "await `.all()` to load
+# them", and not "can't be awaited, loaded or not".
+_AWAITING_LOADS = re.compile(
+    r"\bawait(?:s|ing|ed)?\b(?:"
+    r"(?:(?!\w\(|[,.;:](?:\s|$)).)*?(?<![.\w])load(?:s|ed|ing)?\b"
+    r"|\s+(?:`\w+(?:\.\w+)+`|it|the relation|a relation)\s+returns\b)",
+    re.IGNORECASE,
+)
+_AWAITED_RELATION = (
+    "awaiting a relation raises TypeError; write "
+    '"await <instance>.<relation>.load()" or include() it in the query'
+)
+
+
+def _paragraphs(prose: dict[int, str]) -> Iterator[tuple[str, list[int]]]:
+    """Join consecutive prose lines into paragraphs, a blank line ending one.
+
+    Yields each paragraph's text and, per character, the file line it is on.
+    """
+    text, lines = "", []
+    for number in sorted(prose):
+        line = prose[number].strip()
+        if not line or (lines and number != lines[-1] + 1):
+            if text:
+                yield text, lines
+            text, lines = "", []
+        if line:
+            text += line + " "
+            lines += [number] * (len(line) + 1)
+    if text:
+        yield text, lines
+
+
+def awaited_relations(path: Path) -> list[Violation]:
+    """Report each place ``path`` awaits a relation or says awaiting one loads it.
+
+    In prose, a clause of a paragraph saying awaiting loads or returns; in
+    code, an ``await`` of an attribute (``await book.shelf``) rather than of
+    a call, read in docs files and in docstring fences, never in a module's
+    own code. Dated records are exempt.
+    """
+    if _dated_record(path):
+        return []
+    violations = [
+        Violation(path, lines[match.start()], _AWAITED_RELATION)
+        for text, lines in _paragraphs(_prose(path, path.read_text("utf-8")))
+        for match in _AWAITING_LOADS.finditer(text)
+    ]
+    sources = list(_sources(path))
+    if path.suffix == ".py" and not _docs_file(path):
+        sources = sources[1:]  # the module's own code
+    for source, first_line in sources:
+        violations += [
+            Violation(path, node.lineno, _AWAITED_RELATION)
+            for node in ast.walk(_parse(source, path, first_line))
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Attribute)
+        ]
     return sorted(violations, key=lambda violation: violation.line)
 
 
@@ -372,6 +530,7 @@ def main(argv: list[str]) -> int:
             violations += lambda_param_violations(path)
             violations += unfailing_error_checks(path)
             violations += retired_vocabulary(path)
+            violations += awaited_relations(path)
         except SyntaxError as error:
             violations.append(
                 Violation(path, error.lineno or 0, f"does not parse: {error.msg}")

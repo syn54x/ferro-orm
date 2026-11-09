@@ -58,22 +58,22 @@ _Avoid_: shadow column, shadow FK, `*_id` column, injected column, reference col
 
 **Forward relation**:
 A typed view over one foreign-key column of its own model, declared `team: Relation[Team] = Forward("team_id")`. It reads as the related instance: complete when an include or `.load()` filled it, otherwise holding only its key (see *Complete-instance invariant*).
-_Avoid_: Belongs-to, parent link, FK field
+_Avoid_: Belongs-to, parent link, FK field, forward-FK, forward foreign key, foreign key relation
 
 **Reverse relation**:
 A query over the rows of another model whose foreign-key column points at this instance, declared `players: Relation[list["Player"]] = Reverse("team_id")`. It is always a query, at every cardinality; a one-to-one's reverse side reads with `.first()`.
 _Avoid_: BackRef, back-reference, has-many, related_name
 
 **Relation traversal**:
-Attribute access on a declared forward-FK field inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
+Attribute access on a declared forward relation inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
 _Avoid_: Join inference, nested filter, path lookup, string path
 
 **Relation path**:
-The ordered sequence of forward-FK hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
+The ordered sequence of forward-relation hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
 _Avoid_: Join alias, lookup chain, dotted path string
 
 **Existence test**:
-The only predicate form on a reverse or many-to-many relation — `t.lines.exists(...)` — asking whether at least one related row exists, optionally scoped by a full inner predicate over the related model. Renders as a correlated EXISTS; the result stays root-shaped (shape-preserving query), so it composes with any other predicate, ordering, and paging. Reverse relations are *tested*, never *traversed*: traversal remains a forward-FK concept.
+The only predicate form on a reverse or many-to-many relation — `t.lines.exists(...)` — asking whether at least one related row exists, optionally scoped by a full inner predicate over the related model. Renders as a correlated EXISTS; the result stays root-shaped (shape-preserving query), so it composes with any other predicate, ordering, and paging. Reverse relations are *tested*, never *traversed*: traversal remains a forward-relation concept.
 _Avoid_: membership filter, semi-join filter, reverse traversal, subquery filter, `.any()`
 
 **Shape-preserving query**:
@@ -141,7 +141,7 @@ A projection containing at least one aggregate field. Each group collapses to ex
 _Avoid_: Group-by query, summary query, rollup, partition
 
 **Traversed projection**:
-A projected record field whose source column lives across a forward-FK relation path (`select(lambda t: t.account.name)`). Projection traversal narrows exactly like predicate traversal (ADR-0006). Unaliased, the field takes the bare leaf column name; two selected fields sharing an output name is a build-time error, resolved with an output alias.
+A projected record field whose source column lives across a forward relation path (`select(lambda t: t.account.name)`). Projection traversal narrows exactly like predicate traversal (ADR-0006). Unaliased, the field takes the bare leaf column name; two selected fields sharing an output name is a build-time error, resolved with an output alias.
 _Avoid_: Nested select, join column, related-field pull
 
 **Output alias**:
@@ -315,7 +315,7 @@ One *target dialect*'s SQL for a DDL step. Every DDL step has a rendering for ev
 _Avoid_: Variant, dialect file, translation
 
 **Schema change**:
-A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a back-reference) is not a schema change and generates no migration.
+A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a reverse relation) is not a schema change and generates no migration.
 _Avoid_: Model change, diff, IR change
 
 **Rename hint**:

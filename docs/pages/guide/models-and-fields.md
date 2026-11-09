@@ -285,7 +285,7 @@ Each entry is `Check(suffix, predicate)`. Ferro names the constraint `ck_<table>
 --8<-- "docs/examples/table_checks.py:ddl"
 ```
 
-The predicate is a lambda written like a [`where()`](queries.md) filter, with its parameter named after the model in lowercase (`payment` for `Payment`). It accepts comparisons, `== None` and `!= None` (on a forward foreign key or its `*_id` column too), `&`, `|`, `~`, `.in_()`, `.like()`, and column-to-column comparisons. Values are written into the `CHECK` as literals, not bound as parameters. Relation traversal, `.exists()`, aggregates and variables from the enclosing scope raise when the class is defined.
+The predicate is a lambda written like a [`where()`](queries.md) filter, with its parameter named after the model in lowercase (`payment` for `Payment`). It accepts comparisons, `== None` and `!= None` (on a forward relation or its foreign-key column too), `&`, `|`, `~`, `.in_()`, `.like()`, and column-to-column comparisons. Values are written into the `CHECK` as literals, not bound as parameters. Relation traversal, `.exists()`, aggregates and variables from the enclosing scope raise when the class is defined.
 
 A row that breaks the check raises `CheckViolationError`, whose message names the constraint:
 

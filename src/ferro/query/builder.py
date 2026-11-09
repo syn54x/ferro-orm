@@ -305,7 +305,7 @@ def _resolve_include_selector(
     """Resolve an ``include()`` selector into a relation path (#286).
 
     ``selector`` is a lambda receiving a validating `QueryProxy` and
-    naming a forward-FK RELATION path (``lambda t: t.account``,
+    naming a forward relation path (``lambda t: t.account``,
     ``lambda t: t.account.owner``) — the same traversal syntax as ``join()``,
     resolving to a `RelationProxy`. Each hop is validated against the
     relevant model at build time (the proxy raises ``AttributeError`` with a
@@ -391,7 +391,7 @@ def _resolve_projection_selector(
     field (``lambda t: t.amount``), a tuple/list of fields
     (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
     output fields (``lambda t: {"account_name": t.account.name}`` — output
-    aliases, GLOSSARY.md). Fields may traverse declared forward-FK relations
+    aliases, GLOSSARY.md). Fields may traverse declared forward relations
     at any depth; every hop validates at build time with did-you-mean,
     exactly like ``where()``/``order_by()``. Mixed nesting — a dict inside a
     tuple, a tuple inside a dict — is rejected: one selector, one shape.
@@ -740,7 +740,7 @@ class Query(Generic[T]):
         combined with `AND`. A field name the model does not declare raises
         `AttributeError` with the closest match, before any SQL runs.
 
-        A field that is a foreign key relation reaches into the related
+        A field that is a forward relation reaches into the related
         model (`lambda post: post.author.name == "Ada Lovelace"`), and each
         relation path adds one `INNER JOIN`. See
         [Querying across relationships](../guide/queries.md#querying-across-relationships).
@@ -960,7 +960,7 @@ class Query(Generic[T]):
     def join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
         """Join a related model with `INNER JOIN`, keeping only rows that have it.
 
-        The lambda names a foreign key relation, not a column on it. On a
+        The lambda names a forward relation, not a column on it. On a
         nullable relation, a `join()` with no condition drops the rows whose
         relation is empty. A `where()` or `order_by()` that reaches into the
         same relation shares the join. See
@@ -975,7 +975,7 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: `selector` is not callable, or names a column or a
-                reverse relation instead of a foreign key relation.
+                reverse relation instead of a forward relation.
             ValueError: A [`left_join`][ferro.query.builder.Query.left_join]
                 already marked part of the path.
 
@@ -1006,7 +1006,7 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: `selector` is not callable, or names a column or a
-                reverse relation instead of a foreign key relation.
+                reverse relation instead of a forward relation.
             ValueError: A [`join`][ferro.query.builder.Query.join] already
                 marked part of the path.
 
@@ -1033,7 +1033,7 @@ class Query(Generic[T]):
         [Loading relations with include()](../guide/queries.md#loading-relations-with-include).
 
         Args:
-            selector: A lambda returning a foreign key relation, such as
+            selector: A lambda returning a forward relation, such as
                 `lambda post: post.author`.
 
         Returns:
@@ -2157,16 +2157,28 @@ if TYPE_CHECKING:
 
 
 class Relation(Query[T]):
-    """The type of a reverse (`Reverse`) or many-to-many collection on an instance.
+    """The annotation of every relation: forward, reverse and many-to-many.
 
-    Annotate the field as `Relation[list[Target]]`. On an instance, the field
-    is a query over the related rows: await `.all()` to load them, or chain
-    `where()`, `order_by()` and the other query methods first. See
+    A forward relation ([`Forward`][ferro.Forward]) is annotated
+    `Relation[Target]`, or `Relation[Target | None]` when its foreign-key
+    column allows `None`. On an instance it reads as the instance its column
+    points at: the complete one an `include()` or `.load()` filled, or the
+    session's instance for that key, or an unloaded instance holding only the
+    key, which `.load()` fills in place. Assigning an instance to it sets the
+    column.
+
+    A reverse ([`Reverse`][ferro.Reverse]) or many-to-many
+    ([`ManyToMany`][ferro.ManyToMany]) relation is annotated
+    `Relation[list[Target]]`. On an instance it is this query over the
+    related rows: await `.all()` to read them, or chain `where()`,
+    `order_by()` and the other query methods first. See
     [Relationships](../guide/relationships.md).
 
     Examples:
         ```python {test=run prelude=reference}
-        ada = await Author.get(1)
+        post = await Post.where(lambda post: post.views > 1000).first()
+        ada = await post.author.load()
+        assert ada.name == "Ada Lovelace"
         posts = await ada.posts.all()
         assert [post.title for post in posts] == ["Notes on the Analytical Engine"]
         ```

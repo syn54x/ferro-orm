@@ -97,7 +97,7 @@ Rows come back as plain dicts of primitives. Raw SQL is an escape hatch, not a t
 
 ## Eager loading
 
-Ferro has no `prefetch_related` or `select_related`. A forward foreign key loads in the same statement with `include()`:
+Ferro has no `prefetch_related` or `select_related`. A forward relation loads in the same statement with `include()`:
 
 ```python {test=run prelude=reference}
 posts = await (
