@@ -548,7 +548,6 @@ def _cases(storage: str) -> dict[str, dict]:
     for spelling, previous in {
         "its own join table": "player_links",
         "a name that is no table": "player-links",
-        "a table the models declare": "tag",
     }.items():
         cases[f"many-to-many renamed from {spelling}"] = _case(
             "many-to-many",

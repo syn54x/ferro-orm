@@ -3576,6 +3576,7 @@ pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
                     table: model.table_name.clone(),
                     field: None,
                     old: previous.clone(),
+                    join_table: is_join_table(model),
                 });
             }
             claim(&mut table_claims, previous, &model.table_name);
@@ -3590,6 +3591,7 @@ pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
                     table: model.table_name.clone(),
                     field: Some(col.name.clone()),
                     old: previous.clone(),
+                    join_table: false,
                 });
             }
             claim(&mut column_claims, previous, &col.name);

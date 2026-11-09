@@ -537,6 +537,20 @@ def test_a_join_table_renamed_from_its_old_name_keeps_its_rows(
     assert db.rows(links.replace("author_tags", "writer_tags")) == [(1, 1), (1, 2)]
 
 
+def test_a_join_table_renamed_from_a_declared_table_is_refused_by_the_generator(
+    project, pkg
+):
+    from tests.test_many_to_many_through import DECLARED_TABLE_REFUSAL
+
+    from_tag = JOIN_TABLE_AFTER.replace(
+        'renamed_from="writer_tags"', 'renamed_from="tag"'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, from_tag)
+
+    assert f"rename hint refused: {DECLARED_TABLE_REFUSAL}" in err
+
+
 def test_two_join_tables_renamed_from_one_name_are_refused_naming_the_relations(
     project, pkg
 ):

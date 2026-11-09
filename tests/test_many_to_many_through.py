@@ -28,6 +28,7 @@ from ferro import Field, ManyToMany, Model, Relation, Reverse
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.relations.fixes import DeclarationRefusal
 from ferro.raw import fetch_all
+from tests._alembic_harness import autogenerate
 from tests._pass_harness import (
     auto_migrate,
     on,
@@ -329,6 +330,32 @@ async def test_a_join_table_rename_without_migrate_updates_names_the_relation(db
     ]
 
 
+DECLARED_TABLE_REFUSAL = (
+    'join table "author_tags" declares ManyToMany(renamed_from="tag"), but the '
+    'models still declare table "tag": delete the hint or the declaration of '
+    'table "tag"'
+)
+"""The planner's one refusal of a join table renamed from a declared table,
+which every emitter prints."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_join_table_renamed_from_a_declared_table_is_refused_by_pass_and_bridge(
+    db_url, postgres_base_url, db_schema_name
+):
+    await _ann_with_two_tags(db_url)
+    _authors("author_tags", renamed_from="tag")
+
+    report = await warned_auto_migrate(db_url, updates=True)
+
+    assert schema_sql(report) == []
+    assert warning_texts(report) == [f"rename hint refused: {DECLARED_TABLE_REFUSAL}"]
+    with pytest.raises(RuntimeError) as refused:
+        autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert f"rename hint refused: {DECLARED_TABLE_REFUSAL}" in str(refused.value)
+
+
 _POST_TAGS = """
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -354,13 +381,8 @@ _KEPT = 'tags: Relation[list[Tag]] = ManyToMany(through="post_tags")'
             "letters, digits and underscores, not starting with a digit, at "
             "most 63 characters",
         ),
-        (
-            "tag",
-            "renamed_from names tag, a table the models declare, so it is not "
-            "the join table's previous name",
-        ),
     ],
-    ids=["its own name", "not a table name", "a declared table"],
+    ids=["its own name", "not a table name"],
 )
 def test_a_join_table_rename_that_cannot_be_meant_is_refused(
     tmp_path, renamed_from, reason

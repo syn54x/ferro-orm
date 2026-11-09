@@ -4467,6 +4467,10 @@ pub enum HintError {
         field: Option<String>,
         /// The name the hint claims.
         old: String,
+        /// Whether `table` is a join table, whose hint is the `renamed_from`
+        /// of the `ManyToMany` naming it.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        join_table: bool,
     },
     /// Two declarations claim one old name: within `table` (two columns), or
     /// across the modelset (`table` is `None`, two tables).
@@ -4524,6 +4528,7 @@ impl std::fmt::Display for HintError {
                 table,
                 field: Some(field),
                 old,
+                ..
             } => write!(
                 f,
                 "{table}.{field} declares renamed_from=\"{old}\", but {table} still declares \
@@ -4534,10 +4539,16 @@ impl std::fmt::Display for HintError {
                 table,
                 field: None,
                 old,
+                join_table,
             } => write!(
                 f,
-                "table \"{table}\" declares __ferro_renamed_from__ = \"{old}\", but the models \
-                 still declare table \"{old}\": delete the hint or the old model"
+                "{}, but the models still declare table \"{old}\": delete the hint or {}",
+                table_hint_declared(table, old, *join_table),
+                if *join_table {
+                    format!("the declaration of table \"{old}\"")
+                } else {
+                    "the old model".to_string()
+                }
             ),
             HintError::Ambiguous {
                 table: Some(table),
@@ -9038,6 +9049,7 @@ mod tests {
             table: "t".into(),
             field: Some("b".into()),
             old: "a".into(),
+            join_table: false,
         });
         let wire = serde_json::to_value(&refused).unwrap();
         assert_eq!(

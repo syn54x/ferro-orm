@@ -4867,6 +4867,7 @@ mod renames {
                 table: "author".to_string(),
                 field: Some("full_name".to_string()),
                 old: "name".to_string(),
+                join_table: false,
             }
         );
         let message = err.to_string();
@@ -4878,6 +4879,8 @@ mod renames {
             .payload
             .models
             .push(schema_model("writer", vec![pk_col("id", "integer")]));
+        // A model class is named for itself, a join table for its table.
+        table_still.payload.models[0].model_name = "app.Author".into();
         let err = live_hints(&parent().payload, &table_still.payload).expect_err("refused");
         assert_eq!(
             err,
@@ -4885,7 +4888,21 @@ mod renames {
                 table: "author".to_string(),
                 field: None,
                 old: "writer".to_string(),
+                join_table: false,
             }
+        );
+        assert_eq!(
+            err.to_string(),
+            "table \"author\" declares __ferro_renamed_from__ = \"writer\", but the models \
+             still declare table \"writer\": delete the hint or the old model"
+        );
+        table_still.payload.models[0].model_name = "author".into();
+        let err = live_hints(&parent().payload, &table_still.payload).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "join table \"author\" declares ManyToMany(renamed_from=\"writer\"), but the models \
+             still declare table \"writer\": delete the hint or the declaration of table \
+             \"writer\""
         );
     }
 

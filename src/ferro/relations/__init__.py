@@ -699,11 +699,22 @@ def _renamed_from_reason(renamed_from: str, through: str) -> str | None:
     return None
 
 
-def _without_renamed_from(
-    model_cls: Any, name: str, relation: ManyToManyRelation, reason: str
-) -> DeclarationRefusal:
-    """The refusal of a many-to-many's ``renamed_from``, its fix the
-    declaration without it."""
+def check_join_table_rename(
+    model_cls: Any, name: str, relation: ManyToManyRelation
+) -> None:
+    """Refuse a many-to-many's ``renamed_from`` that cannot be its join table's
+    previous name: one that is no table name, or the name ``through=`` gives
+    the table now. A name another declaration holds is the planner's to
+    refuse, as for every table hint.
+
+    Raises:
+        DeclarationRefusal: The hint cannot be meant; the fix drops it.
+    """
+    if relation.renamed_from is None or relation.through is None:
+        return
+    reason = _renamed_from_reason(relation.renamed_from, relation.through)
+    if reason is None:
+        return
     line = _many_to_many_line(
         name,
         annotation_text(relation.to),
@@ -713,26 +724,9 @@ def _without_renamed_from(
         relation.related_name,
     )
     model = model_cls.__name__
-    return DeclarationRefusal(
+    raise DeclarationRefusal(
         model, name, reason, [Edit(model, name, "replace", (line,))]
     )
-
-
-def check_join_table_rename(
-    model_cls: Any, name: str, relation: ManyToManyRelation
-) -> None:
-    """Refuse a many-to-many's ``renamed_from`` that cannot be its join table's
-    previous name: one that is no table name, or the name ``through=`` gives
-    the table now.
-
-    Raises:
-        DeclarationRefusal: The hint cannot be meant; the fix drops it.
-    """
-    if relation.renamed_from is None or relation.through is None:
-        return
-    reason = _renamed_from_reason(relation.renamed_from, relation.through)
-    if reason is not None:
-        raise _without_renamed_from(model_cls, name, relation, reason)
 
 
 def related_name_rename_refusal(
@@ -756,23 +750,6 @@ def related_name_rename_refusal(
         "related_name= derives its join table from the model, which "
         "__ferro_renamed_from__ renames",
         [Edit(model, field_name, "replace", (line,))],
-    )
-
-
-def _refuse_renamed_from_a_declared_table(
-    source_model: Any, field_name: str, relation: ManyToManyRelation
-) -> None:
-    """Refuse a many-to-many renamed from a table the models declare: a model's
-    table, or another join table, is not this join table's previous name."""
-    previous = relation.renamed_from
-    if previous is None or previous not in _tables_taken(source_model, field_name):
-        return
-    raise _without_renamed_from(
-        source_model,
-        field_name,
-        relation,
-        f"renamed_from names {previous}, a table the models declare, so it is not "
-        "the join table's previous name",
     )
 
 
@@ -1587,7 +1564,6 @@ def resolve_relationships():
             _refuse_shared_join_table(
                 source_model, field_name, rel, target_model, join_table
             )
-            _refuse_renamed_from_a_declared_table(source_model, field_name, rel)
 
             source_col = _join_column(source_table)
             target_col = _join_column(target_table)
