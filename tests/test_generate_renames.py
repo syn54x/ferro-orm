@@ -126,7 +126,8 @@ class Author(Model):
 def b3(table: str, backend: str, hint: bool = True) -> str:
     """B3's models with the parent model's table named ``table``: a unique,
     a table check, a child foreign key, a many-to-many join table, and on
-    Postgres a row policy."""
+    Postgres a row policy. The join table's name is declared, so it stays
+    ``writer_tags`` whatever the parent's table is called (ADR-0062)."""
     model = table.capitalize()
     rls = (
         "    __ferro_rls__: ClassVar = RowSecurity(\n"
@@ -149,7 +150,7 @@ class Tag(Model):
 class {model}(Model):
 {renamed}    id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
-    tags: Relation[list["Tag"]] = ManyToMany(through="{table}_tags")
+    tags: Relation[list["Tag"]] = ManyToMany(through="writer_tags")
     __ferro_checks__: ClassVar[tuple[Check, ...]] = (
         Check("named", lambda {table}: {table}.name != None),
     )
@@ -316,10 +317,11 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
     new("rename_writer")
 
     up = statements(schema_file(project, 2, "up", db.backend))
+    # The join table keeps its declared name; its key column and the names
+    # derived from that column follow the renamed table (ADR-0062).
     structural = [
         'ALTER TABLE "writer" RENAME TO "author"',
-        'ALTER TABLE "writer_tags" RENAME TO "author_tags"',
-        'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"',
+        'ALTER TABLE "writer_tags" RENAME COLUMN "writer_id" TO "author_id"',
     ]
     if db.backend == "postgres":
         # Table and column renames first, then each table's derived names
@@ -333,25 +335,23 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
             'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
             'ALTER POLICY "rls_writer_id" ON "author" RENAME TO "rls_author_id"',
             'ALTER INDEX "idx_writer_tags_tag_id_writer_id" RENAME TO '
-            '"idx_author_tags_tag_id_author_id"',
+            '"idx_writer_tags_tag_id_author_id"',
             'ALTER INDEX "uq_writer_tags_writer_id_tag_id" RENAME TO '
-            '"uq_author_tags_author_id_tag_id"',
-            'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO '
-            '"fk_author_tags_tag_id_tag"',
-            'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_writer_id_writer" '
-            'TO "fk_author_tags_author_id_author"',
+            '"uq_writer_tags_author_id_tag_id"',
+            'ALTER TABLE "writer_tags" RENAME CONSTRAINT "fk_writer_tags_writer_id_writer" '
+            'TO "fk_writer_tags_author_id_author"',
             'ALTER TABLE "book" RENAME CONSTRAINT "fk_book_writer_id_writer" TO '
             '"fk_book_writer_id_author"',
         ]
     else:
-        assert up[:3] == structural
+        assert up[:2] == structural
         # `author`'s rebuild builds its unique under the new name.
         assert (
             'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name")'
             in up
         )
         # One rebuild per table whose constraint name moved, in one step.
-        assert sorted(rebuilt(up)) == ["author", "author_tags", "book"]
+        assert sorted(rebuilt(up)) == ["author", "book", "writer_tags"]
 
     def key_default(table: str) -> str:
         return db.rows(
@@ -362,7 +362,7 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
 
     round_trip(project, db)
     assert db.rows('SELECT "name" FROM "author"') == [("Ann",)]
-    assert db.rows('SELECT "author_id", "tag_id" FROM "author_tags"') == [(1, 1)]
+    assert db.rows('SELECT "author_id", "tag_id" FROM "writer_tags"') == [(1, 1)]
     assert db.rows('SELECT "title", "writer_id" FROM "book"') == [("Odes", 1)]
     assert "writer" not in db.tables()
     if db.backend == "postgres":
