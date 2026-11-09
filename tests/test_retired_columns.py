@@ -338,11 +338,7 @@ def test_a_back_ref_and_a_many_to_many_cannot_be_retired():
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             members: Relation[list["Author"]] = BackRef(retired=True)  # noqa: F821
 
-    with pytest.raises(
-        TypeError,
-        match=r"'retired': a many-to-many is a join table, not a column, so it "
-        r"cannot be retired; delete the declaration to drop the join table",
-    ):
+    with pytest.raises(TypeError, match=r"Post\.tags: a ManyToMany cannot be retired"):
 
         class Post(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None

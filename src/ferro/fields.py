@@ -67,28 +67,44 @@ class _RelationOptions:
         return f"_RelationOptions({self.options!r})"
 
 
-def _unknown_keyword(name: str) -> TypeError:
-    """Refuse a keyword `Field()` does not take, naming the closest one it does.
-
-    The known names come from `Field`'s own signature, so an option added as
-    a parameter is known here with no second list.
-    """
-    parameters = inspect.signature(Field).parameters
-    known = [
+def _keywords(declare: Callable[..., Any]) -> list[str]:
+    """The keywords ``declare`` takes, read off its own signature."""
+    return [
         parameter
-        for parameter, spec in parameters.items()
+        for parameter, spec in inspect.signature(declare).parameters.items()
         if spec.kind is not inspect.Parameter.VAR_KEYWORD
     ]
+
+
+def _unknown_keyword(name: str, declare: Callable[..., Any] | None = None) -> TypeError:
+    """Refuse a keyword `Field()` or `ManyToMany()` does not take.
+
+    A many-to-many adds no column, so a `Field` option given to it is refused
+    as one; any other name gets the closest keyword the call takes. The
+    known names come from each call's own signature, so an option added as a
+    parameter is known here with no second list.
+    """
+    declare = declare or Field
+    known = _keywords(declare)
     close = difflib.get_close_matches(name, known, n=1)
-    if close:
+    # `related_name` is the old form's, which the upgrading guide replaces.
+    takes = "through=, renamed_from= and reverse_index="
+    if declare is not Field and name in _keywords(Field):
+        hint = (
+            "A many-to-many adds no column, so it takes no column or field "
+            f"option: its options are {takes}"
+        )
+    elif close:
         hint = f"Did you mean {close[0]!r}?"
+    elif declare is not Field:
+        hint = f"A many-to-many's options are {takes}"
     else:
         pydantic_names = inspect.signature(PydanticField).parameters
         options = ", ".join(
             parameter for parameter in known if parameter not in pydantic_names
         )
         hint = f"Ferro's field options are: {options}."
-    return TypeError(f"Field() got an unknown keyword {name!r}. {hint}")
+    return TypeError(f"{declare.__name__}() got an unknown keyword {name!r}. {hint}")
 
 
 # A retired field and a generated column are never `__init__` parameters:
@@ -1090,15 +1106,6 @@ else:
         return _relation_field("Reverse", "reverse", attribute)
 
 
-# The options a many-to-many refuses with words of their own, each naming its fix.
-_OWN_REASONS = {
-    "init": "a relation is never a constructor parameter, so drop init= from the "
-    "declaration",
-    "retired": "a many-to-many is a join table, not a column, so it cannot be "
-    "retired; delete the declaration to drop the join table",
-}
-
-
 def _many_to_many_field(
     through: str | None,
     related_name: str | None,
@@ -1107,22 +1114,18 @@ def _many_to_many_field(
     unknown: dict[str, Any],
 ) -> Any:
     """The `FieldInfo` a `ManyToMany(...)` declares, refusing every option it
-    would not use."""
-    for name in unknown:
-        reason = _OWN_REASONS.get(
-            name,
-            "a many-to-many adds no column, so it takes no column or field option",
-        )
-        raise TypeError(
-            f"ManyToMany() got an unexpected keyword argument '{name}': {reason}. "
-            "A many-to-many takes through=, renamed_from= and reverse_index="
-        )
-    _validate_renamed_from(renamed_from, "ManyToMany()")
+    would not use. ``retired`` rides along so the class refuses it, naming the
+    field."""
     options: dict[str, Any] = {
         "many_to_many": True,
         "through": through,
         "reverse_index": reverse_index,
     }
+    if "retired" in unknown:
+        options["retired"] = unknown.pop("retired")
+    for name in unknown:
+        raise _unknown_keyword(name, ManyToMany)
+    _validate_renamed_from(renamed_from, "ManyToMany()")
     if related_name is not None:
         options["related_name"] = related_name
     if renamed_from is not None:

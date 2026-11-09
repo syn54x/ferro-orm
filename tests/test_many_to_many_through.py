@@ -429,12 +429,10 @@ class Post(Model):
 
 
 _ACCEPTED = {"through", "related_name", "renamed_from", "reverse_index"}
-# Every option of `Field` a many-to-many does not use; `init` and `retired`
-# have words of their own.
+# Every option of `Field` a many-to-many does not use; `retired` is refused
+# with the declaration it is on (tests/test_retired_columns.py).
 _UNUSED = sorted(
-    set(inspect.signature(Field).parameters)
-    - _ACCEPTED
-    - {"init", "retired", "unknown"}
+    set(inspect.signature(Field).parameters) - _ACCEPTED - {"retired", "unknown"}
 )
 
 
@@ -444,9 +442,18 @@ def test_many_to_many_refuses_every_option_it_would_not_use(option):
         ManyToMany(through="post_tags", **{option: True})
 
     assert str(refused.value) == (
-        f"ManyToMany() got an unexpected keyword argument '{option}': a "
-        "many-to-many adds no column, so it takes no column or field option. "
-        "A many-to-many takes through=, renamed_from= and reverse_index="
+        f"ManyToMany() got an unknown keyword {option!r}. A many-to-many adds no "
+        "column, so it takes no column or field option: its options are "
+        "through=, renamed_from= and reverse_index="
+    )
+
+
+def test_a_misspelled_many_to_many_option_names_the_closest_one():
+    with pytest.raises(TypeError) as refused:
+        ManyToMany(throgh="post_tags")
+
+    assert str(refused.value) == (
+        "ManyToMany() got an unknown keyword 'throgh'. Did you mean 'through'?"
     )
 
 
