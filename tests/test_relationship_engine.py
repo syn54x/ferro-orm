@@ -7,12 +7,15 @@ from ferro import (
     FerroField,
     Field,
     ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     reset_engine,
 )
+from ferro.base import ForwardRelation, ManyToManyRelation, ReverseRelation
 
 
 class RelationshipError(Exception):
@@ -41,32 +44,36 @@ class User(Model):
     __ferro_table__: ClassVar[str] = "relationship_engine_user"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: str
-    # Reverse marker
-    posts: Relation[list["Post"]] = BackRef()
+    # Reverse relation
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
     __ferro_table__: ClassVar[str] = "relationship_engine_post"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
-    # Forward link
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    # Forward relation over its key column
+    author_id: Annotated[int, FerroField(foreign_key=User)]
+    author: Relation[User] = Forward("author_id")
 
 
 def test_relation_back_ref_helper_declares_reverse_relation():
-    """Relation[list[T]] = BackRef() declares a reverse collection relation."""
+    """Relation[list[T]] = Reverse(...) declares a reverse collection relation."""
 
     class Role(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        candidates: Relation[list["Candidate"]] = BackRef()
+        candidates: Relation[list["Candidate"]] = Reverse("role_id")
 
     class Candidate(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        role: Annotated[Role, ForeignKey(related_name="candidates")]
+        role_id: Annotated[int, FerroField(foreign_key=Role)]
+        role: Relation[Role] = Forward("role_id")
 
-    assert Role.__ferro_relations__["candidates"] == "BackRef"
+    candidates = Role.__ferro_relations__["candidates"]
+    assert isinstance(candidates, ReverseRelation)
+    assert candidates.attribute == "role_id"
     assert "candidates" not in Role.model_fields
     role = Role(name="Engineering")
     assert role.name == "Engineering"
@@ -106,16 +113,17 @@ def test_relation_many_to_many_helper_declares_collection_relation():
     class Student(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        courses: Relation[list["Course"]] = ManyToMany(related_name="students")
+        courses: Relation[list["Course"]] = ManyToMany(through="student_courses")
 
     class Course(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        students: Relation[list["Student"]] = BackRef()
+        students: Relation[list["Student"]] = Reverse("courses")
 
     rel = Student.__ferro_relations__["courses"]
-    assert rel.related_name == "students"
-    assert rel.through is None
+    assert isinstance(rel, ManyToManyRelation)
+    assert rel.through == "student_courses"
+    assert Course.__ferro_relations__["students"].attribute == "courses"
     assert rel.to == "Course"
     assert "courses" not in Student.model_fields
 
@@ -176,7 +184,7 @@ def test_many_to_many_field_import_removed_from_public_api():
 
 
 def test_metadata_discovery():
-    """Verify that the Metaclass finds ForeignKey and BackRef annotations."""
+    """Verify that the Metaclass finds the forward and reverse relations."""
     # Before resolution
     assert "author" in Post.__ferro_relations__
     assert "author_id" in Post.__ferro_query_columns__  # shadow FK column
@@ -186,21 +194,22 @@ def test_metadata_discovery():
 
     resolve_relationships()
 
-    assert isinstance(Post.__ferro_relations__["author"], ForeignKey)
-    assert Post.__ferro_relations__["author"].related_name == "posts"
+    assert isinstance(Post.__ferro_relations__["author"], ForwardRelation)
+    assert Post.__ferro_relations__["author"].fk_column == "author_id"
 
     # Verify shadow field generation
     assert "author_id" in Post.model_fields
 
     # Verify discovery on User
     assert "posts" in User.__ferro_relations__
-    assert User.__ferro_relations__["posts"] == "BackRef"
+    assert isinstance(User.__ferro_relations__["posts"], ReverseRelation)
+    assert User.__ferro_relations__["posts"].attribute == "author_id"
     # Check if it's a descriptor
     assert hasattr(User, "posts")
 
 
 def test_pydantic_isolation():
-    """Verify that BackRef fields are not required by Pydantic."""
+    """Verify that reverse relation fields are not required by Pydantic."""
     # Should NOT raise an error about 'posts' missing
     u = User(username="alice")
     assert u.username == "alice"
@@ -213,13 +222,14 @@ async def test_forward_ref_resolution():
     # 1. Define referencing model first
     class Post(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated["Author", ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key="Author")]
+        author: Relation["Author"] = Forward("author_id")
 
     # 2. Define target model second
     class Author(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list[Post]] = BackRef()
+        posts: Relation[list[Post]] = Reverse("author_id")
 
     # Initially it's a string/ForwardRef
     raw_to = Post.__ferro_relations__["author"].to
@@ -232,8 +242,7 @@ async def test_forward_ref_resolution():
 
     # Now it should be the class
     assert Post.__ferro_relations__["author"].to is Author
-    assert Post.__annotations__["author_id"] == (int | None)
-    assert Post.model_fields["author_id"].annotation == (int | None)
+    assert Post.model_fields["author_id"].annotation is int
 
 
 def test_relationship_validation_failure():
