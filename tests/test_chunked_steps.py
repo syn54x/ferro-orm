@@ -68,13 +68,12 @@ from ferro import ManyToMany
 class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    authors: Relation[list["Author"]] = BackRef()
 
 
 class Author(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
-    tags: Relation[list[Tag]] = ManyToMany(related_name="authors")
+    tags: Relation[list[Tag]] = ManyToMany(through="author_tags")
 """
 
 WITH_SLUG = MODELS + "    slug: str | None = None\n"

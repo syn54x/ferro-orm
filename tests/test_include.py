@@ -24,12 +24,12 @@ import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     execute,
 )
 from ferro.query import builder as builder_module
@@ -49,49 +49,47 @@ pytestmark = pytest.mark.backend_matrix
 class INOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    accounts: Relation[list["INAccount"]] = BackRef()
 
 
 class INAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    owner: Annotated[INOwner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["INTransaction"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=INOwner)] = None
+    owner: Relation[INOwner | None] = Forward("owner_id")
+    transactions: Relation[list["INTransaction"]] = Reverse("account_id")
 
 
 class INCategory(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    transactions: Relation[list["INTransaction"]] = BackRef()
 
 
 class INTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
     note: str = ""
-    account: Annotated[INAccount | None, ForeignKey(related_name="transactions")] = None
-    category: Annotated[INCategory | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    account_id: Annotated[int | None, FerroField(foreign_key=INAccount)] = None
+    account: Relation[INAccount | None] = Forward("account_id")
+    category_id: Annotated[int | None, FerroField(foreign_key=INCategory)] = None
+    category: Relation[INCategory | None] = Forward("category_id")
 
 
 class INMAuthor(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     role: str = ""
-    tags: Relation[list["INMTag"]] = BackRef()
 
 
 class INMTag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    created_by: Annotated[INMAuthor, ForeignKey(related_name="tags")]
-    posts: Relation[list["INMPost"]] = BackRef()
+    created_by_id: Annotated[int, FerroField(foreign_key=INMAuthor)]
+    created_by: Relation[INMAuthor] = Forward("created_by_id")
 
 
 class INMPost(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    tags: Relation[list["INMTag"]] = ManyToMany(related_name="posts")
+    tags: Relation[list["INMTag"]] = ManyToMany(through="inmpost_tags")
 
 
 class INTier(StrEnum):
@@ -108,13 +106,13 @@ class INTyProfile(Model):
     # Plain-text column; collides by name with INTyUser.tag (a native enum) —
     # the per-hop codec pin (the stage-1 root-vs-hop lesson).
     tag: str = ""
-    users: Relation[list["INTyUser"]] = BackRef()
 
 
 class INTyUser(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     tag: INTier = INTier.FREE
-    profile: Annotated[INTyProfile, ForeignKey(related_name="users")]
+    profile_id: Annotated[int, FerroField(foreign_key=INTyProfile)]
+    profile: Relation[INTyProfile] = Forward("profile_id")
 
 
 _TY_T1 = datetime(2026, 3, 1, 12, 30, 45, 123456, tzinfo=timezone.utc)
@@ -808,8 +806,8 @@ def test_string_include_selector_names_the_lambda_form():
 
 @pytest.mark.asyncio
 async def test_backref_include_selector_names_the_future_mechanism(db_url):
-    # connect() resolves relationships, injecting the reverse descriptors the
-    # guardrail identifies.
+    # connect() resolves relationships, so the guardrail can identify the
+    # reverse relation.
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,

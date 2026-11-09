@@ -492,18 +492,19 @@ def on(target: str) -> str:
         TEAM
         + CLUB
         + AUTHOR
-        + f'    team: Annotated[{target} | None, ForeignKey(related_name="members", '
+        + f"    team_id: Annotated[int | None, FerroField(foreign_key={target}, "
         'on_delete="SET NULL")] = None\n'
+        + f'    team: Relation[{target} | None] = Forward("team_id")\n'
     )
 
 
 def members(target: str) -> str:
-    """``target`` carries the back-reference ``on(target)`` declares."""
+    """``on(target)`` with ``target`` reading its authors back."""
     body = on(target)
     head = f"class {target}(Model):\n"
     return body.replace(
         head,
-        head + '    members: Relation[list["Author"]] = BackRef()\n',
+        head + '    members: Relation[list["Author"]] = Reverse("team_id")\n',
         1,
     )
 

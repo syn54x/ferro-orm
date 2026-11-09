@@ -17,7 +17,7 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -30,14 +30,13 @@ pytestmark = pytest.mark.backend_matrix
 class GRPOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     email: str = ""
-    accounts: Relation[list["GRPAccount"]] = BackRef()
 
 
 class GRPAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    owner: Annotated[GRPOwner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["GRPTransaction"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=GRPOwner)] = None
+    owner: Relation[GRPOwner | None] = Forward("owner_id")
 
 
 class GRPTransaction(Model):
@@ -45,9 +44,8 @@ class GRPTransaction(Model):
     amount: int = 0
     price: Decimal | None = None
     note: str = ""
-    account: Annotated[GRPAccount | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    account_id: Annotated[int | None, FerroField(foreign_key=GRPAccount)] = None
+    account: Relation[GRPAccount | None] = Forward("account_id")
 
 
 async def _seed():

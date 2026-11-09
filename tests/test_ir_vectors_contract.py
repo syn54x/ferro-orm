@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
+from ferro import Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
@@ -509,8 +509,12 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
     clean_model_registry: None,
 ) -> None:
     """The v2 golden vector pins the hints' wire shape: ``renamed_from`` on
-    the model, on each hinted column (a ``ForeignKey`` hint's shadow column
-    as ``<field>_id``) and on the foreign key (the old field name)."""
+    the model and on each hinted column, a foreign-key column's included.
+
+    The vector also carries a ``renamed_from`` on the foreign key, written by
+    the declarations the foreign-key column replaced. A key column's rename
+    is the column's own hint, so the compiler no longer writes that field;
+    nothing reads it to plan or render, and the vector still loads with it."""
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships
     from tests.test_generate_renames import build_rename_hint_models
@@ -525,8 +529,13 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
     # no generated column (its `replaces` is a squash's, never the compiler's).
     assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
     compiled = {**compiled, "ir_version": 2}
-    assert compiled == vector["ir"]
-    assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
+    recorded = json.loads(json.dumps(vector["ir"]))
+    recorded_book = next(
+        m for m in recorded["payload"]["models"] if m["table_name"] == "book"
+    )
+    assert recorded_book["foreign_keys"][0].pop("renamed_from") == "press"
+    assert compiled == recorded
+    assert schema_ir_fingerprint(compiled) == schema_ir_fingerprint(recorded)
     book = next(m for m in compiled["payload"]["models"] if m["table_name"] == "book")
     assert book["renamed_from"] == "volume"
     hints = {c["name"]: c.get("renamed_from") for c in book["columns"]}
@@ -536,7 +545,7 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
         "id": None,
         "subtitle": "tagline",
     }
-    assert [fk.get("renamed_from") for fk in book["foreign_keys"]] == ["press"]
+    assert [fk.get("renamed_from") for fk in book["foreign_keys"]] == [None]
 
 
 def test_retired_column_schema_compiler_matches_v2_vector(
@@ -544,7 +553,7 @@ def test_retired_column_schema_compiler_matches_v2_vector(
 ) -> None:
     """The retired-column vector pins the flag's wire shape (ADR-0053):
     ``retired: true`` on a retired scalar, in either declaration style, and on
-    a retired ``ForeignKey``'s shadow column, each nullable, with its index,
+    a retired foreign-key column, each nullable, with its index,
     unique and foreign key as declared; absent on every mapped column."""
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships
@@ -753,12 +762,11 @@ def test_schema_ir_compiler_includes_join_table_models(
     class Tag(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+        posts: Relation[list["Post"]] = ManyToMany(through="tag_posts")
 
     class Post(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        tags: Relation[list["Tag"]] = BackRef()
 
     resolve_relationships()
     compiled = compile_registry_schema_ir()
@@ -836,12 +844,11 @@ def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -
     class Tag(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+        posts: Relation[list["Post"]] = ManyToMany(through="tag_posts")
 
     class Post(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        tags: Relation[list["Tag"]] = BackRef()
 
     resolve_relationships()
     assert REGISTRY.join_tables(), "precondition: a join table is registered"

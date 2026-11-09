@@ -127,9 +127,31 @@ def test_the_fixture_records_every_old_form_side(recorded):
     assert FIXTURE.read_text() == json.dumps(recorded, sort_keys=True, indent=2) + "\n"
 
 
+# ADR-0062: a declared join table keeps its name through a model rename. The
+# converted after side of B3 declares `through="writer_tags"`, where the old
+# form derived `author_tags` and hinted it was renamed from `writer_tags`.
+_JOIN_TABLE_KEPT = {"B3-rename-a-model/after": ("author_tags", "writer_tags")}
+
+
+def expected_payload(side: str, recorded: dict) -> dict:
+    """The recorded payload of `side`, its join table named as declared."""
+    if side not in _JOIN_TABLE_KEPT:
+        return recorded[side]
+    derived, declared = _JOIN_TABLE_KEPT[side]
+    models = []
+    for model in recorded[side]["models"]:
+        if model["table_name"] == derived:
+            model = json.loads(json.dumps(model).replace(derived, declared))
+            assert model.pop("renamed_from") == declared
+        models.append(model)
+    return {**recorded[side], "models": models}
+
+
 @pytest.mark.parametrize("side", RECORDED_SIDES)
 def test_the_old_form_still_compiles_to_its_recorded_snapshot(side, recorded, tmp_path):
-    assert recorded_envelope(side_body(side), tmp_path)["payload"] == recorded[side]
+    assert recorded_envelope(side_body(side), tmp_path)["payload"] == expected_payload(
+        side, recorded
+    )
 
 
 @pytest.mark.parametrize("side", sorted(CONVERTED))

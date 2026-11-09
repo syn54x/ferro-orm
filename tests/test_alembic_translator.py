@@ -27,12 +27,9 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRef,
     Check,
     Field,
-    ForeignKey,
     Model,
-    Relation,
     RowPolicy,
     RowSecurity,
     _core,
@@ -111,7 +108,6 @@ def _card_v1() -> None:
 def _card_v2() -> None:
     class Tr533Team(Model):
         id: int | None = Field(default=None, primary_key=True)
-        cards: Relation[list["Tr533Card"]] = BackRef()
 
     class Tr533Card(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -122,9 +118,9 @@ def _card_v2() -> None:
         name: Annotated[str, FerroField(index=True)]
         note: str | None = None
         flavor: Tr533Flavor | None = None
-        team: Annotated[
-            Tr533Team | None, ForeignKey(related_name="cards", on_delete="CASCADE")
-        ] = None
+        team_id: int | None = Field(
+            default=None, foreign_key=Tr533Team, on_delete="CASCADE"
+        )
 
 
 @pytest.mark.backend_matrix
@@ -1355,14 +1351,12 @@ async def test_a_redefined_index_is_alembics_drop_then_create_both_ways(
 def _member(*, linked: bool) -> None:
     class Tr551Team(Model):
         id: int | None = Field(default=None, primary_key=True)
-        if linked:
-            members: Relation[list["Tr551Member"]] = BackRef()
 
     if linked:
 
         class Tr551Member(Model):
             id: int | None = Field(default=None, primary_key=True)
-            team: Annotated[Tr551Team | None, ForeignKey(related_name="members")] = None
+            team_id: int | None = Field(default=None, foreign_key=Tr551Team)
 
     else:
 

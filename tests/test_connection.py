@@ -363,12 +363,12 @@ async def test_backref_query_inherits_source_instance_origin(tmp_path):
     class RouteParent(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        children: ferro.Relation[list["RouteChild"]] = ferro.BackRef()
+        children: ferro.Relation[list["RouteChild"]] = ferro.Reverse("parent_id")
 
     class RouteChild(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        parent: Annotated[RouteParent, ferro.ForeignKey(related_name="children")]
+        parent_id: Annotated[int, ferro.FerroField(foreign_key=RouteParent)]
 
     app_db = tmp_path / "app.db"
     service_db = tmp_path / "service.db"
@@ -405,12 +405,12 @@ async def test_forward_fk_load_inherits_source_instance_origin(tmp_path):
     class RouteForwardParent(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        children: ferro.Relation[list["RouteForwardChild"]] = ferro.BackRef()
 
     class RouteForwardChild(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        parent: Annotated[RouteForwardParent, ferro.ForeignKey(related_name="children")]
+        parent_id: Annotated[int, ferro.FerroField(foreign_key=RouteForwardParent)]
+        parent: ferro.Relation[RouteForwardParent] = ferro.Forward("parent_id")
 
     app_db = tmp_path / "app.db"
     service_db = tmp_path / "service.db"
@@ -449,13 +449,13 @@ async def test_m2m_relation_writes_inherit_source_instance_origin(tmp_path):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
         courses: ferro.Relation[list["RouteCourse"]] = ferro.ManyToMany(
-            related_name="students"
+            through="routestudent_courses"
         )
 
     class RouteCourse(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        students: ferro.Relation[list[RouteStudent]] = ferro.BackRef()
+        students: ferro.Relation[list[RouteStudent]] = ferro.Reverse("courses")
 
     app_db = tmp_path / "app.db"
     service_db = tmp_path / "service.db"

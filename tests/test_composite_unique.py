@@ -7,7 +7,6 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRef,
     Field,
     ManyToMany,
     Model,
@@ -93,12 +92,11 @@ async def test_m2m_duplicate_link_rejected(db_url):
     class Actor(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
     class Movie(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
@@ -124,12 +122,11 @@ def test_alembic_metadata_has_unique_constraints():
     class Actor(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
     class Movie(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor"]] = BackRef()
 
     metadata = get_metadata()
 
@@ -354,17 +351,16 @@ def test_single_column_composite_unique_raises_with_guidance():
 
 
 def test_m2m_reverse_index_default_on():
-    """D1: default ManyToMany(...) -> join table gets non-unique reverse index."""
+    """D1: default ManyToMany(through=...) -> join table gets non-unique reverse index."""
 
     class Actor1(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Relation[list["Movie1"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie1"]] = ManyToMany(through="actor1_movies")
 
     class Movie1(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor1"]] = BackRef()
 
     metadata = get_metadata()
     join = metadata.tables["actor1_movies"]
@@ -375,30 +371,23 @@ def test_m2m_reverse_index_default_on():
 
 
 def test_m2m_reverse_index_opt_out():
-    """D2: ManyToMany(reverse_index=False) -> no idx_* on join table."""
+    """D2: ManyToMany(through=..., reverse_index=False) -> no idx_* on join table."""
 
     class Actor2(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
         movies: Relation[list["Movie2"]] = ManyToMany(
-            related_name="actors", reverse_index=False
+            through="actor2_movies", reverse_index=False
         )
 
     class Movie2(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor2"]] = BackRef()
 
     metadata = get_metadata()
     join = metadata.tables["actor2_movies"]
     non_unique = [i for i in join.indexes if not i.unique]
     assert non_unique == []
-
-
-def test_m2m_reverse_index_lives_on_forward_side():
-    """D3: passing reverse_index= to BackRef() is a TypeError."""
-    with pytest.raises(TypeError):
-        BackRef(reverse_index=True)
 
 
 # === M2M reverse_index live catalog + edge cases ===
@@ -412,12 +401,11 @@ async def test_m2m_reverse_index_in_sqlite_catalog(db_url):
     class Actor4(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Relation[list["Movie4"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie4"]] = ManyToMany(through="actor4_movies")
 
     class Movie4(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor4"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -451,12 +439,11 @@ async def test_m2m_reverse_index_in_postgres_catalog(
     class Actor5(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Relation[list["Movie5"]] = ManyToMany(related_name="actors")
+        movies: Relation[list["Movie5"]] = ManyToMany(through="actor5_movies")
 
     class Movie5(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: Relation[list["Actor5"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -478,40 +465,16 @@ def test_m2m_reverse_index_with_custom_through_name():
     class Student(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        courses: Relation[list["Course"]] = ManyToMany(
-            related_name="students", through="enrollments"
-        )
+        courses: Relation[list["Course"]] = ManyToMany(through="enrollments")
 
     class Course(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        students: Relation[list["Student"]] = BackRef()
 
     metadata = get_metadata()
     join = metadata.tables["enrollments"]
     idxs = [i for i in join.indexes if not i.unique]
     assert any([c.key for c in i.columns] == ["course_id", "student_id"] for i in idxs)
-
-
-def test_m2m_self_referential_reverse_index():
-    """D7: self-referential M2M gets a reverse index on synthesized join table."""
-
-    class UserSelfRef(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        following: Relation[list["UserSelfRef"]] = ManyToMany(related_name="followers")
-        followers: Relation[list["UserSelfRef"]] = BackRef()
-
-    metadata = get_metadata()
-    join_tables = [
-        (name, t)
-        for name, t in metadata.tables.items()
-        if name != "userselfref" and "userselfref" in name
-    ]
-    assert join_tables, f"no join table found for self-ref M2M: {list(metadata.tables)}"
-    _, join = join_tables[0]
-    non_unique = [i for i in join.indexes if not i.unique]
-    assert len(non_unique) == 1
 
 
 def test_m2m_reverse_index_attribute_preserved_on_relation():
@@ -526,24 +489,22 @@ def test_m2m_reverse_index_attribute_preserved_on_relation():
     class A8(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        bs_default: Relation[list["B8"]] = ManyToMany(related_name="as_default")
+        bs_default: Relation[list["B8"]] = ManyToMany(through="a8_bs_default")
 
     class B8(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        as_default: Relation[list["A8"]] = BackRef()
 
     class C8(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
         ds_no_idx: Relation[list["D8"]] = ManyToMany(
-            related_name="cs_no_idx", reverse_index=False
+            through="c8_ds_no_idx", reverse_index=False
         )
 
     class D8(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        cs_no_idx: Relation[list["C8"]] = BackRef()
 
     resolve_relationships()
 
