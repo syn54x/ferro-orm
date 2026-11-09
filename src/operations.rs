@@ -1021,7 +1021,7 @@ fn record_field_converters_for<'py>(
 struct IncludeHop {
     /// Full relation path from the root model to this hop.
     path: Vec<String>,
-    /// The relation field name populated on the parent (the path's last hop).
+    /// The relation field name loaded on the parent (the path's last hop).
     relation: String,
     /// The parent's relation path (`[]` = the root instance).
     parent_path: Vec<String>,
@@ -1048,8 +1048,8 @@ fn include_column_alias(hop_alias: &str, column: &str) -> String {
 /// # Errors
 /// `PyValueError` when a path's prefix has no join-plan entry (cannot happen
 /// with a [`QueryPlan::build_join_plan`]-built plan — defense in depth), no
-/// registration (the walker populates every rendered join's table first), or
-/// the hop model has no primary key (population runs the identity protocol
+/// registration (resolve each rendered join's table registration first), or
+/// the hop model has no primary key (loading runs the identity protocol
 /// per hop, which needs one; Python validates this at build time too).
 fn resolve_include_hops(
     paths: &[Vec<QueryJoinHop>],
@@ -1088,7 +1088,7 @@ fn resolve_include_hops(
             if registration.meta.pk_col.is_none() {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "included table {table:?} (path {prefix:?}) has no primary \
-                     key; population runs the identity protocol per hop and \
+                     key; loading runs the identity protocol per hop and \
                      requires one"
                 )));
             }
@@ -1130,7 +1130,7 @@ fn apply_include_select_list(select: &mut SelectStatement, hops: &[IncludeHop]) 
 /// Returns one `(root, hop_rows)` pair per input row; `hop_rows` aligns with
 /// `hops` by index. A hop whose row the LEFT join did not match decodes to a
 /// `(None, all-NULL fields)` parsed row — the graph hydrator turns that into
-/// a populated `None` when the FK is NULL, and an unloaded instance holding
+/// a loaded `None` when the FK is NULL, and an unloaded instance holding
 /// the key when it is not (the row is gone or row security hides it).
 fn instances_rows_to_parsed_data(
     rows: Vec<EngineRow>,
@@ -3574,7 +3574,7 @@ fn fetch_request(
     };
     // The hop-class map travels the same way, paired to the plans that decode
     // or hydrate through another model's protocol: every instances plan
-    // (population, #286) and a record plan with traversed PLAIN fields (each
+    // (loading, #286) and a record plan with traversed PLAIN fields (each
     // leaf's hydration converter resolves through its owning model's class, #293).
     // Aggregate fields never need one — enum sources are rejected at build
     // time and count decodes to a plain int (#294).
@@ -3811,7 +3811,7 @@ async fn build_fetch(
 /// a `record` plan renders the projected SELECT list and hydrates
 /// `record_cls` records (#279) — no identity map, no persistence identity;
 /// an `instances` plan widens the SELECT with every included hop's complete
-/// aliased row and hydrates a populated instance graph (#286, ADR-0008).
+/// aliased row and hydrates a loaded instance graph (#286, ADR-0008).
 ///
 /// Args:
 ///     cls (PyAny): The Python model class.
@@ -3824,7 +3824,7 @@ async fn build_fetch(
 ///         instances plan, forbidden otherwise.
 ///
 /// Returns:
-///     list[PyAny]: Hydrated model instances (populated when included), or
+///     list[PyAny]: Hydrated model instances (loaded when included), or
 ///     projected records.
 #[pyfunction]
 #[pyo3(signature = (
@@ -3904,7 +3904,7 @@ pub fn fetch_filtered<'py>(
 
             if include_paths.is_some() {
                 // Instances path (#286): decode root + hops (each against its own
-                // model's codec plan), then hydrate the populated graph — every
+                // model's codec plan), then hydrate the loaded graph — every
                 // node through the full identity-map protocol.
                 let parsed_data = instances_rows_to_parsed_data(
                     rows,
@@ -3993,10 +3993,10 @@ pub fn fetch_filtered<'py>(
                         )?;
 
                         // Walk the hops parent-before-child, tracking this row's
-                        // materialized node per path. A populated-`None` (or a
+                        // materialized node per path. A loaded-`None` (or a
                         // parent skipped under one) ends its chain: deeper hops
                         // have nothing to attach to.
-                        let mut populated: HashMap<&[String], Option<Bound<'_, PyAny>>> =
+                        let mut loaded: HashMap<&[String], Option<Bound<'_, PyAny>>> =
                             HashMap::new();
                         for ((hop, ctx), (hop_pk, hop_fields)) in
                             include_hops.iter().zip(&hop_ctx).zip(hop_rows)
@@ -4004,7 +4004,7 @@ pub fn fetch_filtered<'py>(
                             let parent = if hop.parent_path.is_empty() {
                                 Some(root_obj.clone())
                             } else {
-                                match populated.get(hop.parent_path.as_slice()) {
+                                match loaded.get(hop.parent_path.as_slice()) {
                                     Some(Some(obj)) => Some(obj.clone()),
                                     _ => None,
                                 }
@@ -4012,7 +4012,7 @@ pub fn fetch_filtered<'py>(
                             let Some(parent) = parent else { continue };
                             if hop_pk.is_none() {
                                 // The LEFT join matched no row. A NULL key
-                                // populates `None` (truthful to the declared
+                                // loads `None` (truthful to the declared
                                 // `| None` type). A key whose row is gone, or
                                 // hidden by row security, leaves the relation
                                 // unloaded, holding the key (ADR-0063). Either
@@ -4036,13 +4036,13 @@ pub fn fetch_filtered<'py>(
                                     )?),
                                     None => None,
                                 };
-                                crate::hydration::set_populated_relation(
+                                crate::hydration::set_loaded_relation(
                                     py,
                                     &parent,
                                     &hop.relation,
                                     unloaded.as_ref(),
                                 )?;
-                                populated.insert(hop.path.as_slice(), None);
+                                loaded.insert(hop.path.as_slice(), None);
                                 continue;
                             }
                             let instance = materialize_model_row(
@@ -4057,13 +4057,13 @@ pub fn fetch_filtered<'py>(
                                 &ctx.py_col_names,
                                 &ctx.converters,
                             )?;
-                            crate::hydration::set_populated_relation(
+                            crate::hydration::set_loaded_relation(
                                 py,
                                 &parent,
                                 &hop.relation,
                                 Some(&instance),
                             )?;
-                            populated.insert(hop.path.as_slice(), Some(instance));
+                            loaded.insert(hop.path.as_slice(), Some(instance));
                         }
 
                         results.append(root_obj)?;
@@ -8420,6 +8420,30 @@ mod instances_select_list_tests {
     }
 
     #[test]
+    fn an_included_table_without_a_primary_key_says_loading_runs_the_identity_protocol() {
+        let mut plan = include_plan();
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({"properties": {"label": {"type": "string"}}}),
+                "account".to_string(),
+            ),
+        );
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
+            panic!("include plan expected");
+        };
+        let Err(err) = resolve_include_hops(paths, &join_plan, &plan) else {
+            panic!("a table without a primary key must be refused");
+        };
+        assert!(
+            err.to_string()
+                .contains("loading runs the identity protocol per hop"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
     fn rendered_select_widens_with_aliased_hop_columns_and_left_join() {
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
@@ -8501,7 +8525,7 @@ mod instances_select_list_tests {
     #[test]
     fn left_missed_hop_row_decodes_to_pk_none() {
         // A LEFT join that matched no row (NULL FK) yields a hop slice whose
-        // PK is None — the graph hydrator's populated-`None` signal.
+        // PK is None — the graph hydrator's loaded-`None` signal.
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
         let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {

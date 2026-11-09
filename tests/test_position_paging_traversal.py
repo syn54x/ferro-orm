@@ -68,21 +68,21 @@ def test_related_id_is_not_the_model_primary_key():
         (PosTravTransaction.select().order_by(lambda txn: txn.account.id).after((1,)))
 
 
-def test_position_of_unpopulated_traversed_key_raises():
+def test_position_of_unloaded_traversed_key_raises():
     row = PosTravTransaction.model_construct(id=1, amount=10, account_id=1)
-    with pytest.raises(ValueError, match=r"account\.label"):
+    with pytest.raises(ValueError, match=r"'account\.label' loaded on the instance"):
         _traversed().position_of(row)
 
 
-def test_position_of_populated_traversed_key_reads_the_related_column():
+def test_position_of_loaded_traversed_key_reads_the_related_column():
     account = PosTravAccount.model_construct(id=7, label="a1")
     row = PosTravTransaction.model_construct(id=1, amount=10, account_id=7)
-    # include() population: relation name in __dict__ shadows ForwardDescriptor.
+    # include() loading: relation name in __dict__ shadows ForwardDescriptor.
     row.__dict__["account"] = account
     assert _traversed().position_of(row) == ("a1", 1)
 
 
-def test_position_of_populated_none_related_slot_is_legal():
+def test_position_of_loaded_none_related_slot_is_legal():
     row = PosTravNote.model_construct(id=3, body="orphan")
     row.__dict__["account"] = None
     position = (
@@ -218,7 +218,7 @@ async def test_before_traversed_tuple_pages_without_include(db_url):
 
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
-async def test_position_of_instance_requires_populated_path(db_url):
+async def test_position_of_instance_requires_loaded_path(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_transactions()
@@ -227,15 +227,15 @@ async def test_position_of_instance_requires_populated_path(db_url):
         with pytest.raises(ValueError, match=r"account\.label"):
             _traversed().position_of(bare)
 
-        populated = await (
+        loaded = await (
             PosTravTransaction.select()
             .include(lambda txn: txn.account)
             .where(lambda txn: txn.id == 2)
             .first()
         )
-        assert populated is not None
-        assert _traversed().position_of(populated) == ("a1", 2)
-        page = await _traversed().after(populated).limit(2).all()
+        assert loaded is not None
+        assert _traversed().position_of(loaded) == ("a1", 2)
+        page = await _traversed().after(loaded).limit(2).all()
         assert [row.id for row in page] == [3, 4]
 
 

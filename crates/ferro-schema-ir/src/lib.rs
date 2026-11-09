@@ -507,9 +507,9 @@ pub enum QueryValueExpr {
 /// root-model rows hydrated into model instances — the default and the only
 /// plan the non-projecting walkers accept. `record` is partial selects: a
 /// typed column subset decoded into projected records (#279). `instances` is
-/// populated instance graphs (joined-row hydration, #284): the root rows plus
+/// loaded instance graphs (joined-row hydration, #284): the root rows plus
 /// every included relation path's complete hop rows, hydrated into a
-/// populated graph.
+/// loaded graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum Materialization {
@@ -522,12 +522,12 @@ pub enum Materialization {
         /// Projected fields in selection order.
         fields: Vec<RecordField>,
     },
-    /// Populated instance graphs (joined-row hydration, #284/#286).
+    /// Loaded instance graphs (joined-row hydration, #284/#286).
     #[serde(rename = "instances")]
     Instances {
         /// Included relation paths, each an ordered hop-fact list from the
         /// root model (the same hop shape as the `joins` section). Nothing
-        /// else travels here: every hop of a populated graph is a complete
+        /// else travels here: every hop of a loaded graph is a complete
         /// row, permanently (the complete-instance invariant, ADR-0008), so
         /// there is no per-path configuration.
         paths: Vec<Vec<QueryJoinHop>>,

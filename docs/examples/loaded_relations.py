@@ -1,11 +1,11 @@
-"""Runnable companion to "Populating relations with include()" in the Queries
+"""Runnable companion to "Loading relations with include()" in the Queries
 guide (docs/pages/guide/queries.md); the relationships guide embeds ``basic``.
 
 Runs every include() query the guide shows against the guide's ledger
 (declared in predicates.py, rows from _ledger_seed.py) and asserts the
-populations that come back.
+loaded relations that come back.
 
-Two sessions on purpose: populations accumulate across one session's queries,
+Two sessions on purpose: loaded relations accumulate across one session's queries,
 so the accumulation example needs instances no earlier include has touched.
 """
 
@@ -60,7 +60,7 @@ async def main() -> None:
         assert len(everything) == 9
 
         salary = next(row for row in everything if row.memo == "Salary")
-        assert salary.category is None  # no category: populated as None
+        assert salary.category is None  # no category: loaded as None
         # --8<-- [end:membership]
 
         # --8<-- [start:interplay]
@@ -117,7 +117,7 @@ async def main() -> None:
 
     async with engines.session():
         # --8<-- [start:accumulate]
-        market_run = await Transaction.get(3)  # nothing populated yet
+        market_run = await Transaction.get(3)  # nothing loaded yet
 
         await (
             Transaction.select().include(lambda transaction: transaction.account).all()
@@ -176,7 +176,7 @@ async def main() -> None:
             raise AssertionError("delete() on an included query must raise")
         # --8<-- [end:limits]
 
-    print("populated_relations example ran successfully")
+    print("loaded_relations example ran successfully")
 
 
 if __name__ == "__main__":

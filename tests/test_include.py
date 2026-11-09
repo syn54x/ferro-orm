@@ -1,13 +1,13 @@
-"""Backend-matrix integration tests for populated relations (#286, ADR-0008).
+"""Backend-matrix integration tests for loaded relations (#286, ADR-0008).
 
 ``select().include(lambda t: t.account)`` end to end: the ``instances``
 materialization plan renders the include-only LEFT join and the widened,
 aliased SELECT, decodes every hop against the hop model's own codec plan, and
-populates the relation per the population contract — plain attribute access
-returning the complete instance, no await, no query — while an unpopulated
+loads the relation per the loaded-relation contract — plain attribute access
+returning the complete instance, no await, no query — while an unloaded
 relation reads as an unloaded instance holding its key. No SQL-string snapshots at
 this layer (the rendered SELECT/edge-union pins live in the Rust walker unit
-tests). Covers membership preservation, the population contract, identity-map
+tests). Covers membership preservation, the loaded-relation contract, identity-map
 semantics (dedup, refresh-attach), sessionless freshness, typed-column parity
 vs a direct query, verb composition, and the include-vs-joins wire split.
 """
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.backend_matrix
 
 
 # ---------------------------------------------------------------------------
-# Schema: Transaction -> Account -> Owner (both FKs nullable, so populated-
+# Schema: Transaction -> Account -> Owner (both FKs nullable, so loaded-
 # `None` and mid-chain NULL are observable), a second Transaction FK
 # (Category) so accumulation across includes is observable, a typed-column
 # pair with a root/hop name collision for decode-parity pins, and an M2M trio
@@ -161,12 +161,12 @@ def _ph(db_url: str, n: int = 1) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The tracer bullet: populated plain-attribute access, one statement.
+# The tracer bullet: loaded plain-attribute access, one statement.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_include_populates_relation_as_plain_attribute(db_url):
+async def test_include_loads_relation_as_plain_attribute(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -185,9 +185,9 @@ async def test_include_populates_relation_as_plain_attribute(db_url):
 
 
 @pytest.mark.asyncio
-async def test_include_preserves_membership_and_populates_null_fk_as_none(db_url):
+async def test_include_preserves_membership_and_loads_null_fk_as_none(db_url):
     """Adding .include(...) returns exactly the rows the query returned
-    without it; a NULL nullable FK populates as None with the root retained."""
+    without it; a NULL nullable FK loads as None with the root retained."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -199,13 +199,13 @@ async def test_include_preserves_membership_and_populates_null_fk_as_none(db_url
 
         assert [t.id for t in included] == [t.id for t in plain] == [1, 2, 3, 4, 5]
         orphan = included[4]
-        # Populated-`None`: a plain attribute, truthful to the declared
+        # Loaded-`None`: a plain attribute, truthful to the declared
         # `| None` type — not an awaitable.
         assert orphan.account is None
 
 
 @pytest.mark.asyncio
-async def test_an_unpopulated_relation_reads_as_an_unloaded_instance(db_url):
+async def test_an_unloaded_relation_reads_as_an_unloaded_instance(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         seeded = await _seed_core()
@@ -227,7 +227,7 @@ async def test_an_unpopulated_relation_reads_as_an_unloaded_instance(db_url):
 
 
 @pytest.mark.asyncio
-async def test_populated_instances_are_identity_mapped_and_deduped(db_url):
+async def test_loaded_instances_are_identity_mapped_and_deduped(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -274,7 +274,7 @@ async def test_include_refresh_attaches_onto_a_live_instance(db_url):
         )
 
         assert txn is not None
-        assert txn.account is held, "population reuses the held instance"
+        assert txn.account is held, "loading reuses the held instance"
         assert held.label == "a1-renamed", "the hit refreshed the held instance"
 
 
@@ -307,8 +307,8 @@ async def test_sessionless_include_returns_fresh_instances_per_row(db_url):
 
 
 @pytest.mark.asyncio
-async def test_populated_typed_columns_equal_a_direct_query(db_url):
-    """datetime / uuid / native enum / decimal on a populated instance match a
+async def test_loaded_typed_columns_equal_a_direct_query(db_url):
+    """datetime / uuid / native enum / decimal on a loaded instance match a
     direct query's instance in type and value on both backends — even with a
     root/hop column-name collision (INTyUser.tag enum vs INTyProfile.tag
     text), so the hop can only have decoded through its OWN codec plan."""
@@ -322,23 +322,21 @@ async def test_populated_typed_columns_equal_a_direct_query(db_url):
     direct = await INTyProfile.using("default").select().first()
 
     assert user is not None and direct is not None
-    populated = user.profile
-    assert isinstance(populated, INTyProfile)
-    assert populated is not direct
+    loaded = user.profile
+    assert isinstance(loaded, INTyProfile)
+    assert loaded is not direct
     for field in ("id", "created_at", "external_id", "balance", "tier", "tag"):
         hydrated = getattr(direct, field)
-        via_include = getattr(populated, field)
+        via_include = getattr(loaded, field)
         assert type(via_include) is type(hydrated), field
         assert via_include == hydrated, field
-    assert isinstance(populated.created_at, datetime)
-    assert isinstance(populated.external_id, UUID)
-    assert isinstance(populated.tier, INTier) and populated.tier is INTier.PRO
-    assert isinstance(populated.balance, Decimal) and populated.balance == Decimal(
-        "12.50"
-    )
+    assert isinstance(loaded.created_at, datetime)
+    assert isinstance(loaded.external_id, UUID)
+    assert isinstance(loaded.tier, INTier) and loaded.tier is INTier.PRO
+    assert isinstance(loaded.balance, Decimal) and loaded.balance == Decimal("12.50")
     # The root's same-named enum column still decodes as the root's enum.
     assert user.tag is INTier.PRO
-    assert isinstance(populated.tag, str) and populated.tag == "vip"
+    assert isinstance(loaded.tag, str) and loaded.tag == "vip"
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +349,7 @@ async def test_populated_typed_columns_equal_a_direct_query(db_url):
 async def test_include_keeps_traversal_predicate_semantics(db_url):
     """A where() traversal on the same path keeps its INNER semantics — the
     row set is identical with and without the include — and the surviving
-    rows come back populated."""
+    rows come back loaded."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -423,7 +421,7 @@ async def test_include_composes_with_explicit_left_join_on_the_same_path(db_url)
 
 
 @pytest.mark.asyncio
-async def test_first_returns_a_populated_instance_or_none(db_url):
+async def test_first_returns_a_loaded_instance_or_none(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -538,13 +536,13 @@ def test_include_selector_validation():
 
 
 # ---------------------------------------------------------------------------
-# Multi-hop (#287): whole-path population, prefix dedup, order freedom, NULL
+# Multi-hop (#287): whole-path loading, prefix dedup, order freedom, NULL
 # mid-chain.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_multi_hop_include_populates_every_hop(db_url):
+async def test_multi_hop_include_loads_every_hop(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -557,7 +555,7 @@ async def test_multi_hop_include_populates_every_hop(db_url):
         )
 
         assert txn is not None
-        # Whole-path population: a populated graph is never missing its
+        # Whole-path loading: a loaded graph is never missing its
         # intermediate nodes.
         assert isinstance(txn.account, INAccount) and txn.account.label == "a1"
         assert isinstance(txn.account.owner, INOwner) and txn.account.owner.name == "o1"
@@ -566,7 +564,7 @@ async def test_multi_hop_include_populates_every_hop(db_url):
 @pytest.mark.asyncio
 async def test_shared_prefix_includes_dedup_and_are_order_free(db_url):
     """`.include(account)` + `.include(account.owner)` — in either chain
-    order — populates exactly what `.include(account.owner)` alone does."""
+    order — loads exactly what `.include(account.owner)` alone does."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -585,7 +583,7 @@ async def test_shared_prefix_includes_dedup_and_are_order_free(db_url):
 
 
 @pytest.mark.asyncio
-async def test_null_mid_chain_ends_the_chain_as_populated_none(db_url):
+async def test_null_mid_chain_ends_the_chain_as_loaded_none(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -598,11 +596,11 @@ async def test_null_mid_chain_ends_the_chain_as_populated_none(db_url):
         )
 
         assert [t.id for t in txns] == [1, 2, 3, 4, 5], "roots retained"
-        # b1 has no owner: hop 1 populated, hop 2 populated-None.
+        # b1 has no owner: hop 1 loaded, hop 2 loaded-None.
         ownerless = txns[3]
         assert ownerless.account.label == "b1"
         assert ownerless.account.owner is None
-        # No account at all: hop 1 populated-None, the chain ends there.
+        # No account at all: hop 1 loaded-None, the chain ends there.
         orphan = txns[4]
         assert orphan.account is None
 
@@ -614,7 +612,7 @@ async def test_null_mid_chain_ends_the_chain_as_populated_none(db_url):
 
 
 @pytest.mark.asyncio
-async def test_population_survives_a_refresh_with_unchanged_fk(db_url):
+async def test_loaded_relation_survives_a_refresh_with_unchanged_fk(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -630,12 +628,12 @@ async def test_population_survives_a_refresh_with_unchanged_fk(db_url):
         again = await INTransaction.get(1)
 
         assert again is txn, "refresh hit the same identity-mapped object"
-        assert isinstance(txn.account, INAccount), "population survived"
+        assert isinstance(txn.account, INAccount), "loaded relation survived"
         assert txn.account.label == "a1"
 
 
 @pytest.mark.asyncio
-async def test_populations_accumulate_across_a_sessions_queries(db_url):
+async def test_loaded_relations_accumulate_across_a_sessions_queries(db_url):
     """An account include and a later category include both stick: queries
     compose instead of clobbering each other."""
     await ferro.connect(db_url, auto_migrate=True)
@@ -656,13 +654,13 @@ async def test_populations_accumulate_across_a_sessions_queries(db_url):
         )
 
         assert second is first
-        assert isinstance(first.account, INAccount), "earlier population kept"
-        assert isinstance(first.category, INCategory), "later population added"
+        assert isinstance(first.account, INAccount), "earlier loaded relation kept"
+        assert isinstance(first.category, INCategory), "later loaded relation added"
         assert first.category.name == "groceries"
 
 
 @pytest.mark.asyncio
-async def test_refresh_drops_population_when_the_fk_changed(db_url):
+async def test_refresh_drops_loaded_relation_when_the_fk_changed(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -685,7 +683,7 @@ async def test_refresh_drops_population_when_the_fk_changed(db_url):
         again = await INTransaction.get(1)
         assert again is txn
 
-        # The population would lie now — it was dropped, so the relation
+        # The loaded relation would lie now — it was dropped, so the relation
         # reads as the account the new key names, and loads the CURRENT row.
         current = txn.account
         assert isinstance(current, INAccount) and current.id == 2
@@ -721,7 +719,7 @@ async def test_model_refresh_drops_a_relation_whose_fk_changed(db_url, session):
 
 
 @pytest.mark.asyncio
-async def test_refresh_drops_population_when_the_fk_went_null(db_url):
+async def test_refresh_drops_loaded_relation_when_the_fk_went_null(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -741,12 +739,12 @@ async def test_refresh_drops_population_when_the_fk_went_null(db_url):
         again = await INTransaction.get(1)
         assert again is txn
 
-        assert "account" not in vars(txn), "population dropped on NULLed FK"
+        assert "account" not in vars(txn), "loaded relation dropped on NULLed FK"
         assert txn.account is None
 
 
 @pytest.mark.asyncio
-async def test_populated_none_survives_while_the_fk_stays_null(db_url):
+async def test_loaded_none_survives_while_the_fk_stays_null(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_core()
@@ -761,7 +759,7 @@ async def test_populated_none_survives_while_the_fk_stays_null(db_url):
 
         again = await INTransaction.get(5)
         assert again is txn
-        assert txn.account is None, "populated-None kept: the FK is still NULL"
+        assert txn.account is None, "loaded-None kept: the FK is still NULL"
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +809,7 @@ async def test_backref_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
+        match=r"^include\(\) cannot load 'transactions'.*include\(\) loads forward.*M2M loading will be",
     ):
         INAccount.select().include(lambda a: a.transactions)
 
@@ -821,7 +819,7 @@ async def test_m2m_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
+        match=r"^include\(\) cannot load 'tags'.*include\(\) loads forward.*M2M loading will be",
     ):
         INMPost.select().include(lambda p: p.tags)
 
@@ -831,14 +829,14 @@ def test_include_and_projection_raise_in_both_chain_orders():
     # projection as the record-shaped way across a relation, permanently.
     with pytest.raises(
         ValueError,
-        match=r"exactly one materialization plan.*traversed projection",
+        match=r"projected records or loaded instances, never both.*traversed projection.*load instances with include\(\)",
     ):
         INTransaction.select().include(lambda t: t.account).select(
             lambda t: (t.id, t.amount)
         )
     with pytest.raises(
         ValueError,
-        match=r"exactly one materialization plan.*traversed projection",
+        match=r"projected records or loaded instances, never both.*traversed projection.*load instances with include\(\)",
     ):
         INTransaction.select(lambda t: (t.id, t.amount)).include(  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             lambda t: t.account
@@ -850,7 +848,13 @@ async def test_mutations_on_an_included_query_raise_before_any_round_trip():
     """No ferro.connect in scope: the build-time guard fires before any
     route or SQL exists."""
     included = INTransaction.select().include(lambda t: t.account)
-    with pytest.raises(ValueError, match=r"update\(\) does not support include\(\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"update\(\) does not support include\(\).*returns no instances to load.*fetch the loaded rows first",
+    ):
         await included.update(note="x")
-    with pytest.raises(ValueError, match=r"delete\(\) does not support include\(\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"delete\(\) does not support include\(\).*returns no instances to load.*fetch the loaded rows first",
+    ):
         await included.delete()

@@ -85,15 +85,15 @@ A class tied to one model that carries its data across the application's boundar
 _Avoid_: Shape, schema, API model, serializer
 
 **Include**:
-The explicit request (`.include(lambda t: t.account.owner)`) that a query populate a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path populates every hop along it and never changes which rows come back.
+The explicit request (`.include(lambda t: t.account.owner)`) that a query load a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path loads every hop along it and never changes which rows come back.
 _Avoid_: Eager load, select_related, prefetch, join-fetch
 
-**Populated relation**:
-A forward-FK field carrying its complete related instance, attached by an explicit include on the query. Attribute access returns the instance directly — no await, no query — matching the field's declared type. An unpopulated relation keeps the awaitable contract; population changes cost and attached data, never the result type (there is no separate "loaded" model type).
-_Avoid_: Eager-loaded field, select_related, prefetched attribute, joined attribute
+**Loaded relation**:
+A forward relation whose instance is complete, filled by an explicit `include()` on the query or by `.load()` on the instance. Reading it returns the instance directly, with no query. A refresh keeps the load only while the foreign key still points at it.
+_Avoid_: Populated relation, eager-loaded field, select_related, prefetched attribute
 
 **Materialization plan**:
-A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
+A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a loaded instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
 _Avoid_: Select list, projection spec, hydration mode flag
 
 **QueryIR payload**:
@@ -105,7 +105,7 @@ The QueryIR window over matching rows: a size (`limit`) and a start. A start is 
 _Avoid_: pagination, cursor, page filter
 
 **Position**:
-The ordered tuple of a query's order-key values that marks one row's place in that order. Two rows never share a position: the order keys include the model's primary key. A non-PK slot may be empty (`None`); the PK slot may not. `after`/`before` start the page from a position; `position_of` reads one off a model instance, or off a projected record that carries every order key. Traversed order keys require those relations populated. Not a cursor — encoding is the caller's.
+The ordered tuple of a query's order-key values that marks one row's place in that order. Two rows never share a position: the order keys include the model's primary key. A non-PK slot may be empty (`None`); the PK slot may not. `after`/`before` start the page from a position; `position_of` reads one off a model instance, or off a projected record that carries every order key. Traversed order keys require those relations loaded. Not a cursor — encoding is the caller's.
 _Avoid_: cursor, bookmark, page token, keyset
 
 **Order key**:

@@ -115,12 +115,12 @@ The checker knows a selected query returns `Rows[Row]`, but not which fields a g
 
 ## Included queries
 
-`include()` does not change the query's type. An included query is still a `Query[Transaction]`: `all()` checks as `list[Transaction]`, `first()` as `Transaction | None`, and a populated relation (`transactions[0].account.label`) type-checks through the field's own annotation. There is no `Loaded[Transaction]` type.
+`include()` does not change the query's type. An included query is still a `Query[Transaction]`: `all()` checks as `list[Transaction]`, `first()` as `Transaction | None`, and a loaded relation (`transactions[0].account.label`) type-checks through the field's own annotation. There is no `Loaded[Transaction]` type.
 
 `include()` keeps the model type for two reasons:
 
-- **A "loaded" type would be wrong under the identity map.** In a session, an included query returns the same objects a plain query returns: populations attach to shared instances and accumulate across queries. A type that says "this object's `account` is populated" claims something the next refresh may undo (see [Population after a refresh](../guide/queries.md#population-after-a-refresh)), and a plain query can hand you an object an earlier query populated. The one type that is always true of an instance is its model.
-- **The annotation already names the instance.** The field says `account: Account`. A separate loaded type would have to rewrite each field's type on the unloaded side (`account: Awaitable[Account]` to `Account`), which needs type features Python does not have yet; see [Where checking stops](#where-checking-stops). Populating a relation is what makes the declared annotation true, where you asked for it.
+- **A "loaded" type would be wrong under the identity map.** In a session, an included query returns the same objects a plain query returns: loaded relations attach to shared instances and accumulate across queries. A type that says "this object's `account` is loaded" claims something the next refresh may undo (see [A loaded relation after a refresh](../guide/queries.md#a-loaded-relation-after-a-refresh)), and a plain query can hand you an object an earlier query loaded. The one type that is always true of an instance is its model.
+- **The annotation already names the instance.** The field says `account: Account`. A separate loaded type would have to rewrite each field's type on the unloaded side (`account: Awaitable[Account]` to `Account`), which needs type features Python does not have yet; see [Where checking stops](#where-checking-stops). Loading a relation is what makes the declared annotation true, where you asked for it.
 
 The misuses a checker can catch do fail it: `include()` on a selected query is a type error at the call, and a string selector fails the lambda parameter type.
 

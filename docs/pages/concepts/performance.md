@@ -126,7 +126,7 @@ The [identity map](identity-map.md) holds weak references and lasts as long as t
 
 ### Relations in one query with `include()`
 
-Reading `post.author` on each post of a list runs one query per post. `Post.where(...).include(lambda post: post.author)` loads every author in the same statement as the posts; [Queries › Populating relations](../guide/queries.md#populating-relations-with-include) shows it. `BackRef` and many-to-many collections are not populated by `include()` yet ([roadmap](../roadmap.md#reverse-and-many-to-many-population)); batch them by id with `in_()`.
+Reading `post.author` on each post of a list runs one query per post. `Post.where(...).include(lambda post: post.author)` loads every author in the same statement as the posts; [Queries › Loading relations](../guide/queries.md#loading-relations-with-include) shows it. `BackRef` and many-to-many collections are not loaded by `include()` yet ([roadmap](../roadmap.md#reverse-and-many-to-many-loading)); batch them by id with `in_()`.
 
 ## Benchmarking
 
@@ -159,4 +159,4 @@ For a fair comparison with another ORM, use the same database and schema, warm t
 - [Architecture](architecture.md): why the engine is shaped this way
 - [Identity map](identity-map.md): what the map keeps and for how long
 - [Mutations](../guide/mutations.md): `bulk_create`, bulk updates and deletes
-- [Queries › Populating relations](../guide/queries.md#populating-relations-with-include): `include()`
+- [Queries › Loading relations](../guide/queries.md#loading-relations-with-include): `include()`
