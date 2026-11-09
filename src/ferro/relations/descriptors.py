@@ -35,17 +35,17 @@ def _first_read_route(instance: object) -> "RouteHandle | None":
     from ..state import (
         _CURRENT_SESSION,
         _CURRENT_TRANSACTION,
-        RouteHandle,
-        resolve_operation_scope,
+        resolve_relation_read_scope,
     )
 
     origin = _instance_origin_outside_transaction(instance)
-    session = _CURRENT_SESSION.get()
-    if origin is None and session is None and _CURRENT_TRANSACTION.get() is None:
+    if (
+        origin is None
+        and _CURRENT_SESSION.get() is None
+        and _CURRENT_TRANSACTION.get() is None
+    ):
         return None
-    if origin is not None and session is not None and origin != session.connection_name:
-        return RouteHandle(connection_name=origin)
-    return resolve_operation_scope(using=origin, session=None)
+    return resolve_relation_read_scope(using=origin)
 
 
 class RelationshipDescriptor(BaseModel):

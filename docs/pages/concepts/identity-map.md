@@ -116,7 +116,7 @@ assert post.author is author
 <!-- prints: above -->
 ```text
 Author(id=3, unloaded)
-Author(id=3, email='lin@example.com', name='Lin Wei')
+Author(id=3, name='Lin Wei', email='lin@example.com')
 ```
 
 The first `print` shows the key alone and sent no query. `Author.get()` ran its query, found the unloaded instance under that key and filled it, so `fetched`, `author` and `post.author` are one object. `await post.author.load()` fills it the same way.
