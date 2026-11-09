@@ -178,6 +178,33 @@ async def test_a_many_to_many_needs_no_reverse_side(db_url):
         assert [tournament.id for tournament in await ada.tournaments.all()] == [cup.id]
 
 
+@pytest.mark.usefixtures("clean_registry")
+def test_a_model_redefined_in_one_process_keeps_its_join_table():
+    """A notebook or REPL redefines a model: its many-to-many, renamed over the
+    same join table, takes the table over from the old definition."""
+
+    class Tournament(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        tournaments: Relation[list["Tournament"]] = ManyToMany(
+            through="player_tournaments"
+        )
+
+    ferro.ensure_resolved_modelset()
+
+    class Player(Model):  # noqa: F811, the same model redefined
+        id: int | None = Field(default=None, primary_key=True)
+        events: Relation[list["Tournament"]] = ManyToMany(through="player_tournaments")
+
+    ferro.ensure_resolved_modelset()
+
+    join = ferro.registry.REGISTRY.join_tables()["player_tournaments"]
+    assert join["declared_by"] == (Player.__ferro_identity__, "events")
+    assert Player.__ferro_reverse_specs__["events"].join_table == "player_tournaments"
+
+
 def test_reverse_index_false_keeps_the_unique_index_only():
     class Player(Model):
         id: int | None = Field(default=None, primary_key=True)

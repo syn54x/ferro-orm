@@ -20,6 +20,7 @@ more than one way carries each way, and the sweep applies each one.
 """
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
@@ -133,13 +134,12 @@ def _case(
     after=(),
     bases=None,
     orders=tuple(_ORDERS),
-    forms=("name", "class"),
     **models,
 ):
     """One refused modelset; ``models`` are the lines of each model, ``after``
     the module lines run once they are defined, ``bases`` a model's base
-    model where it is not `Model`, and ``orders`` and ``forms`` the
-    definition orders and target forms the case runs in."""
+    model where it is not `Model`, and ``orders`` the definition orders the
+    case runs in."""
     return {
         "kind": kind,
         "owner": owner,
@@ -149,7 +149,6 @@ def _case(
         "after": after,
         "bases": bases or {},
         "orders": orders,
-        "forms": forms,
         "models": models,
     }
 
@@ -585,16 +584,28 @@ def _cases(storage: str) -> dict[str, dict]:
         )
     # Team has no primary key and two key columns of different types point at
     # it: the fix gives Team the refused one's type, and retypes the other.
-    # Both columns must exist when the refusal is raised, so Team is written
-    # by name and declares no column: the check then waits for resolution.
-    # Refused when Card is defined, the fix could not see Player's column.
+    # On one model, the model being defined is seen whether Team is written
+    # as a class (refused when Player is defined) or by name.
     cases["keys of two types to a model with no primary key"] = _case(
+        "key",
+        ("team_id", "backup_id"),
+        local=False,
+        no_pk=("Team",),
+        Team=['name: str = ""'],
+        Player=[
+            f'team_id: {key} = Field(foreign_key="Team"{stored})',
+            f'backup_id: {wrong} = Field(foreign_key="Team")',
+        ],
+    )
+    # On two models, Player defined before Card: refused when relations
+    # resolve, with both columns known.
+    cases["keys of two types on two models to a model with no primary key"] = _case(
         "key",
         "team_id",
         local=False,
         owner=("Player", "Card"),
         no_pk=("Team",),
-        forms=("name",),
+        orders=("Player first",),
         Player=[f'team_id: {key} = Field(foreign_key="Team"{stored})'],
         Card=[f'team_id: {wrong} = Field(foreign_key="Team")'],
     )
@@ -768,11 +779,7 @@ def _sweep(storage: str) -> list[tuple[str, str, str]]:
         for order in case["orders"]:
             runs.append((name, order, "name"))
             # A class is only written where it is already defined.
-            if (
-                "class" in case["forms"]
-                and order == "Player last"
-                and _as_classes(case["models"]) != case["models"]
-            ):
+            if order == "Player last" and _as_classes(case["models"]) != case["models"]:
                 runs.append((name, order, "class"))
     return runs
 
@@ -783,6 +790,28 @@ _SWEEP_CASES = [
     for name, order, form in _sweep(storage)
     for future in (False, True)
 ]
+
+
+def _spelled_by_name(
+    alternatives: tuple[tuple[Edit, ...], ...],
+) -> tuple[tuple[Edit, ...], ...]:
+    """``alternatives`` with Team written by name wherever a kept line wrote it
+    as the class."""
+    return tuple(
+        tuple(
+            Edit(
+                edit.model,
+                edit.field,
+                edit.action,
+                tuple(
+                    line.replace("foreign_key=Team", 'foreign_key="Team"')
+                    for line in edit.lines
+                ),
+            )
+            for edit in way
+        )
+        for way in alternatives
+    )
 
 
 def _refused_case(tmp_path, storage, case, order, form, future) -> DeclarationRefusal:
@@ -803,9 +832,10 @@ async def test_every_refusal_carries_a_fix_that_works(
     refusal = _refused_case(tmp_path, storage, case, order, form, future)
     message = str(refusal)
 
-    # Which of two refused models resolution meets first depends on the order.
+    # Which of two refused declarations is met first depends on the order.
     owners = case["owner"] if isinstance(case["owner"], tuple) else (case["owner"],)
-    assert refusal.model in owners and refusal.field == case["field"], message
+    fields = case["field"] if isinstance(case["field"], tuple) else (case["field"],)
+    assert refusal.model in owners and refusal.field in fields, message
     assert message == render_fix(
         refusal.model, refusal.field, refusal.reason, alternatives=refusal.alternatives
     )
@@ -823,6 +853,16 @@ async def test_every_refusal_carries_a_fix_that_works(
         ), message
     assert ("Write: " in message) is case["local"], message
     assert ("Fix it by hand: (1) " in message) is not case["local"], message
+    if form == "class":
+        # Refused when the class is defined or when relations resolve, the
+        # fix is the same, bar how the line it keeps spells the target.
+        by_name = _refused_case(tmp_path, storage, case, order, "name", future)
+        assert (refusal.model, refusal.field, refusal.reason) == (
+            by_name.model,
+            by_name.field,
+            by_name.reason,
+        )
+        assert _spelled_by_name(refusal.alternatives) == by_name.alternatives
 
     models = _as_classes(case["models"]) if form == "class" else case["models"]
     for way in refusal.alternatives:
@@ -841,15 +881,24 @@ async def test_every_refusal_carries_a_fix_that_works(
 
 # -- every refusal is swept --------------------------------------------------------
 #
-# Each place in src/ferro that raises a `DeclarationRefusal`, directly or
-# through a function that builds one, must be a place the sweep reaches, so a
-# new refusal without a sweep case fails here.
+# Each place in src/ferro that builds a `DeclarationRefusal`, directly or
+# through a function that returns one, must be on the stack of a refusal the
+# sweep meets, so a new refusal without a sweep case fails here, however it
+# is raised.
 
 
-def _raise_sites_in_source() -> set[tuple[str, int]]:
-    """Every ``raise`` of a `DeclarationRefusal` in src/ferro: (file, line)."""
+def _construction_sites_in_source() -> set[tuple[str, int]]:
+    """Every call in src/ferro that builds a `DeclarationRefusal`: (file, line).
+
+    A call of the class or of a function annotated to return one; the class's
+    own module, which builds one only to unpickle it, is left out.
+    """
     root = Path(ferro.__file__).parent
-    trees = {path: ast.parse(path.read_text()) for path in root.rglob("*.py")}
+    trees = {
+        path: ast.parse(path.read_text())
+        for path in root.rglob("*.py")
+        if path != root / "relations" / "fixes.py"
+    }
     builders = {"DeclarationRefusal"} | {
         node.name
         for tree in trees.values()
@@ -861,36 +910,38 @@ def _raise_sites_in_source() -> set[tuple[str, int]]:
     sites = set()
     for path, tree in trees.items():
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Raise)
-                and isinstance(node.exc, ast.Call)
-                and isinstance(node.exc.func, ast.Name)
-                and node.exc.func.id in builders
-            ):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            name = called.id if isinstance(called, ast.Name) else None
+            if isinstance(called, ast.Attribute):
+                name = called.attr
+            if name in builders:
                 sites.add((str(path.relative_to(root)), node.lineno))
     return sites
 
 
-def _raise_site(refusal: DeclarationRefusal) -> tuple[str, int]:
-    """Where ``refusal`` was raised: the innermost frame of its traceback."""
-    tb = refusal.__traceback__
-    assert tb is not None
-    while tb.tb_next is not None:
-        tb = tb.tb_next
+def test_the_sweep_reaches_every_refusal(tmp_path, monkeypatch):
     root = Path(ferro.__file__).parent
-    return str(Path(tb.tb_frame.f_code.co_filename).relative_to(root)), tb.tb_lineno
+    met: set[tuple[str, int]] = set()
+    build = DeclarationRefusal.__init__
 
+    def recording(self, *args, **kwargs):
+        # Every line of src/ferro on the stack while the refusal is built.
+        frame = sys._getframe(1)
+        while frame is not None:
+            path = Path(frame.f_code.co_filename)
+            if path.is_relative_to(root):
+                met.add((str(path.relative_to(root)), frame.f_lineno))
+            frame = frame.f_back
+        build(self, *args, **kwargs)
 
-def test_the_sweep_reaches_every_refusal(tmp_path):
-    swept = {
-        _raise_site(
+    monkeypatch.setattr(DeclarationRefusal, "__init__", recording)
+    for storage in _KEYS:
+        for name, order, form in _sweep(storage):
             _refused_case(tmp_path, storage, _cases(storage)[name], order, form, False)
-        )
-        for storage in _KEYS
-        for name, order, form in _sweep(storage)
-    }
 
-    assert swept == _raise_sites_in_source()
+    assert _construction_sites_in_source() - met == set()
 
 
 # -- the cases the sweep was widened for ----------------------------------------------
