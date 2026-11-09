@@ -69,6 +69,350 @@ The run catches every change a release announced with a `DeprecationWarning`. It
 
 If you are moving from `0.12` or earlier straight past `0.14`, the deprecated APIs are already removed there and fail with `AttributeError` or `RuntimeError`, not a warning, so the run above catches nothing. Run your suite on `0.13` first, or apply the prompts before you upgrade.
 
+## Upgrading to X.Y {#explicit-foreign-keys}
+
+`X.Y` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and a `BackRef()` had to name it from the other side. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
+
+A correct conversion leaves the schema as it was: the same columns, the same `fk_*` constraints, the same join tables. The [acceptance check](#explicit-foreign-keys-acceptance) at the end proves it.
+
+### The conversion table
+
+Each old declaration has one replacement. The rows use the models of this section: a `Note` belongs to an `Account`, may reply to another `Note`, can carry one `Pin`, and is tagged by any number of `Tag`s.
+
+| Old | New |
+| --- | --- |
+| `account: Annotated[Account, ForeignKey(related_name="notes", index=True)]` | `account_id: int = Field(foreign_key=Account, index=True)` and `account: Relation[Account] = Forward("account_id")` |
+| An optional key: annotation `Note \| None`, `nullable=True`, or `on_delete="SET NULL"` | `reply_to_id: int \| None = Field(default=None, foreign_key="Note", on_delete="SET NULL")` and `reply_to: Relation["Note \| None"] = Forward("reply_to_id")` |
+| `nullable=False` on an `Account \| None` annotation | The required column, `account_id: int = Field(foreign_key=Account)`, and `Relation[Account]` |
+| `ForeignKey(renamed_from="owner")` | `renamed_from="owner_id"` on the column |
+| `ForeignKey(retired=True)` | `retired=True` on an optional column, `account_id: int \| None = Field(default=None, foreign_key=Account, retired=True)` |
+| `replies: Relation[list["Note"]] = BackRef()` | `replies: Relation[list["Note"]] = Reverse("reply_to_id")`, naming the key column on `Note` |
+| `pin: "Pin" = BackRef()`, the reverse side of a one-to-one | `pin: Relation[list["Pin"]] = Reverse("note_id")`; `await note.pin` becomes `await note.pin.first()` |
+| `notes: Relation[list[Note]] = ManyToMany(related_name="tags")` | `notes: Relation[list[Note]] = ManyToMany(through="tag_notes")`, today's derived `<table>_<field>` join-table name, and on `Note` `tags: Relation[list["Tag"]] = Reverse("notes")` |
+| `Field(back_ref=True)`, `Field(many_to_many=True, ...)` | The `Reverse` or `ManyToMany` assignment; a `Field` is always a column |
+| `await note.account` | `note.account` after `include()`, or `await note.account.load()` |
+
+The `through=` name is the one Ferro derived before, the owning table and the attribute joined by `_`, so the join table keeps its name and the conversion plans nothing for it. Ferro still creates and owns that table.
+
+### The converted models
+
+Here are the relations of this section as they were declared before `X.Y`. Each relation line had one valid form, so there is one block:
+
+```python {test=compile reason="shows the declarations before X.Y, which X.Y refuses"}
+class Note(Model):
+    account: Annotated[Account, ForeignKey(related_name="notes", index=True)]
+    reply_to: Annotated[
+        "Note | None", ForeignKey(related_name="replies", on_delete="SET NULL")
+    ]
+    replies: Relation[list["Note"]] = BackRef()
+    pin: "Pin" = BackRef()
+    tags: Relation[list["Tag"]] = BackRef()
+
+
+class Pin(Model):
+    note: Annotated[Note, ForeignKey(related_name="pin", unique=True)]
+
+
+class Tag(Model):
+    notes: Relation[list[Note]] = ManyToMany(related_name="tags")
+```
+
+The same models in `X.Y`, each key a column and each relation naming one:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys_annotated.py:models"
+    ```
+
+`Note.account_id` and `Pin.note_id` are the columns the old form created; their types are the target's primary-key type, with `| None` only on `reply_to_id`, whose relation was optional. The relations themselves are assignments in both styles.
+
+### Call sites
+
+The blocks below run inside a session on the four accounts, with Ada's note "First draft", Grace's note "Reply" replying to it, a `Pin` on Ada's note and a `Tag` "draft" on both notes.
+
+**Awaiting a relation.** A forward relation is no longer awaitable, so `await note.account` raises Python's own error:
+
+```python {test=run prelude=upgrade}
+note = await Note.where(lambda note: note.body == "First draft").first()
+try:
+    await note.account
+except TypeError as error:
+    assert "'Account' object can't be awaited" in str(error)
+else:
+    raise AssertionError("a relation was awaited")
+```
+
+Load the relation with the query instead, and read it as a plain attribute:
+
+```python {test=run prelude=upgrade}
+note = await (
+    Note.where(lambda note: note.body == "First draft")
+    .include(lambda note: note.account)
+    .first()
+)
+assert note.account.name == "Ada Lovelace"
+```
+
+Without `include()`, `note.account` is an *unloaded instance*: a real `Account` holding only its key. `await note.account.load()` fills that same object in place. A fresh session shows it, since the outer one already holds Ada:
+
+```python {test=run prelude=upgrade}
+async with engines.session():
+    note = await Note.where(lambda note: note.body == "First draft").first()
+    assert note.account.id == 1
+    assert repr(note.account) == "Account(id=1, unloaded)"
+    account = await note.account.load()
+    assert account is note.account
+    assert account.name == "Ada Lovelace"
+```
+
+Reading any other column of an unloaded instance raises `InstanceNotLoaded`, naming `include()` and `.load()`.
+
+**A relation keyword in a constructor.** The constructor takes the key column only. `Note(account=ada)` is refused, naming the column to pass:
+
+```python {test=run prelude=upgrade}
+ada = await Account.where(lambda account: account.name == "Ada Lovelace").first()
+try:
+    Note(body="Second draft", account=ada)
+except TypeError as error:
+    assert str(error) == (
+        "Note.account is a relation. Pass the foreign-key column's value, "
+        "account_id=account.id"
+    )
+else:
+    raise AssertionError("a relation keyword was accepted")
+note = await Note.create(body="Second draft", account_id=ada.id)
+assert note.account_id == ada.id
+```
+
+The refusal also offers `note.account = ada` when the key column is optional; a required key cannot be left out of the constructor, so it names the column alone.
+
+**Assigning a relation.** On an instance that exists, assigning a relation sets its key column:
+
+```python {test=run prelude=upgrade}
+grace = await Account.where(lambda account: account.name == "Grace Hopper").first()
+note = await Note.where(lambda note: note.body == "First draft").first()
+note.account = grace
+assert note.account_id == grace.id
+await note.save()
+```
+
+**The reverse side of a one-to-one.** Every reverse relation is a query, whatever its cardinality, so `note.pin` reads with `.first()`:
+
+```python {test=run prelude=upgrade}
+note = await Note.where(lambda note: note.body == "First draft").first()
+pin = await note.pin.first()
+assert pin is not None
+assert pin.note_id == note.id
+```
+
+**`refresh()` on a row that is gone.** It raises `ModelDoesNotExist`, as `.load()` does, where it raised `RuntimeError`:
+
+```python {test=run prelude=upgrade}
+alan = await Account.where(lambda account: account.name == "Alan Turing").first()
+await Account.where(lambda account: account.name == "Alan Turing").delete()
+try:
+    await alan.refresh()
+except ferro.ModelDoesNotExist:
+    pass
+else:
+    raise AssertionError("refresh() found a deleted row")
+```
+
+**A misspelled constructor keyword.** `Model` sets `extra="forbid"`, so an unknown keyword raises `pydantic.ValidationError` instead of being dropped:
+
+```python {test=run prelude=upgrade}
+import pydantic
+
+try:
+    Account(name="Ada", nmae="x", email="a@example.com", age=1)
+except pydantic.ValidationError as error:
+    assert "nmae" in str(error)
+    assert "Extra inputs are not permitted" in str(error)
+else:
+    raise AssertionError("a misspelled keyword was accepted")
+```
+
+Rows Ferro reads from the database are not affected.
+
+**`Field()`'s keywords.** `Field()` refuses a keyword it does not take, naming the closest option:
+
+```python {test=run prelude=upgrade}
+from ferro import Field
+
+try:
+    Field(uniqe=True)
+except TypeError as error:
+    assert str(error) == "Field() got an unknown keyword 'uniqe'. Did you mean 'unique'?"
+else:
+    raise AssertionError("an unknown keyword was accepted")
+```
+
+The old relation keywords, `back_ref`, `many_to_many`, `related_name` and `through`, are refused the same way; write the `Reverse` or `ManyToMany` assignment from the table instead.
+
+**Options in `json_schema_extra`.** A field option passed through `json_schema_extra` (`primary_key`, `unique`, `index`, `autoincrement`, `db_type`, `db_check` or `ferro_nullable`) is refused when the class is defined, naming the `Field()` argument to write:
+
+=== "Assignment"
+
+    ```python {test=run prelude=upgrade}
+    from ferro import Field, Model
+
+    try:
+
+        class Badge(Model):
+            id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+
+    except TypeError as error:
+        assert "Pass primary_key=True to Field()" in str(error)
+    else:
+        raise AssertionError("an option in json_schema_extra was accepted")
+    ```
+
+=== "Annotated"
+
+    ```python {test=run prelude=upgrade}
+    from typing import Annotated
+
+    from ferro import Field, Model
+
+    try:
+
+        class Badge(Model):
+            id: Annotated[int | None, Field(json_schema_extra={"primary_key": True})] = None
+
+    except TypeError as error:
+        assert "Pass primary_key=True to Field()" in str(error)
+    else:
+        raise AssertionError("an option in json_schema_extra was accepted")
+    ```
+
+Write `Field(primary_key=True)`. A JSON schema no longer carries any Ferro option.
+
+**A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused when the class is defined, naming the `db_type` to add:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys.py:storage"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys_annotated.py:storage"
+    ```
+
+The refusal prints the line to write:
+
+<!-- prints: upgrade_foreign_keys.py:storage -->
+```text
+TypeError: Entry.ledger_id: Ledger.id is stored as bigint and this column as int. Write: ledger_id: int = Field(foreign_key=Ledger, db_type="bigint")
+```
+
+Adding `db_type="bigint"` widens the column, the one schema change a conversion makes.
+
+### The acceptance check {#explicit-foreign-keys-acceptance}
+
+A converted codebase declares the schema it had. Check it the way your project migrates:
+
+- **With migrations.** `ferro migrate check` prints `ok: models match <head>`, so `ferro migrate new` would plan nothing, and `ferro migrate drift` prints `no drift against <head>`.
+- **On auto-migrate.** `await ferro.migrate()` returns a report with no statements:
+
+    ```python {test=run prelude=upgrade}
+    report = await ferro.migrate()
+    assert report.statements == ()
+    ```
+
+A key column that gained a `db_type` is the one change that plans a statement, its widening; review it and record it as a migration. Anything else in the plan, such as a dropped `fk_*` constraint, is a declaration the conversion missed.
+
+??? example "Automate this: copy this prompt to your coding agent"
+
+    <!-- shows: a prompt to paste into a coding agent -->
+    ```text
+    You are helping upgrade a Python codebase to Ferro ORM X.Y.
+    Reference: https://ferro-orm.x54.sh/upgrading/#explicit-foreign-keys
+
+    X.Y makes a foreign key a column the model declares. A relation is an
+    optional typed view that names that column. A correct conversion changes
+    no schema: same columns, same fk_* constraints, same join tables.
+
+    Rules for every file you touch:
+    - Keep the file's declaration style for the new key column: assignment
+      (`account_id: int = Field(foreign_key=Account)`) or Annotated
+      (`account_id: Annotated[int, Field(foreign_key=Account)]`). Relations
+      are always assignments.
+    - Give the key column the target's primary-key type. Add `| None` (and
+      `default=None`) only when the old relation was optional.
+    - Name each query lambda's parameter after its model in lowercase singular:
+      `lambda note: note.account_id == 1`, never `lambda n: ...`.
+
+    1. Convert every declaration (Note belongs to Account, may reply to a
+       Note, has one Pin and many Tags; use the codebase's own names):
+       - `account: Annotated[Account, ForeignKey(related_name="notes", index=True)]`
+         -> `account_id: int = Field(foreign_key=Account, index=True)` and
+            `account: Relation[Account] = Forward("account_id")`
+       - an optional key (annotation `Note | None`, `nullable=True`, or
+         `on_delete="SET NULL"`)
+         -> `reply_to_id: int | None = Field(default=None, foreign_key="Note", on_delete="SET NULL")`
+            and `reply_to: Relation["Note | None"] = Forward("reply_to_id")`
+       - `nullable=False` on an `Account | None` annotation
+         -> the required column `account_id: int` and `Relation[Account]`
+       - `ForeignKey(renamed_from="owner")` -> `renamed_from="owner_id"` on the column
+       - `ForeignKey(retired=True)` -> `retired=True` on an optional column
+       - `replies: Relation[list["Note"]] = BackRef()`
+         -> `replies: Relation[list["Note"]] = Reverse("reply_to_id")`,
+            naming the key column on the other model
+       - `pin: "Pin" = BackRef()` (one-to-one reverse side)
+         -> `pin: Relation[list["Pin"]] = Reverse("note_id")`
+       - `notes: Relation[list[Note]] = ManyToMany(related_name="tags")`
+         -> `notes: Relation[list[Note]] = ManyToMany(through="tag_notes")`,
+            where through= is today's derived join-table name,
+            <owning table>_<attribute>, and on Note
+            `tags: Relation[list["Tag"]] = Reverse("notes")`
+       - `Field(back_ref=True)`, `Field(many_to_many=True, ...)`
+         -> the Reverse or ManyToMany assignment; a Field is always a column
+       Import Field, Forward, Reverse, ManyToMany and Relation from ferro;
+       ForeignKey and BackRef no longer exist.
+
+    2. Fix the call sites:
+       - `await note.account` raises "'Account' object can't be awaited".
+         Use `.include(lambda note: note.account)` on the query, or
+         `await note.account.load()`.
+       - `Note(account=ada)` is refused: pass `account_id=ada.id`. On an
+         instance that exists, `note.account = ada` sets the key.
+       - A one-to-one reverse side is a query: `await note.pin` becomes
+         `await note.pin.first()`.
+       - `refresh()` on a row that is gone raises ModelDoesNotExist, not
+         RuntimeError; update any `except RuntimeError` around it.
+       - Model sets extra="forbid": a misspelled constructor keyword raises
+         pydantic.ValidationError. Fix the spelling.
+       - Field() refuses unknown keywords, naming the closest option, and
+         refuses back_ref, many_to_many, related_name and through.
+       - Field(json_schema_extra={"primary_key": True}) and the other option
+         keys (unique, index, autoincrement, db_type, db_check,
+         ferro_nullable) are refused: pass them to Field() directly.
+       - A key column whose storage differs from its target key's (an int
+         column beside a bigint key) is refused, printing the line to write
+         with its db_type. Add that db_type.
+
+    3. Report every key column you gave a db_type and every through= name you
+       wrote, as file:line.
+
+    4. Run the acceptance check last. With migrations: `ferro migrate check`
+       prints `ok: models match <head>` and `ferro migrate drift` prints
+       `no drift against <head>`. On auto-migrate: `await ferro.migrate()`
+       returns a report whose statements are (). The only statement a correct
+       conversion plans is the widening of a key column that gained a
+       db_type. Anything else means a declaration is wrong: fix it, do not
+       record it.
+    ```
+
 ## Upgrading to 0.26
 
 Five changes in `0.26` can reach code that runs today. Two show up in a type checker or an import, two in text you compare, and one in the values a secret column stores:
