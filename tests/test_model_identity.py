@@ -207,6 +207,7 @@ def test_same_identity_redefinition_is_idempotent():
 def test_m2m_join_table_colliding_with_model_table_errors():
     from ferro import ManyToMany, Relation, Reverse
     from ferro.relations import resolve_relationships
+    from ferro.relations.fixes import DeclarationRefusal
 
     class JoinVictim(Model):
         __ferro_table__: ClassVar[str] = "joinsource_tags"
@@ -220,5 +221,11 @@ def test_m2m_join_table_colliding_with_model_table_errors():
         id: int | None = None
         sources: Relation[list[JoinSource]] = Reverse("tags")
 
-    with pytest.raises(RuntimeError, match="joinsource_tags"):
+    with pytest.raises(DeclarationRefusal) as refused:
         resolve_relationships()
+
+    assert str(refused.value) == (
+        'JoinSource.tags: through="joinsource_tags" names the table of the model '
+        "JoinVictim, and a join table needs a table of its own. Write: "
+        'tags: Relation[list["JoinTagT"]] = ManyToMany(through="joinsource_tags_2")'
+    )
