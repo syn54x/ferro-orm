@@ -1,5 +1,7 @@
-"""A ForeignKey is detected in a string annotation and under an outer Optional.
+"""Foreign-key columns and their relations resolve under postponed annotations.
 
+The tests that read how the old declaration's target is parsed (in a string
+annotation and under an outer Optional) keep that declaration until it goes.
 Each case writes a real model module to ``tmp_path`` and imports it, so a
 ``from __future__ import annotations`` header is the one Python itself applies.
 The DDL comparison builds the same models once with the header and once
@@ -13,17 +15,16 @@ import itertools
 import sys
 import textwrap
 from pathlib import Path
-from typing import Annotated
 
 import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     Field,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     reset_engine,
 )
@@ -32,13 +33,21 @@ from ferro.registry import REGISTRY
 _COUNTER = itertools.count()
 FUTURE = "from __future__ import annotations\n"
 
+# BackRef and ForeignKey serve the tests that read the old declaration.
 HEADER = """
 from typing import Annotated, Optional
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
+from ferro import BackRef, Field, ForeignKey, Forward, ManyToMany, Model, Relation, Reverse
 """
 
 AUTHOR = """
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    posts: Relation[list["Post"]] = Reverse("author_id")
+"""
+
+_OLD_AUTHOR = """
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
@@ -83,7 +92,7 @@ async def _create_statements(
 
 def _post(annotation: str, *, extra: str = "") -> str:
     return (
-        AUTHOR
+        _OLD_AUTHOR
         + f"""
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -93,7 +102,14 @@ class Post(Model):
     )
 
 
-FK = 'Annotated[Author, ForeignKey(related_name="posts")]'
+POST = """
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    author_id: int = Field(foreign_key={target})
+    author: Relation[Author] = Forward("author_id")
+"""
+
 INNER = 'Annotated[Author | None, ForeignKey(related_name="posts")]'
 
 
@@ -111,7 +127,8 @@ async def _same_ddl(db_url, tmp_path, with_import: str, plain: str, *, future: b
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_string_annotation_gives_the_same_ddl_as_the_twin(db_url, tmp_path):
-    got = await _same_ddl(db_url, tmp_path, _post(FK), _post(FK), future=True)
+    body = AUTHOR + POST.format(target="Author")
+    got = await _same_ddl(db_url, tmp_path, body, body, future=True)
     post = next(s for s in got if '"post"' in s and "CREATE TABLE" in s)
     assert '"author_id"' in post
     assert "fk_post_author_id_author" in post
@@ -121,24 +138,8 @@ async def test_string_annotation_gives_the_same_ddl_as_the_twin(db_url, tmp_path
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_target_defined_below_binds_at_connect(db_url, tmp_path):
-    forward = (
-        """
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str
-    author: Annotated[Author, ForeignKey(related_name="posts")]
-"""
-        + AUTHOR
-    )
-    plain = (
-        AUTHOR
-        + """
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str
-    author: Annotated[Author, ForeignKey(related_name="posts")]
-"""
-    )
+    forward = POST.format(target='"Author"') + AUTHOR
+    plain = AUTHOR + POST.format(target="Author")
     await _same_ddl(db_url, tmp_path, forward, plain, future=True)
 
     _wipe()
@@ -157,8 +158,9 @@ async def test_self_reference_under_the_import(db_url, tmp_path):
     body = """
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
-    mentor: Annotated["Player", ForeignKey(nullable=True, related_name="mentees")] = None
-    mentees: Relation[list["Player"]] = BackRef()
+    mentor_id: int | None = Field(default=None, foreign_key="Player")
+    mentor: Relation["Player | None"] = Forward("mentor_id")
+    mentees: Relation[list["Player"]] = Reverse("mentor_id")
 """
     got = await _same_ddl_one(db_url, tmp_path, body)
     assert "NOT NULL" not in got.split('"mentor_id"')[1].split(",")[0]
@@ -299,16 +301,17 @@ async def test_back_ref_and_many_to_many_still_resolve(db_url, tmp_path):
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
-    posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+    posts: Relation[list["Post"]] = ManyToMany(through="tag_posts")
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
-    author: Annotated[Author, ForeignKey(related_name="posts")]
-    tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
+    author_id: int = Field(foreign_key=Author)
+    author: Relation[Author] = Forward("author_id")
+    tags: Relation[list["Tag"]] = Reverse("posts")
 """,
         future=True,
     )
@@ -316,21 +319,21 @@ class Post(Model):
     assert mod.Post.__ferro_relations__["author"].to is mod.Author
     assert mod.Post.__ferro_relation_specs__["author"].fk_column == "author_id"
     assert "author_id" in mod.Post.__ferro_columns__
-    assert "BackRef" in mod.Author.__ferro_relations__.values()
-    assert mod.Tag.__ferro_relations__["posts"].related_name == "tags"
-    assert any(
-        "post_tag" in name or "tag_post" in name for name in REGISTRY.join_tables()
-    )
+    assert mod.Author.__ferro_relations__["posts"].attribute == "author_id"
+    assert mod.Tag.__ferro_relations__["posts"].through == "tag_posts"
+    assert mod.Post.__ferro_relations__["tags"].attribute == "posts"
+    assert set(REGISTRY.join_tables()) == {"tag_posts"}
 
 
 def test_a_model_defined_in_a_function_finds_its_sibling_target():
     class Owner(Model):
         id: int | None = Field(default=None, primary_key=True)
-        pets: Relation[list[Pet]] = BackRef()
+        pets: Relation[list[Pet]] = Reverse("owner_id")
 
     class Pet(Model):
         id: int | None = Field(default=None, primary_key=True)
-        owner: Annotated[Owner, ForeignKey(related_name="pets")]
+        owner_id: int = Field(foreign_key=Owner)
+        owner: Relation[Owner] = Forward("owner_id")
 
     assert Pet.__ferro_relations__["owner"].to is Owner
     assert "owner_id" in Pet.model_fields
@@ -705,10 +708,8 @@ _ASSIGNED = (
     "whole annotation quoted",
 )
 
-# ManyToMany keeps its old-form declaration in this slice, which reads the
-# marker from Annotated metadata too (as BackRef always has), so every
-# Annotated placement is a working relation; its bare forms are left to the
-# slice that redeclares it.
+# ManyToMany sweeps its Annotated placements and assignments, leaving out the
+# bare forms and an outer `| None` around an assignment.
 _M2M_SPELLINGS = [
     name
     for name in _SPELLINGS
@@ -734,7 +735,7 @@ _MARKERS = {
     ("Forward", "keyword"): 'Forward(column="team_id")',
     ("Reverse", "positional"): 'Reverse("team_id")',
     ("Reverse", "keyword"): 'Reverse(attribute="team_id")',
-    ("ManyToMany", "positional"): 'ManyToMany(related_name="posts")',
+    ("ManyToMany", "positional"): 'ManyToMany(through="post_tags")',
     ("self-referencing", "positional"): 'Forward("parent_id")',
     ("self-referencing", "keyword"): 'Forward(column="parent_id")',
 }
@@ -793,7 +794,7 @@ class Post(Model):
         other = """
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("tags")
 """
     imports = (
         "from typing import Annotated as A, Union\n\n"
@@ -859,11 +860,9 @@ def test_every_spelling_is_a_relation_or_a_refusal_whose_fix_works(
     field = _declared_field(form, spelling, quoted, marker)
     body = _sweep_body(form, field, nullable, order)
     # Only a Relation[...] assigned its marker is a relation, and a forward
-    # one over a nullable column must say `| None`; a ManyToMany keeps the
-    # old form's reading of Annotated metadata.
-    works = form == "ManyToMany" or (
-        spelling in _ASSIGNED
-        and not (form in ("Forward", "self-referencing") and nullable)
+    # one over a nullable column must say `| None`.
+    works = spelling in _ASSIGNED and not (
+        form in ("Forward", "self-referencing") and nullable
     )
     _wipe()
     try:

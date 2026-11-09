@@ -19,12 +19,12 @@ await ferro.connect(url, auto_migrate=True)   # creates "ledger" only
 """
 
 from collections.abc import Callable
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 import pytest
 
 import ferro
-from ferro import Check, Field, ForeignKey, Model
+from ferro import Check, Field, Forward, Model, Relation
 from ferro.registry import REGISTRY
 from tests._pass_harness import auto_migrate, schema_steps
 
@@ -45,7 +45,8 @@ def define_ledger() -> type[Model]:
 def refused_by_value_parity() -> None:
     class Rate(Model):
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
+        ledger_id: int = Field(foreign_key="Ledger")
+        ledger: Relation["Ledger"] = Forward("ledger_id")  # noqa: F821
         price: float
         doubled: float = Field(generated=lambda rate: rate.price * 2)
 
@@ -53,7 +54,8 @@ def refused_by_value_parity() -> None:
 def refused_by_db_type() -> None:
     class Rate(Model):
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
+        ledger_id: int = Field(foreign_key="Ledger")
+        ledger: Relation["Ledger"] = Forward("ledger_id")  # noqa: F821
         name: str = Field(db_type="bigint")
 
 
@@ -64,7 +66,8 @@ def refused_by_check() -> None:
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
+        ledger_id: int = Field(foreign_key="Ledger")
+        ledger: Relation["Ledger"] = Forward("ledger_id")  # noqa: F821
         left: str | None = None
 
 

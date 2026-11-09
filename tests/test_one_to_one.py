@@ -6,8 +6,9 @@ from ferro import (
     connect,
     engines,
     FerroField,
-    ForeignKey,
-    BackRef,
+    Forward,
+    Relation,
+    Reverse,
     reset_engine,
     clear_registry,
 )
@@ -32,12 +33,13 @@ async def test_one_to_one_relationship(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
@@ -69,12 +71,13 @@ async def test_one_to_one_unique_index_in_sqlite(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
 
@@ -105,12 +108,13 @@ async def test_one_to_one_unique_index_in_postgres(
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: "Profile" = BackRef()
+        profile: Relation[list["Profile"]] = Reverse("user_id")
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str
-        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+        user_id: Annotated[int, FerroField(foreign_key=User, unique=True)]
+        user: Relation[User] = Forward("user_id")
 
     await connect(db_url, auto_migrate=True)
 

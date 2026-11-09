@@ -28,13 +28,13 @@ from typing import Annotated, Any, Callable
 import pytest
 
 from ferro import (
-    BackRef,
     Field,
     FerroField,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     now,
 )
 from ferro.query.nodes import QueryProxy
@@ -59,21 +59,21 @@ def _build_models() -> dict[str, type]:
     class Owner(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: str = ""
-        accounts: Relation[list["Account"]] = BackRef()
+        accounts: Relation[list["Account"]] = Reverse("owner_id")
 
     class Account(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str = ""
         balance: int = 0
-        owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
-        transactions: Relation[list["Transaction"]] = BackRef()
+        owner_id: Annotated[int | None, FerroField(foreign_key=Owner)] = None
+        owner: Relation[Owner | None] = Forward("owner_id")
+        transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
     class Transaction(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         amount: int = 0
-        account: Annotated[Account | None, ForeignKey(related_name="transactions")] = (
-            None
-        )
+        account_id: Annotated[int | None, FerroField(foreign_key=Account)] = None
+        account: Relation[Account | None] = Forward("account_id")
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -88,12 +88,12 @@ def _build_models() -> dict[str, type]:
         n: int = 0
         updated_at: datetime | None = None
         turns: dict = Field(default_factory=dict)
-        tags: Relation[list["Tag"]] = BackRef()
+        tags: Relation[list["Tag"]] = Reverse("users")
 
     class Tag(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str = ""
-        users: Relation[list["User"]] = ManyToMany(related_name="tags")
+        users: Relation[list["User"]] = ManyToMany(through="tag_users")
 
     # Dedicated model for the nulls= golden vector (#363) — do not hang
     # pinned_at / updated_at onto User/Account/Transaction (existing fixtures).

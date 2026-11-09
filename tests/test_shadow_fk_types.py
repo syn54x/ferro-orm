@@ -1,13 +1,24 @@
 """Tests for ferro._shadow_fk_types."""
 
+import datetime
 import warnings
-from typing import Annotated, Union
+from typing import Annotated, ClassVar, Union
 from uuid import UUID, uuid4
 
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, Field, ForeignKey, Model, Relation, connect
+from ferro import (
+    BackRef,
+    FerroField,
+    Field,
+    ForeignKey,
+    Forward,
+    Model,
+    Relation,
+    Reverse,
+    connect,
+)
 from ferro._shadow_fk_types import (
     is_fallback_shadow_annotation,
     pk_python_type_for_model,
@@ -83,6 +94,38 @@ def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
     assert ReconcileChild.model_fields["parent_id"].annotation == (int | None)
 
 
+def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass(
+    _cleanup_registry,
+):
+    """A forward-referenced FK's shadow column only learns its real storage
+    when relationships resolve. The cast check re-runs there, so a target whose
+    PK turns out to be unsupported fails pointing at the declaration — and it
+    stays a TypeError, the class-definition contract, not an internal error."""
+    from ferro import RowPolicy, RowSecurity
+    from ferro.relations import resolve_relationships
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner: Annotated["Owner", ForeignKey(related_name="docs")]
+
+        # Passes at class-body time: the shadow column is provisionally integer.
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="owner_id", setting="pinch.owner")
+        )
+
+    class Owner(Model):
+        id: datetime.datetime = Field(primary_key=True)
+        docs: Relation[list["Doc"]] = BackRef()
+
+    with pytest.raises(TypeError) as excinfo:
+        resolve_relationships()
+
+    message = str(excinfo.value)
+    assert "Doc.__ferro_rls__" in message
+    assert "owner_id" in message
+    assert "timestamptz" in message
+
+
 @pytest.mark.asyncio
 async def test_uuid_fk_create_get_dump(db_url):
     """Regression for GitHub #16: UUID PK through shadow FK without validation/serialization issues."""
@@ -92,11 +135,12 @@ async def test_uuid_fk_create_get_dump(db_url):
     class UuidIssueParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: Relation[list["UuidIssueChild"]] = BackRef()
+        children: Relation[list["UuidIssueChild"]] = Reverse("parent_id")
 
     class UuidIssueChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated[UuidIssueParent, ForeignKey(related_name="children")]
+        parent_id: UUID = Field(foreign_key=UuidIssueParent)
+        parent: Relation[UuidIssueParent] = Forward("parent_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -132,12 +176,13 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
 
     class UuidFrwChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated["UuidFrwParent", ForeignKey(related_name="children")]
+        parent_id: UUID = Field(foreign_key="UuidFrwParent")
+        parent: Relation["UuidFrwParent"] = Forward("parent_id")
 
     class UuidFrwParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: Relation[list[UuidFrwChild]] = BackRef()
+        children: Relation[list[UuidFrwChild]] = Reverse("parent_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -154,11 +199,12 @@ def test_uuid_child_model_validate_accepts_string_parent_id():
     class VParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: Relation[list["VChild"]] = BackRef()
+        children: Relation[list["VChild"]] = Reverse("parent_id")
 
     class VChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated[VParent, ForeignKey(related_name="children")]
+        parent_id: UUID = Field(foreign_key=VParent)
+        parent: Relation[VParent] = Forward("parent_id")
 
     from ferro.relations import resolve_relationships
 
@@ -199,12 +245,13 @@ async def test_uuid_fk_save_after_reparenting(db_url):
     class UuidMutParent(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        kids: Relation[list["UuidMutChild"]] = BackRef()
+        kids: Relation[list["UuidMutChild"]] = Reverse("parent_id")
 
     class UuidMutChild(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         label: str
-        parent: Annotated[UuidMutParent, ForeignKey(related_name="kids")]
+        parent_id: UUID = Field(foreign_key=UuidMutParent)
+        parent: Relation[UuidMutParent] = Forward("parent_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -231,12 +278,13 @@ async def test_uuid_fk_bulk_create(db_url):
     class UuidBulkParent(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        items: Relation[list["UuidBulkItem"]] = BackRef()
+        items: Relation[list["UuidBulkItem"]] = Reverse("parent_id")
 
     class UuidBulkItem(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         sku: str
-        parent: Annotated[UuidBulkParent, ForeignKey(related_name="items")]
+        parent_id: UUID = Field(foreign_key=UuidBulkParent)
+        parent: Relation[UuidBulkParent] = Forward("parent_id")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():

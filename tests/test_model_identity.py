@@ -131,10 +131,7 @@ def test_resolve_model_reference_ambiguous_lists_candidates():
 
 
 def test_fk_string_ref_to_ambiguous_short_name_errors_with_candidates():
-    from typing import Annotated
-
-    from ferro import BackRef, Relation
-    from ferro.base import ForeignKey
+    from ferro import Field, Forward, Relation, Reverse
     from ferro.relations import resolve_relationships
 
     # Two distinct enclosing scopes give the same-named targets distinct
@@ -144,7 +141,7 @@ def test_fk_string_ref_to_ambiguous_short_name_errors_with_candidates():
         class FkTarget(Model):
             __ferro_table__: ClassVar[str] = "fk_target_one"
             id: int | None = None
-            refs: Relation[list["FkSource"]] = BackRef()
+            refs: Relation[list["FkSource"]] = Reverse("target_id")
 
         return FkTarget
 
@@ -152,7 +149,7 @@ def test_fk_string_ref_to_ambiguous_short_name_errors_with_candidates():
         class FkTarget(Model):
             __ferro_table__: ClassVar[str] = "fk_target_two"
             id: int | None = None
-            refs: Relation[list["FkSource"]] = BackRef()
+            refs: Relation[list["FkSource"]] = Reverse("target_id")
 
         return FkTarget
 
@@ -161,7 +158,8 @@ def test_fk_string_ref_to_ambiguous_short_name_errors_with_candidates():
 
     class FkSource(Model):
         id: int | None = None
-        target: Annotated["FkTarget", ForeignKey(related_name="refs")]  # noqa: F821
+        target_id: int = Field(foreign_key="FkTarget")
+        target: Relation["FkTarget"] = Forward("target_id")  # noqa: F821
 
     with pytest.raises(RuntimeError) as excinfo:
         resolve_relationships()
@@ -207,9 +205,7 @@ def test_same_identity_redefinition_is_idempotent():
 
 
 def test_m2m_join_table_colliding_with_model_table_errors():
-    from typing import Annotated  # noqa: F401
-
-    from ferro import ManyToMany, Relation, BackRef
+    from ferro import ManyToMany, Relation, Reverse
     from ferro.relations import resolve_relationships
 
     class JoinVictim(Model):
@@ -218,11 +214,11 @@ def test_m2m_join_table_colliding_with_model_table_errors():
 
     class JoinSource(Model):
         id: int | None = None
-        tags: Relation[list["JoinTagT"]] = ManyToMany(related_name="sources")
+        tags: Relation[list["JoinTagT"]] = ManyToMany(through="joinsource_tags")
 
     class JoinTagT(Model):
         id: int | None = None
-        sources: Relation[list[JoinSource]] = BackRef()
+        sources: Relation[list[JoinSource]] = Reverse("tags")
 
     with pytest.raises(RuntimeError, match="joinsource_tags"):
         resolve_relationships()

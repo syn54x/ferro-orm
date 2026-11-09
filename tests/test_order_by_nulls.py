@@ -10,7 +10,7 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation, Reverse
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -47,13 +47,14 @@ async def _seed_cards() -> None:
 class ObnBoard(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    cards: Relation[list["ObnBoardCard"]] = BackRef()
+    cards: Relation[list["ObnBoardCard"]] = Reverse("board_id")
 
 
 class ObnBoardCard(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    board: Annotated[ObnBoard | None, ForeignKey(related_name="cards")] = None
+    board_id: Annotated[int | None, FerroField(foreign_key=ObnBoard)] = None
+    board: Relation[ObnBoard | None] = Forward("board_id")
 
 
 async def _seed_board_cards() -> None:

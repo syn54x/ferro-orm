@@ -4,12 +4,12 @@ from typing import Annotated
 import pytest
 
 from ferro import (
-    BackRef,
     Field,
     FerroField,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     reset_engine,
@@ -54,14 +54,15 @@ async def test_foreign_key_constraint_exists(db_url):
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: Relation[list["Product"]] = BackRef()
+        products: Relation[list["Product"]] = Reverse("category_id")
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        category: Annotated[
-            Category, ForeignKey(related_name="products", on_delete="CASCADE")
+        category_id: Annotated[
+            int, FerroField(foreign_key=Category, on_delete="CASCADE")
         ]
+        category: Relation[Category] = Forward("category_id")
 
     # 1. Connect and Migrate
     await connect(db_url, auto_migrate=True)
@@ -94,14 +95,15 @@ async def test_foreign_key_constraint_exists_in_postgres(
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: Relation[list["Product"]] = BackRef()
+        products: Relation[list["Product"]] = Reverse("category_id")
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        category: Annotated[
-            Category, ForeignKey(related_name="products", on_delete="CASCADE")
+        category_id: Annotated[
+            int, FerroField(foreign_key=Category, on_delete="CASCADE")
         ]
+        category: Relation[Category] = Forward("category_id")
 
     await connect(db_url, auto_migrate=True)
 
@@ -143,20 +145,18 @@ async def test_foreign_key_constraint_exists_in_postgres(
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_foreign_key_index_runtime_ddl_parity(db_url):
-    """Rust runtime DDL emits CREATE INDEX for ForeignKey(index=True)."""
+    """Rust runtime DDL emits CREATE INDEX for a foreign-key column with index=True."""
 
     class Org(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        projects: Relation[list["Project"]] = BackRef()
+        projects: Relation[list["Project"]] = Reverse("org_id")
 
     class Project(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        org: Annotated[
-            Org,
-            ForeignKey(related_name="projects", index=True),
-        ]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
+        org: Relation[Org] = Forward("org_id")
 
     await connect(db_url, auto_migrate=True)
 
@@ -182,7 +182,7 @@ async def test_foreign_key_index_runtime_ddl_parity(db_url):
 async def test_foreign_key_index_runtime_ddl_parity_postgres(
     db_url, postgres_base_url, db_schema_name
 ):
-    """Rust runtime DDL emits CREATE INDEX for ForeignKey(index=True) on Postgres.
+    """Rust runtime DDL emits CREATE INDEX for a foreign-key column with index=True on Postgres.
 
     Postgres does not auto-index foreign-key columns (unlike the implicit index
     created by a UNIQUE constraint), so this test is a real-world correctness
@@ -192,15 +192,13 @@ async def test_foreign_key_index_runtime_ddl_parity_postgres(
     class Org(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        projects: Relation[list["Project"]] = BackRef()
+        projects: Relation[list["Project"]] = Reverse("org_id")
 
     class Project(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        org: Annotated[
-            Org,
-            ForeignKey(related_name="projects", index=True),
-        ]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
+        org: Relation[Org] = Forward("org_id")
 
     await connect(db_url, auto_migrate=True)
 
@@ -242,7 +240,9 @@ async def test_a_retired_columns_constraints_keep_their_canonical_names(db_url):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         bio: str | None = Field(index=True, retired=True)
         code: Annotated[str | None, FerroField(unique=True, retired=True)] = None
-        team: Annotated[RetiredTeam | None, ForeignKey(retired=True)] = None
+        team_id: Annotated[
+            int | None, FerroField(foreign_key=RetiredTeam, retired=True)
+        ] = None
 
     await connect(db_url, auto_migrate=True)
 

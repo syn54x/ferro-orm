@@ -8,7 +8,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query.wire import compile_query
 
 pytestmark = pytest.mark.sqlite_only
@@ -72,7 +72,8 @@ def test_compile_query_nulls_with_traversal_path():
 
     class WirePost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated[WireAuthor, ForeignKey(related_name="wire_posts")]
+        author_id: Annotated[int, FerroField(foreign_key=WireAuthor)]
+        author: Relation[WireAuthor] = Forward("author_id")
 
     query = WirePost.select().order_by(lambda p: p.author.name, "asc", nulls="first")
     payload = compile_query(query, "fetch").payload.to_ir_dict()

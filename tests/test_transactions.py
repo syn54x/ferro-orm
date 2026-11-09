@@ -3,12 +3,12 @@ import sqlite3
 from contextlib import closing
 from typing import Annotated
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     connect,
     engines,
     evict_instance,
@@ -52,22 +52,25 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
     class TxRelationParent(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
-        children: Relation[list["TxRelationChild"]] = BackRef()
+        children: Relation[list["TxRelationChild"]] = Reverse("parent_id")
 
     class TxRelationChild(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
-        parent: Annotated[TxRelationParent, ForeignKey(related_name="children")]
+        parent_id: Annotated[int, FerroField(foreign_key=TxRelationParent)]
+        parent: Relation[TxRelationParent] = Forward("parent_id")
 
     class TxRelationCourse(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
-        students: Relation[list["TxRelationStudent"]] = BackRef()
+        students: Relation[list["TxRelationStudent"]] = Reverse("courses")
 
     class TxRelationStudent(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
-        courses: Relation[list[TxRelationCourse]] = ManyToMany(related_name="students")
+        courses: Relation[list[TxRelationCourse]] = ManyToMany(
+            through="txrelationstudent_courses"
+        )
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():

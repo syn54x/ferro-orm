@@ -1126,12 +1126,12 @@ def test_a_foreign_key_across_two_databases_is_refused_naming_both(
         f"{pkg}.b",
         """
         from typing import Annotated
-        from ferro import BackRef, FerroField, Model
+        from ferro import FerroField, Model, Reverse
         from ferro.query import Relation
 
         class SettingsOwner(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            gizmos: Relation[list["SettingsGizmo"]] = BackRef()
+            gizmos: Relation[list["SettingsGizmo"]] = Reverse("owner_id")
         """,
     )
     _package(
@@ -1140,12 +1140,14 @@ def test_a_foreign_key_across_two_databases_is_refused_naming_both(
         f"""
         from typing import Annotated
 
-        from ferro import ForeignKey, Model
+        from ferro import FerroField, Forward, Model
+        from ferro.query import Relation
         from {pkg}.b import SettingsOwner
 
         class SettingsGizmo(Model):
             id: int | None = None
-            owner: Annotated[SettingsOwner, ForeignKey(related_name="gizmos")]
+            owner_id: Annotated[int, FerroField(foreign_key=SettingsOwner)]
+            owner: Relation[SettingsOwner] = Forward("owner_id")
         """,
     )
     _two_databases(project, pkg)
@@ -1215,12 +1217,12 @@ def test_a_forward_reference_foreign_key_across_two_databases_is_refused_naming_
         project,
         f"{pkg}.b",
         """
-        from ferro import BackRef, Model
+        from ferro import Model, Reverse
         from ferro.query import Relation
 
         class SettingsCustomer(Model):
             id: int | None = None
-            invoices: Relation[list["SettingsInvoice"]] = BackRef()
+            invoices: Relation[list["SettingsInvoice"]] = Reverse("customer_id")
         """,
     )
     _package(
@@ -1229,11 +1231,13 @@ def test_a_forward_reference_foreign_key_across_two_databases_is_refused_naming_
         """
         from typing import Annotated
 
-        from ferro import ForeignKey, Model
+        from ferro import FerroField, Forward, Model
+        from ferro.query import Relation
 
         class SettingsInvoice(Model):
             id: int | None = None
-            customer: Annotated["SettingsCustomer", ForeignKey(related_name="invoices")]
+            customer_id: Annotated[int, FerroField(foreign_key="SettingsCustomer")]
+            customer: Relation["SettingsCustomer"] = Forward("customer_id")
         """,
     )
     _two_databases(project, pkg)
@@ -1262,11 +1266,13 @@ def test_a_forward_reference_no_configured_module_defines_is_refused(
         """
         from typing import Annotated
 
-        from ferro import ForeignKey, Model
+        from ferro import FerroField, Forward, Model
+        from ferro.query import Relation
 
         class SettingsOrphanRef(Model):
             id: int | None = None
-            ghost: Annotated["SettingsGhost", ForeignKey(related_name="refs")]
+            ghost_id: Annotated[int, FerroField(foreign_key="SettingsGhost")]
+            ghost: Relation["SettingsGhost"] = Forward("ghost_id")
         """,
     )
     _package(project, f"{pkg}.b", "")
