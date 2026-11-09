@@ -10,8 +10,10 @@ from pathlib import Path
 
 from tests._docs_checks import (
     Violation,
+    awaited_relations,
     lambda_param_violations,
     query_methods_taking_callables,
+    retired_terms,
     retired_vocabulary,
     unfailing_error_checks,
 )
@@ -455,4 +457,167 @@ def test_a_comment_in_code_is_prose(tmp_path: Path) -> None:
     assert _retired_messages(module) == [
         (5, '"populated relation" is retired; write "loaded relation"'),
         (8, BACKREF_RETIRED),
+    ]
+
+
+# -- awaiting a relation ------------------------------------------------------------
+
+AWAITED_RELATION = (
+    "awaiting a relation raises TypeError; write "
+    '"await <instance>.<relation>.load()" or include() it in the query'
+)
+
+
+def _awaited_messages(path: Path) -> list[tuple[int, str]]:
+    return [
+        (violation.line, violation.message) for violation in awaited_relations(path)
+    ]
+
+
+def test_a_docstring_saying_awaiting_a_relation_loads_it_fails(
+    tmp_path: Path,
+) -> None:
+    module = _write(
+        tmp_path,
+        "module.py",
+        '''
+        def Forward(column):
+            """Declare a forward relation.
+
+            The relation reads the row the column points at: awaiting it loads
+            the target, and a query's include() fills it in.
+            """
+        ''',
+    )
+    assert _awaited_messages(module) == [(4, AWAITED_RELATION)]
+
+
+def test_a_page_saying_awaiting_a_relation_loads_it_fails(tmp_path: Path) -> None:
+    page = _write(
+        tmp_path,
+        "page.md",
+        """
+        # Page
+
+        Awaiting the foreign key (`post.author`) loads the related `Author`.
+        """,
+    )
+    assert _awaited_messages(page) == [(3, AWAITED_RELATION)]
+
+
+def test_awaiting_a_relation_in_a_docstring_fence_fails(tmp_path: Path) -> None:
+    module = _write(
+        tmp_path,
+        "module.py",
+        '''
+        def helper():
+            """Return the shelf.
+
+            ```python
+            shelf = await book.shelf
+            ```
+            """
+        ''',
+    )
+    assert _awaited_messages(module) == [(5, AWAITED_RELATION)]
+
+
+def test_loading_a_relation_or_awaiting_a_query_passes(tmp_path: Path) -> None:
+    module = _write(
+        tmp_path,
+        "module.py",
+        '''
+        def helper():
+            """Return the shelf and its books.
+
+            On an instance, the field is a query: await `.all()` to load them.
+            `await book.shelf` raises TypeError; the fix is `await book.shelf.load()`.
+
+            ```python
+            shelf = await book.shelf.load()
+            books = await shelf.books.all()
+            ```
+            """
+        ''',
+    )
+    assert _awaited_messages(module) == []
+
+
+# -- terms the glossary avoids ------------------------------------------------------
+
+
+def test_a_term_the_glossary_avoids_fails_naming_its_entry(tmp_path: Path) -> None:
+    page = _write(
+        tmp_path,
+        "page.md",
+        """
+        # Page
+
+        The guide covers foreign keys, back-references and many-to-many.
+        Ferro supports forward-FK loading with `include()`.
+        """,
+    )
+    assert _retired_messages(page) == [
+        (3, '"back-reference" is retired; write "reverse relation"'),
+        (4, '"forward-FK" is retired; write "forward relation"'),
+    ]
+
+
+def test_every_avoid_term_of_the_relation_entries_is_retired() -> None:
+    glossary = (REPO_ROOT / "GLOSSARY.md").read_text(encoding="utf-8")
+    for entry in ("Foreign-key column", "Forward relation", "Reverse relation"):
+        avoid = glossary.split(f"**{entry}**:", 1)[1].split("_Avoid_: ", 1)[1]
+        for term in avoid.splitlines()[0].split(", "):
+            assert term.isidentifier() or term.lower() in retired_terms(), term
+    assert retired_terms()["populated relation"] == "loaded relation"
+
+
+def test_a_python_name_the_glossary_avoids_is_not_vocabulary(tmp_path: Path) -> None:
+    page = _write(
+        tmp_path,
+        "page.md",
+        """
+        # Page
+
+        Ferro has no `select_related`; `Field` refuses `related_name` and
+        `import ferro.BackRef` raises ImportError.
+        """,
+    )
+    assert _retired_messages(page) == []
+
+
+def test_an_avoid_line_is_not_a_use_of_its_terms(tmp_path: Path) -> None:
+    glossary = _write(
+        tmp_path,
+        "GLOSSARY.md",
+        """
+        **Reverse relation**:
+        A query over the rows of another model.
+        _Avoid_: BackRef, back-reference, has-many, related_name
+        """,
+    )
+    assert _retired_messages(glossary) == []
+
+
+def test_dated_records_are_exempt_and_the_epics_adrs_are_not(
+    tmp_path: Path,
+) -> None:
+    text = "# Record\n\nAn unpopulated relation reads as an awaitable.\n"
+    for record in (
+        "docs/adr/0008-populated-relations-include.md",
+        "docs/plans/2026-plan.md",
+        "docs/brainstorms/idea.md",
+        "docs/research/note.md",
+        "docs/rfc/0001-relations.md",
+    ):
+        (tmp_path / record).parent.mkdir(parents=True, exist_ok=True)
+        assert _retired_messages(_write(tmp_path, record, text)) == [], record
+    (tmp_path / "docs/adr").mkdir(parents=True, exist_ok=True)
+    adr = _write(
+        tmp_path,
+        "docs/adr/0063-an-instance-is-complete.md",
+        text + "\nUntil now `ForeignKey(related_name=...)` added the column.\n",
+    )
+    assert _retired_messages(adr) == [
+        (3, '"populated relation" is retired; write "loaded relation"')
     ]

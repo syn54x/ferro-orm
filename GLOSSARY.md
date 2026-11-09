@@ -58,7 +58,7 @@ _Avoid_: shadow column, shadow FK, `*_id` column, injected column, reference col
 
 **Forward relation**:
 A typed view over one foreign-key column of its own model, declared `team: Relation[Team] = Forward("team_id")`. It reads as the related instance: complete when an include or `.load()` filled it, otherwise holding only its key (see *Complete-instance invariant*).
-_Avoid_: Belongs-to, parent link, FK field
+_Avoid_: Belongs-to, parent link, FK field, forward-FK, forward foreign key
 
 **Reverse relation**:
 A query over the rows of another model whose foreign-key column points at this instance, declared `players: Relation[list["Player"]] = Reverse("team_id")`. It is always a query, at every cardinality; a one-to-one's reverse side reads with `.first()`.
