@@ -58,11 +58,15 @@ def _join_column(table: str) -> str:
 
 
 def _join_table_rename_hints(
-    source_model: type, target_model: type, field_name: str, through: str | None
+    source_model: type, target_model: type, field_name: str, relation: Any
 ) -> RenameHints:
-    """What a join table and its columns were called before its source or
-    target model's declared table rename (ADR-0032), named by the same two
-    functions that name them now, so a table rename drags its join table."""
+    """What a join table and its columns were called before (ADR-0032).
+
+    The table's previous name is the relation's ``renamed_from``; a join
+    table the old form derived follows its source model's table rename. Its
+    columns follow their models' table renames, named by the same function
+    that names them now.
+    """
     source_prev = getattr(source_model, "__ferro_renamed_from__", None)
     target_prev = getattr(target_model, "__ferro_renamed_from__", None)
     columns: dict[str, str] = {}
@@ -70,11 +74,9 @@ def _join_table_rename_hints(
         columns[_join_column(source_model.__ferro_table__)] = _join_column(source_prev)
     if target_prev is not None:
         columns[_join_column(target_model.__ferro_table__)] = _join_column(target_prev)
-    table = (
-        _default_join_table(source_prev, field_name)
-        if source_prev is not None and not through
-        else None
-    )
+    table = relation.renamed_from
+    if table is None and source_prev is not None and not relation.through:
+        table = _default_join_table(source_prev, field_name)
     return RenameHints(table=table, columns=columns)
 
 
@@ -1467,7 +1469,7 @@ def resolve_relationships():
             source_col = _join_column(source_table)
             target_col = _join_column(target_table)
             join_hints = _join_table_rename_hints(
-                source_model, target_model, field_name, rel.through
+                source_model, target_model, field_name, rel
             )
 
             # Inject M2M descriptors into BOTH sides

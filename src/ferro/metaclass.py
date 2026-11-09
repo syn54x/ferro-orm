@@ -592,6 +592,7 @@ def _declared_many_to_many(
         reverse_index=reverse_index,
         refusal=reason,
         bound=None if scope is None else scope | frozenset(namespace),
+        renamed_from=options.get("renamed_from"),
     )
     relation.to = target
     return relation

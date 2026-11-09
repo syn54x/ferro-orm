@@ -918,9 +918,9 @@ if TYPE_CHECKING:
         *,
         through: str | None = None,
         related_name: str | None = None,
+        renamed_from: str | None = None,
         reverse_index: bool = True,
         init: Literal[False] = False,
-        **kwargs: Any,
     ) -> Any: ...
 
     def Forward(column: str, *, init: Literal[False] = False) -> Any: ...
@@ -933,8 +933,9 @@ else:
         *,
         through: str | None = None,
         related_name: str | None = None,
+        renamed_from: str | None = None,
         reverse_index: bool = True,
-        **kwargs: Any,
+        **unknown: Any,
     ) -> Any:
         """Declare a many-to-many relation, assigned as the field's default.
 
@@ -948,13 +949,20 @@ else:
         Args:
             through: The join table's name. Required: a model with no `through=`
                 is refused when its class is defined, naming the table to write.
+            renamed_from: The join table's previous name, so that
+                `ferro migrate new` and auto-migrate rename the table and keep
+                its rows. See [Renaming a join
+                table](../guide/schema/renames-and-retirements.md#renaming-a-join-table).
             reverse_index: Add an index on the join table's `(target, source)`
                 columns for queries from the other side. Defaults to `True`; turn
                 it off for a write-heavy join table.
-            **kwargs: Other keyword arguments of [`Field`][ferro.Field].
 
         Returns:
             The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: Any other keyword, such as a column option: a
+                many-to-many adds no column.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -983,7 +991,9 @@ else:
             ]
             ```
         """
-        return _many_to_many_field(through, related_name, reverse_index, kwargs)
+        return _many_to_many_field(
+            through, related_name, renamed_from, reverse_index, unknown
+        )
 
     def Forward(column: str) -> Any:
         """Declare a forward relation over a foreign-key column of this model.
@@ -1083,25 +1093,37 @@ else:
 def _many_to_many_field(
     through: str | None,
     related_name: str | None,
+    renamed_from: str | None,
     reverse_index: bool,
-    kwargs: dict[str, Any],
+    unknown: dict[str, Any],
 ) -> Any:
-    """The `FieldInfo` a `ManyToMany(...)` declares, refusing `init` as a relation."""
-    if "init" in kwargs:
-        raise TypeError(
-            "ManyToMany() got an unexpected keyword argument 'init': a relation "
-            "is never a constructor parameter, so drop init= from the declaration"
+    """The `FieldInfo` a `ManyToMany(...)` declares, refusing every option it
+    would not use."""
+    for name in unknown:
+        reason = (
+            "a relation is never a constructor parameter, so drop init= from "
+            "the declaration"
+            if name == "init"
+            else "a many-to-many adds no column, so it takes no column or field "
+            "option"
         )
-    options: dict[str, Any] = (
-        {} if related_name is None else {"related_name": related_name}
-    )
-    return Field(
-        many_to_many=True,
-        through=through,
-        reverse_index=reverse_index,
-        **options,
-        **kwargs,
-    )
+        raise TypeError(
+            f"ManyToMany() got an unexpected keyword argument '{name}': {reason}. "
+            "A many-to-many takes through=, renamed_from= and reverse_index="
+        )
+    _validate_renamed_from(renamed_from, "ManyToMany()")
+    options: dict[str, Any] = {
+        "many_to_many": True,
+        "through": through,
+        "reverse_index": reverse_index,
+    }
+    if related_name is not None:
+        options["related_name"] = related_name
+    if renamed_from is not None:
+        options["renamed_from"] = renamed_from
+    info = PydanticField()
+    info.metadata.append(_RelationOptions(options))
+    return info
 
 
 def _relation_field(spelling: str, kind: str, name: Any) -> Any:
