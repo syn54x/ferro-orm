@@ -981,13 +981,11 @@ def _refuse_unnamed_forward(
     )
 
 
-def _refuse_unnamed_reverse(
-    model_cls: Any, name: str, relation: ReverseRelation
-) -> None:
-    """Raise a bare ``Relation`` refusal the class body could not name a model for."""
-    model = model_cls.__name__
-    column = relation.attribute
-    pointing_back = [
+def _models_pointing_back(model_cls: Any, column: str) -> list[Any]:
+    """Every registered model whose ``column`` points at ``model_cls``: a
+    foreign-key column to it, or a many-to-many linking it. A target written
+    by a name nothing answers yet points nowhere until it resolves."""
+    return [
         other
         for other in REGISTRY.models().values()
         if (
@@ -998,6 +996,20 @@ def _refuse_unnamed_reverse(
         )
         or column in _many_to_many_to(other, model_cls)
     ]
+
+
+def _refuse_unnamed_reverse(
+    model_cls: Any, name: str, relation: ReverseRelation, *, final: bool
+) -> None:
+    """Raise a bare ``Relation`` refusal, naming each model pointing back.
+
+    Before relations resolve (``final=False``) it raises only once a model
+    points back, and otherwise waits for resolution to name one or say none
+    does.
+    """
+    model = model_cls.__name__
+    column = relation.attribute
+    pointing_back = _models_pointing_back(model_cls, column)
     if pointing_back:
         # One way to fix it per model whose column points back.
         names = [other.__name__ for other in pointing_back]
@@ -1026,6 +1038,8 @@ def _refuse_unnamed_reverse(
                 for other in names
             ],
         )
+    if not final:
+        return
     # No edit can be written: no model is the one the relation reads.
     key = key_column_line(None, column, model_cls, nullable=False)
     raise DeclarationRefusal(
@@ -1173,8 +1187,7 @@ def check_reverse_relation(
             `foreign_key`, or it points at another model.
     """
     if relation.refusal is not None:
-        if final:
-            _refuse_unnamed_reverse(model_cls, name, relation)
+        _refuse_unnamed_reverse(model_cls, name, relation, final=final)
         return
     other = _resolve_target(relation.to, final=final)
     if other is None:
@@ -1378,7 +1391,10 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
     for name, relation in model_cls.__ferro_relations__.items():
         if isinstance(relation, ForwardRelation) and isinstance(relation.to, type):
             check_forward_relation(model_cls, name, relation, final=False)
-        elif isinstance(relation, ReverseRelation) and isinstance(relation.to, type):
+        elif isinstance(relation, ReverseRelation) and (
+            isinstance(relation.to, type) or relation.refusal is not None
+        ):
+            # A bare one is refused now when a model already points back.
             check_reverse_relation(model_cls, name, relation, final=False)
 
 

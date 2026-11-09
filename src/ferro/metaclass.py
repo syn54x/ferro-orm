@@ -368,32 +368,6 @@ def _declared_target(
     return None
 
 
-def _model_pointing_back(model: str, column: str) -> str | None:
-    """The one registered model whose ``column``, a foreign-key column or a
-    many-to-many, points at ``model``, by name."""
-    found = [
-        other.__name__
-        for other in REGISTRY.models().values()
-        if (
-            (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
-            is not None
-            and meta.foreign_key is not None
-            and _foreign_key_name(meta.foreign_key) == model
-        )
-        or (
-            # A many-to-many never links its own model.
-            other.__name__ != model
-            and isinstance(
-                linked := (other.__dict__.get("__ferro_relations__") or {}).get(column),
-                ManyToManyRelation,
-            )
-            and linked.to is not None
-            and _foreign_key_name(linked.to) == model
-        )
-    ]
-    return found[0] if len(found) == 1 else None
-
-
 _NOT_RELATION = "a relation is annotated Relation[...]"
 _IN_METADATA = "a relation is an assignment, not Annotated metadata"
 _NONE_OUTSIDE = "a relation is annotated Relation[...], with no | None around it"
@@ -416,9 +390,10 @@ def _declared_relation(
 
     A declaration that is not ``Relation[...]`` assigned the marker is
     refused with the line to write. When the class body cannot name the
-    target that line needs (a bare ``Relation`` whose target is declared
-    later), the record carries the refusal and relation resolution raises
-    it with the target named.
+    target that line needs (a bare ``Relation``: a forward one over a column
+    whose target is declared later, or a reverse one, whose model only the
+    models pointing back name), the record carries the refusal, raised with
+    the target named once the class exists or relations resolve.
 
     Args:
         model: The model's name.
@@ -462,9 +437,6 @@ def _declared_relation(
             named = (annotation_text(target), nullable or wrapped)
         elif not _is_bare_relation(core):
             named = (annotation_text(core), wrapped)
-        elif spelling == "Reverse":
-            pointing_back = _model_pointing_back(model, column)
-            named = (pointing_back, False) if pointing_back else None
         else:
             named = None
         if named is not None:

@@ -750,8 +750,8 @@ def test_a_bare_reverse_two_models_point_back_to_is_refused_with_the_class():
     assert str(refusal.value) == (
         "Team.players: a relation is annotated Relation[...], and Player and "
         "Coach each declare team_id pointing at Team. Write: "
-        'players: Relation[list["Player"]] = Reverse("team_id") or '
-        'players: Relation[list["Coach"]] = Reverse("team_id")'
+        'players: Relation[list[Player]] = Reverse("team_id") or '
+        'players: Relation[list[Coach]] = Reverse("team_id")'
     )
 
 
