@@ -1137,16 +1137,24 @@ class ModelMetaclass(type(BaseModel)):
         """Return the relation keywords a ``Field()`` left in its metadata.
 
         The payload also carries ``retired`` when the field's ``FerroField``
-        sets it, since a retired reverse relation is refused.
+        sets it, since a retired reverse relation is refused, and a
+        many-to-many's ``renamed_from``, the join table's previous name.
         """
         if not isinstance(obj, FieldInfo):
             return {}
         payload: dict[str, Any] = {}
+        renamed_from = None
         for metadata in obj.metadata:
             if isinstance(metadata, _RelationOptions):
                 payload.update(metadata.options)
-            elif isinstance(metadata, FerroField) and metadata.retired:
-                payload["retired"] = True
+            elif isinstance(metadata, FerroField):
+                if metadata.retired:
+                    payload["retired"] = True
+                renamed_from = metadata.renamed_from
+        # `Field(many_to_many=True, renamed_from=...)` names the join table's
+        # previous name, as `ManyToMany(renamed_from=...)` does.
+        if payload.get("many_to_many") is True and renamed_from is not None:
+            payload.setdefault("renamed_from", renamed_from)
         return payload
 
     @staticmethod

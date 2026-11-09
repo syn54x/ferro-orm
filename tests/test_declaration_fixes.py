@@ -558,6 +558,16 @@ def _cases(storage: str) -> dict[str, dict]:
                 f'ManyToMany(through="player_links", renamed_from="{previous}")'
             ],
         )
+    cases["related_name many-to-many by Field renamed from a join table"] = _case(
+        "many-to-many",
+        "links",
+        local=True,
+        Tag=['linked: Relation[list["Player"]] = BackRef()'],
+        Player=[
+            'links: Relation[list["Tag"]] = Field(many_to_many=True, '
+            'related_name="linked", renamed_from="old_links")'
+        ],
+    )
     cases["related_name many-to-many renamed from a join table"] = _case(
         "many-to-many",
         "links",
