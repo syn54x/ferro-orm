@@ -103,7 +103,7 @@ class ForeignKeyRef:
 
 @dataclass(frozen=True, slots=True)
 class RelationSpec:
-    """One declared forward foreign-key relation's traversal facts.
+    """One declared forward relation's traversal facts.
 
     Built alongside `ColumnSpec` at the same compile choke point
     (`compile_model_schema_ir`) and exposed as
@@ -606,7 +606,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 def build_relation_specs(
     model_cls: type[Any], columns: dict[str, ColumnSpec]
 ) -> dict[str, RelationSpec]:
-    """Build one `RelationSpec` per declared forward foreign-key relation.
+    """Build one `RelationSpec` per declared forward relation.
 
     Reads the `ForwardRelation` entries of ``__ferro_relations__`` and pairs
     each with the already-compiled ColumnSpec of the key column it names —

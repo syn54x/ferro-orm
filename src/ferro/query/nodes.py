@@ -1165,7 +1165,7 @@ class QueryProxy(Generic[TModel]):
     Reading a field gives a `FieldProxy` for that column, so
     `lambda post: post.views > 1000` builds a condition. A misspelled name
     raises `AttributeError` with the closest match, before any SQL runs. A
-    foreign key relation gives a stand-in for the related row
+    forward relation gives a stand-in for the related row
     (`post.author.name`), and a reverse or many-to-many relation offers
     `exists()` (`author.posts.exists()`). See
     [Typed query predicates](../concepts/query-typing.md).
@@ -1191,7 +1191,7 @@ class QueryProxy(Generic[TModel]):
         self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Read a field: a column, a foreign key relation or a reverse relation.
+        """Read a field: a column, a forward relation or a reverse relation.
 
         Args:
             name: The field name.
@@ -1225,7 +1225,7 @@ class QueryProxy(Generic[TModel]):
 
 
 class RelationProxy:
-    """The stand-in for a related row, reached through a foreign key relation.
+    """The stand-in for a related row, reached through a forward relation.
 
     `post.author` in a query lambda gives one. Reading a field from it
     reaches into the related model (`post.author.name`) and joins that

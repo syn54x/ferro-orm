@@ -948,9 +948,11 @@ else:
 
         Assign it to a field annotated `Relation[Target]`, or
         `Relation[Target | None]` when the column allows `None`. On an
-        instance the relation reads as the related instance: unloaded, holding
-        only its key, until a query's `include()` or the instance's `.load()`
-        fills it. Assigning an instance to it sets the column. It adds no
+        instance the relation reads as the instance the column points at: the
+        complete one an `include()` or `.load()` filled, or the session's
+        instance for that key, or an unloaded instance holding only the key,
+        which `.load()` fills in place. Assigning an instance to it sets the
+        column. It adds no
         column; the foreign-key column is the field declared with
         `Field(foreign_key=Target)`. See
         [Loaded relations](../guide/relationships.md#loaded-relations).

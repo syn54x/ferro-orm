@@ -93,7 +93,7 @@ Load a post's author, then the author's published posts:
 --8<-- "docs/examples/quickstart.py:relationships"
 ```
 
-`post.author` is a forward relation. Until something loads it, it is an unloaded `Author` that holds only its key; `.load()` fills it in place and returns it. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
+`post.author` is a forward relation: it reads as the `Author` its `author_id` points at. That is the complete instance an `include()` or `.load()` filled, or the session's instance for that key (here `alice`, created in this session), or else an unloaded `Author` holding only the key, which `.load()` fills in place and returns. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
 
 ## Update and delete
 

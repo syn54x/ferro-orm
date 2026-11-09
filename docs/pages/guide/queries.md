@@ -997,7 +997,7 @@ The `category` table joins itself under the alias `j1_parent`.
 
 ### Traversing from a many-to-many
 
-A many-to-many relation on an instance is a query, and its lambda can follow foreign keys on the other model:
+A many-to-many relation on an instance is a query, and its lambda can follow forward relations on the other model:
 
 ```python
 --8<-- "docs/examples/traversal.py:m2m-query"
@@ -1228,7 +1228,7 @@ One subquery holding both conditions asks for one line that matches both; two su
 
 ### Traversal inside the test, and nesting
 
-The inner lambda can follow foreign keys on the related model. Those joins run inside the `EXISTS` subquery, with the same [inner-join rule](#join-type-for-traversed-relations), so they filter the related rows and never the outer ones:
+The inner lambda can follow forward relations on the related model. Those joins run inside the `EXISTS` subquery, with the same [inner-join rule](#join-type-for-traversed-relations), so they filter the related rows and never the outer ones:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:traversal-inside"

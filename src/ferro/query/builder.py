@@ -740,7 +740,7 @@ class Query(Generic[T]):
         combined with `AND`. A field name the model does not declare raises
         `AttributeError` with the closest match, before any SQL runs.
 
-        A field that is a foreign key relation reaches into the related
+        A field that is a forward relation reaches into the related
         model (`lambda post: post.author.name == "Ada Lovelace"`), and each
         relation path adds one `INNER JOIN`. See
         [Querying across relationships](../guide/queries.md#querying-across-relationships).
@@ -960,7 +960,7 @@ class Query(Generic[T]):
     def join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
         """Join a related model with `INNER JOIN`, keeping only rows that have it.
 
-        The lambda names a foreign key relation, not a column on it. On a
+        The lambda names a forward relation, not a column on it. On a
         nullable relation, a `join()` with no condition drops the rows whose
         relation is empty. A `where()` or `order_by()` that reaches into the
         same relation shares the join. See
@@ -975,7 +975,7 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: `selector` is not callable, or names a column or a
-                reverse relation instead of a foreign key relation.
+                reverse relation instead of a forward relation.
             ValueError: A [`left_join`][ferro.query.builder.Query.left_join]
                 already marked part of the path.
 
@@ -1006,7 +1006,7 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: `selector` is not callable, or names a column or a
-                reverse relation instead of a foreign key relation.
+                reverse relation instead of a forward relation.
             ValueError: A [`join`][ferro.query.builder.Query.join] already
                 marked part of the path.
 
@@ -1033,7 +1033,7 @@ class Query(Generic[T]):
         [Loading relations with include()](../guide/queries.md#loading-relations-with-include).
 
         Args:
-            selector: A lambda returning a foreign key relation, such as
+            selector: A lambda returning a forward relation, such as
                 `lambda post: post.author`.
 
         Returns:
@@ -2161,9 +2161,11 @@ class Relation(Query[T]):
 
     A forward relation ([`Forward`][ferro.Forward]) is annotated
     `Relation[Target]`, or `Relation[Target | None]` when its foreign-key
-    column allows `None`. On an instance it reads as the related instance,
-    unloaded until `include()` or `.load()` fills it, and assigning an
-    instance to it sets the column.
+    column allows `None`. On an instance it reads as the instance its column
+    points at: the complete one an `include()` or `.load()` filled, or the
+    session's instance for that key, or an unloaded instance holding only the
+    key, which `.load()` fills in place. Assigning an instance to it sets the
+    column.
 
     A reverse ([`Reverse`][ferro.Reverse]) or many-to-many
     ([`ManyToMany`][ferro.ManyToMany]) relation is annotated
