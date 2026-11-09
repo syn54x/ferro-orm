@@ -351,7 +351,7 @@ def test_single_column_composite_unique_raises_with_guidance():
 
 
 def test_m2m_reverse_index_default_on():
-    """D1: default ManyToMany(...) -> join table gets non-unique reverse index."""
+    """D1: default ManyToMany(through=...) -> join table gets non-unique reverse index."""
 
     class Actor1(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -371,7 +371,7 @@ def test_m2m_reverse_index_default_on():
 
 
 def test_m2m_reverse_index_opt_out():
-    """D2: ManyToMany(reverse_index=False) -> no idx_* on join table."""
+    """D2: ManyToMany(through=..., reverse_index=False) -> no idx_* on join table."""
 
     class Actor2(Model):
         id: int | None = Field(default=None, primary_key=True)
