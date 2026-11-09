@@ -137,6 +137,25 @@ def resolve_operation_scope(
     return RouteHandle(connection_name=effective_using, session_id=session_id)
 
 
+def resolve_relation_read_scope(*, using: str | None) -> RouteHandle:
+    """Resolve the route a forward relation's first read builds its instance on.
+
+    The operation's route, except for a parent from another connection than
+    the ambient session's: its instance is built on that connection outside
+    the session, so the read never raises and `.load()` reports the conflict.
+
+    Args:
+        using: The parent's connection, or `None`.
+
+    Returns:
+        The route the instance is built on.
+    """
+    session = _CURRENT_SESSION.get()
+    if using is not None and session is not None and using != session.connection_name:
+        return RouteHandle(connection_name=using)
+    return resolve_operation_scope(using=using, session=None)
+
+
 def resolve_compile_connection_name(
     *,
     using: str | None,

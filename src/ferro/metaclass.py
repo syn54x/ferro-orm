@@ -809,6 +809,24 @@ def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> 
     self.__dict__[name] = value
 
 
+def prune_cached_relations(instance: BaseModel) -> None:
+    """Drop each forward relation `instance` caches that its key no longer points at.
+
+    The refresh rule of ADR-0008, for a key changed in memory. A relation
+    nothing cached has nothing to check, so only a cached one needs its
+    target resolved.
+    """
+    relations = type(instance).__ferro_relations__
+    cached = {
+        name
+        for name in instance.__dict__.keys() & relations.keys()
+        if isinstance(relations[name], ForwardRelation)
+    }
+    if cached:
+        _resolved_relation_specs(type(instance), cached)
+        prune_stale_relations(instance)
+
+
 def _relation_setattr(key_columns: dict[str, str], inherited: Any):
     """Assign a forward relation through its key column; drop a stale one when the key changes.
 
@@ -824,8 +842,7 @@ def _relation_setattr(key_columns: dict[str, str], inherited: Any):
             return
         inherited(self, name, value)
         if name in keys:
-            _resolved_relation_specs(type(self), key_columns.keys())
-            prune_stale_relations(self)
+            prune_cached_relations(self)
 
     return __setattr__
 

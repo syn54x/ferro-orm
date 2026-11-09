@@ -7,8 +7,9 @@ Player(handle="ferris", team=rustaceans)
 # team_id=team.id, or set player.team = team on the instance
 ```
 
-An unknown keyword is Pydantic's `extra_forbidden`, and `where().update()`
-names the foreign-key column too. Each test declares its own models in an
+A reverse or many-to-many relation keyword is refused naming its fix, an
+unknown keyword is Pydantic's `extra_forbidden`, and `where().update()` names
+the foreign-key column too. Each test declares its own models in an
 empty registry, so the names in the refusals read as a user's would.
 """
 
@@ -21,6 +22,7 @@ import ferro
 from ferro import (
     Field,
     Forward,
+    ManyToMany,
     Model,
     Relation,
     Reverse,
@@ -249,15 +251,46 @@ def test_an_unknown_keyword_is_refused():
     ]
 
 
-def test_a_reverse_relation_keyword_is_an_unknown_keyword():
+def test_a_reverse_relation_keyword_names_the_child_key_column():
     m = _declare()
 
-    with pytest.raises(ValidationError) as refused:
+    with pytest.raises(TypeError) as refused:
         m.Team(name="crabs", players=[])
 
-    assert ("extra_forbidden", ("players",)) in [
-        (error["type"], error["loc"]) for error in refused.value.errors()
-    ]
+    assert str(refused.value) == (
+        "Team.players is a relation. Save the team, then set "
+        "player.team_id = team.id for each player in players"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_many_to_many_keyword_names_add_and_its_fix_links_the_rows(db_url):
+    class Tag(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+
+    class Article(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        tags = [await Tag.create(label="history")]
+        for build in (
+            lambda: Article.create(title="Babbage", tags=tags),
+            lambda: Article.get_or_create(title="Babbage", tags=tags),
+        ):
+            with pytest.raises(TypeError) as refused:
+                await build()
+            assert str(refused.value) == (
+                "Article.tags is a relation. Save the article, then "
+                "await article.tags.add(*tags)"
+            )
+
+        article = await Article.create(title="Babbage")
+        await article.tags.add(*tags)
+        assert [tag.label for tag in await article.tags.all()] == ["history"]
 
 
 @pytest.mark.asyncio

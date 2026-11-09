@@ -1,5 +1,6 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -19,7 +20,8 @@ if TYPE_CHECKING:
     from .rowsecurity import RowSecurity
     from .session import Session
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler
+from pydantic_core import CoreSchema
 
 from ._bind_payload import (
     apply_save_exclude,
@@ -44,9 +46,15 @@ from ._core import (
 from ._core import (
     evict_instance as _core_evict_instance,
 )
-from .base import ForwardRelation
-from .exceptions import InstanceNotLoaded, ModelDoesNotExist
-from .metaclass import ModelMetaclass, _resolved_relation_specs, generated_refusal
+from . import _unloaded
+from .base import ManyToManyRelation, ReverseRelation
+from .exceptions import ModelDoesNotExist
+from .metaclass import (
+    ModelMetaclass,
+    _resolved_relation_specs,
+    generated_refusal,
+    prune_cached_relations,
+)
 from .query import Predicate, Query
 from .state import (
     _CURRENT_TRANSACTION,
@@ -60,9 +68,6 @@ from .state import (
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
-#: Marks an unloaded instance (ADR-0063); set by the Rust hydrator, cleared
-#: when a fetched row fills the instance. Holds ``(model, path, found_no_row)``.
-_FERRO_UNLOADED_ATTR = "__ferro_unloaded"
 
 
 def _is_persisted(instance: object) -> bool:
@@ -79,57 +84,47 @@ def _set_persisted(instance: object, value: bool) -> None:
 
 
 def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
-    """Refuse a forward relation among constructor keywords `names`, naming its key column.
+    """Refuse a relation among constructor keywords `names`, naming its fix.
 
     The constructor takes the foreign-key column only: `team=` never fills
-    or overrides `team_id`.
+    or overrides `team_id`, and a reverse or many-to-many relation is
+    written after the row exists.
     """
-    forward = {
-        name
-        for name, declared in model_cls.__ferro_relations__.items()
-        if isinstance(declared, ForwardRelation)
-    }
-    passed = forward.intersection(names)
-    if not passed:
+    relations = model_cls.__ferro_relations__
+    if relations.keys().isdisjoint(names):
         return
     from .relations import _snake
 
-    name = min(passed)
-    spec = _resolved_relation_specs(model_cls, forward)[name]
+    name = min(relations.keys() & set(names))
+    declared = relations[name]
+    model = model_cls.__name__
+    instance = _snake(model)
+    if isinstance(declared, ReverseRelation):
+        to = declared.to
+        # A name until relation resolution; `None` when the annotation names no model.
+        child = (to if isinstance(to, str) else getattr(to, "__name__", "row")).rsplit(
+            ".", 1
+        )[-1]
+        raise TypeError(
+            f"{model}.{name} is a relation. Save the {instance}, then set "
+            f"{_snake(child)}.{declared.attribute} = {instance}."
+            f"{model_cls.__ferro_pk__} for each {_snake(child)} in {name}"
+        )
+    if isinstance(declared, ManyToManyRelation):
+        raise TypeError(
+            f"{model}.{name} is a relation. Save the {instance}, then "
+            f"await {instance}.{name}.add(*{name})"
+        )
+    spec = _resolved_relation_specs(model_cls, {name})[name]
     refusal = (
-        f"{model_cls.__name__}.{name} is a relation. Pass the foreign-key "
+        f"{model}.{name} is a relation. Pass the foreign-key "
         f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}"
     )
     # Assigning on the instance is a fix only when the constructor can leave
     # the key out.
     if not model_cls.model_fields[spec.fk_column].is_required():
-        refusal += (
-            f", or set {_snake(model_cls.__name__)}.{name} = {name} on the instance"
-        )
+        refusal += f", or set {instance}.{name} = {name} on the instance"
     raise TypeError(refusal)
-
-
-def _not_loaded(instance: object) -> InstanceNotLoaded:
-    """The refusal of an unloaded instance, naming how to load it."""
-    from .relations import _snake
-
-    model, path, found_no_row = instance.__dict__[_FERRO_UNLOADED_ATTR]
-    cls = type(instance)
-    pk = cls.__ferro_pk__
-    held = f"{cls.__name__}({pk}={instance.__dict__[pk]!r}) is not loaded"
-    parameter = _snake(model)
-    relation = f"{parameter}.{path}"
-    if found_no_row:
-        return InstanceNotLoaded(
-            f"{held}: the query that included {relation} found no row with that "
-            "key, so the row was deleted or row security hides it from this "
-            "connection; restore the row or this connection's access to it, "
-            f"then await {relation}.load()"
-        )
-    return InstanceNotLoaded(
-        f"{held}. Read it after include(lambda {parameter}: {relation}) or "
-        f"await {relation}.load()"
-    )
 
 
 def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
@@ -448,11 +443,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             # Only a miss reaches here: a column an unloaded instance does not
             # hold (ADR-0063), or a retired field (ADR-0053), which is no
             # attribute, and the error says it is gone on purpose.
-            if (
-                _FERRO_UNLOADED_ATTR in self.__dict__
-                and item in type(self).model_fields
-            ):
-                raise _not_loaded(self)
+            if item in type(self).model_fields:
+                _unloaded.require_loaded(self)
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
                     f"{type(self).__name__}.{item} is retired in this release: the "
@@ -463,12 +455,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return super().__getattr__(item)
 
         def __setattr__(self, name: str, value: Any) -> None:
-            if (
-                _FERRO_UNLOADED_ATTR in self.__dict__
-                and name in type(self).model_fields
-            ):
-                raise _not_loaded(self)
+            if name in type(self).model_fields:
+                _unloaded.require_loaded(self)
             super().__setattr__(name, value)
+
+        def __iter__(self) -> Any:
+            # `dict(instance)` reads the fields through here, as model_dump does.
+            _unloaded.require_loaded(self)
+            return super().__iter__()
 
         def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             """Dump the instance's fields to a dict, as Pydantic's `model_dump` does.
@@ -485,8 +479,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 InstanceNotLoaded: The instance is unloaded; load it with
                     `.load()` first.
             """
-            if _FERRO_UNLOADED_ATTR in self.__dict__:
-                raise _not_loaded(self)
+            _unloaded.require_loaded(self)
             return super().model_dump(*args, **kwargs)
 
         def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
@@ -504,14 +497,54 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 InstanceNotLoaded: The instance is unloaded; load it with
                     `.load()` first.
             """
-            if _FERRO_UNLOADED_ATTR in self.__dict__:
-                raise _not_loaded(self)
+            _unloaded.require_loaded(self)
             return super().model_dump_json(*args, **kwargs)
 
+        def model_copy(
+            self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+        ) -> Self:
+            """Copy the instance, as Pydantic's `model_copy` does.
+
+            A cached relation the copy's foreign-key column no longer points at
+            is dropped, so the copy reads the relation its own key names.
+
+            Args:
+                update: Field values to change in the copy. Defaults to `None`.
+                deep: Copy the field values too. Defaults to `False`.
+
+            Returns:
+                The copy.
+
+            Raises:
+                InstanceNotLoaded: `update` names a column of an unloaded
+                    instance; load it with `.load()` first.
+                TypeError: `update` names a relation; set its foreign-key
+                    column instead, as the constructor says.
+            """
+            if update:
+                _refuse_relation_keywords(type(self), update)
+                if not type(self).model_fields.keys().isdisjoint(update):
+                    _unloaded.require_loaded(self)
+            copied = super().model_copy(update=update, deep=deep)
+            if update:
+                prune_cached_relations(copied)
+            return copied
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        # Every serializer refuses an unloaded instance: a nested model, a
+        # TypeAdapter and a response model reach pydantic-core without calling
+        # the instance's own `model_dump()`, and a model's own
+        # `model_serializer` would replace a decorated one.
+        schema = handler(source)
+        _unloaded.guard_serialization(handler.resolve_ref_schema(schema))
+        return schema
+
     def __repr__(self) -> str:
-        if _FERRO_UNLOADED_ATTR in self.__dict__:
-            pk = type(self).__ferro_pk__
-            return f"{type(self).__name__}({pk}={self.__dict__[pk]!r}, unloaded)"
+        if _unloaded.is_unloaded(self):
+            return _unloaded.repr_unloaded(self)
         return super().__repr__()
 
     async def save(
@@ -587,8 +620,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert rows[0].views == 1000
             ```
         """
-        if _FERRO_UNLOADED_ATTR in self.__dict__:
-            raise _not_loaded(self)
+        _unloaded.require_loaded(self)
         if on_conflict not in (None, "update"):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
@@ -836,8 +868,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         route, identity_using = await _instance_transaction_route(self, using, session)
 
         # The session's object for this key is this instance, so the fetch
-        # refreshes it in place, applying the refresh rule a fetch applies; a
-        # row that is gone leaves it registered.
+        # refreshes it in place, applying the refresh rule a fetch applies.
         register_instance(name, str(pk_val), self, route)
         query = Query(self.__class__, using=route.connection_name).where(
             _field_eq(pk_field_name, pk_val)
@@ -845,17 +876,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         fresh_instance = await query.first()
 
         if fresh_instance is None:
+            # A gone row leaves no complete instance behind for a relation to
+            # read; an unloaded one stays the session's object for its key.
+            if not _unloaded.is_unloaded(self):
+                _core_evict_instance(name, str(pk_val), route)
             raise ModelDoesNotExist(self.__class__, pk_val)
 
         if fresh_instance is not self:
             # No identity map: copy the row in, then apply the same rule.
-            self.__dict__.update(fresh_instance.__dict__)
-            self.__dict__.pop(_FERRO_UNLOADED_ATTR, None)
-            object.__setattr__(
-                self,
-                "__pydantic_fields_set__",
-                set(fresh_instance.__pydantic_fields_set__),
-            )
+            _unloaded.fill(self, fresh_instance)
             prune_stale_relations(self)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
@@ -885,7 +914,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 assert author.name == "Ada Lovelace"
             ```
         """
-        if _FERRO_UNLOADED_ATTR in self.__dict__:
+        if _unloaded.is_unloaded(self):
             await self.refresh()
         return self
 
