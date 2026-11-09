@@ -58,7 +58,10 @@ def _join_column(table: str) -> str:
 
 
 def _join_table_rename_hints(
-    source_model: type, target_model: type, field_name: str, relation: Any
+    source_model: type,
+    target_model: type,
+    field_name: str,
+    relation: ManyToManyRelation,
 ) -> RenameHints:
     """What a join table and its columns were called before (ADR-0032).
 
