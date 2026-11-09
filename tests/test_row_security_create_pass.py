@@ -355,38 +355,6 @@ def test_distinct_policy_names_that_truncate_together_are_rejected():
             )
 
 
-def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass():
-    """A key column over a forward-referenced target declares its storage, the
-    target key's type, so the cast check reads it when the class is defined: a
-    target whose key the shorthand cannot cast fails pointing at the
-    declaration, as a TypeError, the class-definition contract, not an
-    internal error."""
-    from ferro import Forward, Relation, Reverse
-    from ferro.relations import resolve_relationships
-
-    with pytest.raises(TypeError) as excinfo:
-
-        class Doc(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            owner_id: datetime.datetime = Field(foreign_key="Owner")
-            owner: Relation["Owner"] = Forward("owner_id")
-
-            __ferro_rls__: ClassVar = RowSecurity(
-                RowPolicy(column="owner_id", setting="pinch.owner")
-            )
-
-        class Owner(Model):
-            id: datetime.datetime = Field(primary_key=True)
-            docs: Relation[list["Doc"]] = Reverse("owner_id")
-
-        resolve_relationships()
-
-    message = str(excinfo.value)
-    assert "Doc.__ferro_rls__" in message
-    assert "owner_id" in message
-    assert "timestamptz" in message
-
-
 def test_using_on_a_for_insert_policy_is_rejected():
     with pytest.raises(TypeError, match="use with_check= instead"):
         RowPolicy(name="p", command="insert", using="true", with_check="true")

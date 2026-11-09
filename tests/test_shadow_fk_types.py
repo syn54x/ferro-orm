@@ -1,7 +1,8 @@
 """Tests for ferro._shadow_fk_types."""
 
+import datetime
 import warnings
-from typing import Annotated, Union
+from typing import Annotated, ClassVar, Union
 from uuid import UUID, uuid4
 
 import pytest
@@ -91,6 +92,38 @@ def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
 
     assert ReconcileChild.__annotations__["parent_id"] == (int | None)
     assert ReconcileChild.model_fields["parent_id"].annotation == (int | None)
+
+
+def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass(
+    _cleanup_registry,
+):
+    """A forward-referenced FK's shadow column only learns its real storage
+    when relationships resolve. The cast check re-runs there, so a target whose
+    PK turns out to be unsupported fails pointing at the declaration — and it
+    stays a TypeError, the class-definition contract, not an internal error."""
+    from ferro import RowPolicy, RowSecurity
+    from ferro.relations import resolve_relationships
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner: Annotated["Owner", ForeignKey(related_name="docs")]
+
+        # Passes at class-body time: the shadow column is provisionally integer.
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="owner_id", setting="pinch.owner")
+        )
+
+    class Owner(Model):
+        id: datetime.datetime = Field(primary_key=True)
+        docs: Relation[list["Doc"]] = BackRef()
+
+    with pytest.raises(TypeError) as excinfo:
+        resolve_relationships()
+
+    message = str(excinfo.value)
+    assert "Doc.__ferro_rls__" in message
+    assert "owner_id" in message
+    assert "timestamptz" in message
 
 
 @pytest.mark.asyncio

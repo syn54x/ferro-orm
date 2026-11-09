@@ -322,9 +322,7 @@ class Post(Model):
     assert mod.Author.__ferro_relations__["posts"].attribute == "author_id"
     assert mod.Tag.__ferro_relations__["posts"].through == "tag_posts"
     assert mod.Post.__ferro_relations__["tags"].attribute == "posts"
-    assert any(
-        "post_tag" in name or "tag_post" in name for name in REGISTRY.join_tables()
-    )
+    assert set(REGISTRY.join_tables()) == {"tag_posts"}
 
 
 def test_a_model_defined_in_a_function_finds_its_sibling_target():
