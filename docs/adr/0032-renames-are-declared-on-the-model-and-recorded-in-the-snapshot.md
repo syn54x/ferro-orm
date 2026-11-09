@@ -16,6 +16,8 @@ A rename hint is part of the declared modelset, so the migration's schema snapsh
 
 Amended by ADR-0047 (2026-10-07): the reconciliation pass honours the same hints, with liveness read from the live database (old name live, new name absent) instead of the previous snapshot.
 
+Amended by ADR-0062 (2026-11-09): a many-to-many's join table is declared with `through=`, so a model rename no longer renames it. Its own rename is declared on the relation, `tags: Relation[list[Tag]] = ManyToMany(through="author_tags", renamed_from="writer_tags")`, and recorded as that join table's table hint, read like a model's `__ferro_renamed_from__` by every emitter.
+
 A drop and an add with no hint are rendered as a drop and an add, marked destructive, and the generator's summary names `renamed_from`. The generator never matches a vanished column to a new one by type.
 
 An enum type's rename takes no hint. When every column of a vanished type now declares one and the same new type, `ALTER TYPE "status" RENAME TO "authorstatus"` and the swap-type recipe end in the identical schema and data, so rendering the rename is no guess about intent.

@@ -1104,8 +1104,7 @@ def _many_to_many_field(
             "a relation is never a constructor parameter, so drop init= from "
             "the declaration"
             if name == "init"
-            else "a many-to-many adds no column, so it takes no column or field "
-            "option"
+            else "a many-to-many adds no column, so it takes no column or field option"
         )
         raise TypeError(
             f"ManyToMany() got an unexpected keyword argument '{name}': {reason}. "

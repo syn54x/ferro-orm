@@ -488,7 +488,7 @@ JOIN_TABLE_AFTER = JOIN_TABLE_BEFORE.replace(
 
 def _two_links(db) -> None:
     db.execute('INSERT INTO "author" ("name") VALUES (\'Ann\')')
-    db.execute('INSERT INTO "tag" ("label") VALUES (\'poetry\'), (\'prose\')')
+    db.execute("INSERT INTO \"tag\" (\"label\") VALUES ('poetry'), ('prose')")
     db.execute(
         'INSERT INTO "writer_tags" ("author_id", "tag_id") VALUES (1, 1), (1, 2)'
     )
