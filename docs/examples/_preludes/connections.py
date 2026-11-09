@@ -8,16 +8,15 @@ what the Connections guide shows. ``opened()`` connects nothing.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
@@ -26,7 +25,8 @@ class Post(Model):
     body: str
     published: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    author: Annotated[Author, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key=Author)
+    author: Relation[Author] = Forward("author_id")
 
 
 @asynccontextmanager
