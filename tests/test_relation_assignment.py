@@ -32,7 +32,7 @@ from ferro import (
     reset_engine,
 )
 from ferro.registry import REGISTRY
-from ferro.relations.fixes import DeclarationRefusal
+from ferro.relations.fixes import DeclarationRefusal, Edit
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -428,34 +428,25 @@ class Team(Model):
 
 
 @pytest.mark.parametrize("future", [False, True], ids=["eager", "postponed"])
-def test_the_none_refusal_drops_an_explicit_nullable_false(tmp_path, future):
-    refused_models = _import_models(
-        tmp_path,
-        _TEAM
-        + """
+def test_nullable_false_on_a_key_column_is_refused_before_any_assignment(
+    tmp_path, future
+):
+    # The column's nullability is its annotation's, so no relation over it
+    # can disagree with an explicit nullable=.
+    with pytest.raises(DeclarationRefusal) as refused:
+        _import_models(
+            tmp_path,
+            _TEAM
+            + """
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     team_id: int = Field(foreign_key=Team, nullable=False)
     team: Relation[Team] = Forward("team_id")
 """,
-        future=future,
+            future=future,
+        )
+    assert refused.value.edits == (
+        Edit(
+            "Player", "team_id", "replace", ("team_id: int = Field(foreign_key=Team)",)
+        ),
     )
-    with pytest.raises(DeclarationRefusal) as refused:
-        refused_models.Player(team_id=1).team = None
-    (column,), (relation,) = (edit.lines for edit in refused.value.edits)
-    assert column == "team_id: int | None = Field(default=None, foreign_key=Team)"
-
-    clear_registry()
-    REGISTRY.reset_for_test()
-    pasted = _import_models(
-        tmp_path,
-        _TEAM
-        + f"""
-class Player(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    {column}
-    {relation}
-""",
-        future=future,
-    )
-    _assigns_none(pasted.Player, "team", "team_id", team_id=1)

@@ -13,62 +13,75 @@ import pytest
 from pydantic.fields import FieldInfo
 
 from ferro import Field, ManyToMany, Model, Relation, Reverse
-from ferro.base import FerroField
+from ferro.base import FerroField, ManyToManyRelation, ReverseRelation
 from ferro.metaclass import ModelMetaclass
 
 
-class TestFieldFerroPayload:
-    """Test _field_ferro_payload static method."""
+@pytest.mark.usefixtures("clean_registry")
+class TestRelationMarkers:
+    """A field's relation marker, read through a class definition."""
 
-    def test_non_field_info_returns_false(self):
-        """Non-FieldInfo objects should return an empty payload."""
-        assert ModelMetaclass._field_ferro_payload("not a field") == {}
-        assert ModelMetaclass._field_ferro_payload(123) == {}
-        assert ModelMetaclass._field_ferro_payload(None) == {}
+    def test_a_field_with_column_options_only_declares_no_relation(self):
+        class Badge(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            code: str = Field(index=True)
 
-    def test_field_info_without_relation_keywords_returns_empty(self):
-        """A FieldInfo with column options only carries no relation payload."""
-        assert ModelMetaclass._field_ferro_payload(Field(index=True)) == {}
+        assert Badge.__ferro_relations__ == {}
 
-    def test_reverse_leaves_its_attribute_in_the_metadata(self):
-        """Reverse("team_id") leaves the attribute it names in the metadata."""
-        field = Reverse("team_id")
-        assert ModelMetaclass._field_ferro_payload(field) == {"reverse": "team_id"}
+    def test_an_assigned_reverse_declares_a_reverse_relation(self):
+        class Squad(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            members: Relation[list["Member"]] = Reverse("squad_id")  # noqa: F821
 
-    def test_many_to_many_leaves_its_options_in_the_metadata(self):
-        """ManyToMany(through=...) leaves its join table in the metadata."""
-        field = ManyToMany(through="enrollments")
-        assert ModelMetaclass._field_ferro_payload(field)["through"] == "enrollments"
+        relation = Squad.__ferro_relations__["members"]
+        assert isinstance(relation, ReverseRelation)
+        assert relation.attribute == "squad_id"
 
-    def test_retired_many_to_many_reports_retired(self):
-        """A retired ManyToMany carries retired=True so the scan can refuse it."""
-        field = ManyToMany(through="enrollments", retired=True)
-        assert ModelMetaclass._field_ferro_payload(field)["retired"] is True
+    def test_an_assigned_many_to_many_declares_its_join_table(self):
+        class Course(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            pupils: Relation[list["Pupil"]] = ManyToMany(  # noqa: F821
+                through="enrollments"
+            )
 
+        relation = Course.__ferro_relations__["pupils"]
+        assert isinstance(relation, ManyToManyRelation)
+        assert relation.through == "enrollments"
 
-class TestRelationshipFieldPayload:
-    """Test relationship Field metadata helpers."""
+    def test_a_retired_many_to_many_is_refused(self):
+        with pytest.raises(TypeError, match="a ManyToMany cannot be retired"):
 
-    def test_assigned_reverse(self):
-        """A Reverse assigned in the namespace should be returned as payload."""
-        hint = Relation[list[int]]
-        namespace = {"field": Reverse("team_id")}
-        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
-        assert payload == {"reverse": "team_id"}
+            class Course(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                pupils: Relation[list["Pupil"]] = ManyToMany(  # noqa: F821
+                    through="enrollments", retired=True
+                )
 
-    def test_reverse_in_annotated_metadata(self):
-        """Annotated[..., Reverse(...)] should be returned as payload."""
-        hint = Annotated[Relation[list[int]], Reverse("team_id")]
-        namespace = {}
-        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
-        assert payload == {"reverse": "team_id"}
+    @pytest.mark.parametrize(
+        ("marker", "written"),
+        [
+            (Reverse("squad_id"), 'Reverse("squad_id")'),
+            (
+                ManyToMany(through="squad_members"),
+                'ManyToMany(through="squad_members")',
+            ),
+        ],
+        ids=["reverse", "many-to-many"],
+    )
+    def test_a_marker_in_annotated_metadata_is_refused(self, marker, written):
+        class Member(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            squad_id: int = Field(foreign_key="Squad")
 
-    def test_neither_type_nor_field(self):
-        """Regular field should return no relationship payload."""
-        hint = int
-        namespace = {}
-        assert (
-            ModelMetaclass._relationship_field_payload("field", hint, namespace) == {}
+        with pytest.raises(TypeError) as refusal:
+
+            class Squad(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                members: Annotated[Relation[list[Member]], marker]
+
+        assert str(refusal.value) == (
+            "Squad.members: a relation is an assignment, not Annotated metadata. "
+            f"Write: members: Relation[list[Member]] = {written}"
         )
 
 

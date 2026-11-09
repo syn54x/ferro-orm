@@ -32,7 +32,7 @@ from ..columns import (
 )
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
-from ..registry import REGISTRY, ir_fingerprint
+from ..registry import REGISTRY, JoinTableBundle, ir_fingerprint
 from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
 # Schema IR v4 adds the optional column key `generated`, a generated column's
@@ -668,11 +668,7 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
     for model_name in sorted(REGISTRY.models()):
         models.append(_model_payload_from_envelope(model_name))
 
-    for table_name, bundle in sorted(
-        REGISTRY.join_tables().items(), key=lambda item: item[0]
-    ):
-        if not isinstance(bundle, dict):
-            continue
+    for table_name in sorted(REGISTRY.join_tables()):
         models.append(_model_payload_from_envelope(table_name))
 
     envelope = {
@@ -688,14 +684,14 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
     return envelope
 
 
-def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None:
+def _register_join_table_bundle(table_name: str, bundle: JoinTableBundle) -> None:
     register_model_with_ir(
         table_name,
-        bundle["columns"],
+        bundle.columns,
         table_name,
-        composite_uniques=bundle["composite_uniques"],
-        composite_indexes=bundle["composite_indexes"],
-        rename_hints=bundle.get("rename_hints"),
+        composite_uniques=bundle.composite_uniques,
+        composite_indexes=bundle.composite_indexes,
+        rename_hints=bundle.rename_hints,
     )
 
 
@@ -706,7 +702,7 @@ def _recompile_missing_registry_envelopes() -> None:
             compile_model_schema_ir(model_name, model_cls)
             continue
         bundle = REGISTRY.join_tables().get(model_name)
-        if isinstance(bundle, dict):
+        if bundle is not None:
             _register_join_table_bundle(model_name, bundle)
 
 
@@ -720,11 +716,8 @@ def _recompile_all_registered_envelopes() -> None:
     """
     for model_name, model_cls in sorted(REGISTRY.models().items()):
         compile_model_schema_ir(model_name, model_cls)
-    for table_name, bundle in sorted(
-        REGISTRY.join_tables().items(), key=lambda item: item[0]
-    ):
-        if isinstance(bundle, dict):
-            _register_join_table_bundle(table_name, bundle)
+    for table_name, bundle in sorted(REGISTRY.join_tables().items()):
+        _register_join_table_bundle(table_name, bundle)
 
 
 def compile_registry_schema_ir() -> dict[str, Any]:
