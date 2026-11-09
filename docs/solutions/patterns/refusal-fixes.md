@@ -66,12 +66,15 @@ the refused field. With only the first edit it would print `Write: <line>`.
    fix.
 5. **A check that runs at two times** (at class definition for a class
    target, at resolution for a name) raises one refusal from one function,
-   such as `keyless_target_refusal`, from both places.
+   such as `keyless_target_refusal`, from both places, and reads the same
+   models at both: hand in the defining model's column specs at class
+   definition (`_columns_now`), since it has not published them yet.
 6. **A fix that names a join table** gets it from `_free_table_name`, so the
    line it prints is never one resolution then refuses.
 7. **Add a case to `_cases()` in `tests/test_declaration_fixes.py`**.
-   `test_the_sweep_reaches_every_refusal` fails until a case reaches the new
-   `raise`. Say whether the fix is `local` (a `Write:` line, or `None` for
+   `test_the_sweep_reaches_every_refusal` fails until a case builds the new
+   refusal. A case that names Team runs with Team written as a class and as
+   a name, and the two refusals must carry the same edits. Say whether the fix is `local` (a `Write:` line, or `None` for
    no fix) and what `kind` of relation the fixed models must give. The
    sweep applies each way over every storage, order, target form and
    `__future__` mode.

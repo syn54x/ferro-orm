@@ -21,7 +21,7 @@ Some refusals can be fixed more than one way: a bare `players: Relation = Revers
 
 Edits are computed from the models in the registry. A fix that adds or changes a primary key takes the type and storage of the column that needs it, and every known foreign-key column the new key would not back gets an edit of its own, so following the fix loads every model. A fix that names a join table picks one no model, join table or other many-to-many holds, and resolution refuses a second many-to-many that declares a join table another one already does, since the two would share their rows.
 
-A check that runs at two times raises one refusal. A key column whose target declares no primary key is met by the schema compile when the target is written as a class, and by relation resolution when it is a name; both raise `keyless_target_refusal`.
+A check that runs at two times raises one refusal from one input. A key column whose target declares no primary key is met by the schema compile when the target is written as a class, and by relation resolution when it is a name; both raise `keyless_target_refusal`, and both read the models that exist at that moment, the model being defined included: at class definition its column specs are handed in before it publishes them, so its other key columns get their edits either way.
 
 Decided in Epic #874 (2026-11-08, Taylor), built in #898.
 
@@ -34,6 +34,7 @@ Consequences:
 
 - `recipe()` and every hand-formatted `Write:` string are gone; `src/ferro/relations/fixes.py` holds the only renderer.
 - A fix that adds a column on its own model, such as the key a `Forward` over a missing column needs, now prints a numbered step instead of `Write:`, since it adds a declaration rather than replacing the refused one.
-- A refusal that offered alternatives (`Write: A or B`) names the choice in words and carries no edits.
-- `tests/test_declaration_fixes.py` holds the sweep, which applies each way to fix each refusal and loads the models, with the target written as a class and as a name. `test_the_sweep_reaches_every_refusal` compares the raise sites the sweep meets with every `raise` of a `DeclarationRefusal` in `src/ferro`, so a new refusal without a sweep case fails the suite. The solutions page `docs/solutions/patterns/refusal-fixes.md` has the recipe.
+- A refusal that offers several ways (`Write: A or B`) carries each way as its own list of edits, and the sweep applies each one.
+- `tests/test_declaration_fixes.py` holds the sweep, which applies each way to fix each refusal and loads the models. Every case whose target can be written both as a class and as a name runs both ways, and the two refusals must carry the same edits. `test_the_sweep_reaches_every_refusal` finds every call in `src/ferro` that builds a `DeclarationRefusal`, directly or through a function returning one, and requires each to be on the stack of a refusal the sweep meets, so a new refusal without a sweep case fails the suite however it is raised. The solutions page `docs/solutions/patterns/refusal-fixes.md` has the recipe.
+- A redefined model (a notebook re-running a cell) releases the join tables its old definition declared, so its many-to-manys declare them again instead of being refused against a stale entry.
 - A refusal raised when a class is defined cannot see models defined after it. Its fix is complete for the models that exist; a later model whose key no longer fits the new primary key is refused in turn, with its own fix.
