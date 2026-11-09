@@ -322,7 +322,7 @@ def test_model_metaclass_names_ferro_field_specifiers():
     import ferro
     from ferro.metaclass import ModelMetaclass
 
-    transform = ModelMetaclass.__dataclass_transform__
+    transform = vars(ModelMetaclass)["__dataclass_transform__"]
     assert transform["kw_only_default"] is True
     assert transform["field_specifiers"] == (
         PydanticField,

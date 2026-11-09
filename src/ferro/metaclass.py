@@ -16,6 +16,7 @@ from typing import (
     ForwardRef,
     Optional,
     Union,
+    dataclass_transform,
     get_args,
     get_origin,
     get_type_hints,
@@ -23,7 +24,8 @@ from typing import (
 
 from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
-from pydantic.fields import FieldInfo
+from pydantic._internal._model_construction import NoInitField
+from pydantic.fields import FieldInfo, PrivateAttr
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
 from ._annotation_eval import DeferredNames, evaluate_foreign_key_annotation
@@ -42,6 +44,10 @@ from .base import (
 )
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
 from .fields import (
+    Field,
+    Forward,
+    ManyToMany,
+    Reverse,
     _option_text,
     _RelationOptions,
     annotation_text,
@@ -885,6 +891,20 @@ def _relation_setattr(key_columns: dict[str, str], inherited: Any):
     return __setattr__
 
 
+# The constructor `ty` reads is the one `Model.__init__` runs: Pydantic's own
+# specifiers plus Ferro's, since a decorator on `Model` loses to this one.
+@dataclass_transform(
+    kw_only_default=True,
+    field_specifiers=(
+        PydanticField,
+        PrivateAttr,
+        NoInitField,
+        Field,
+        Forward,
+        Reverse,
+        ManyToMany,
+    ),
+)
 class ModelMetaclass(type(BaseModel)):
     """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 

@@ -91,6 +91,125 @@ def _unknown_keyword(name: str) -> TypeError:
     return TypeError(f"Field() got an unknown keyword {name!r}. {hint}")
 
 
+# A retired field and a generated column are never `__init__` parameters:
+# these two overloads mark them `init=False` for a type checker (PEP 681),
+# as the constructor refuses both by name.
+@overload
+def Field(
+    default: Any = ...,
+    *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
+    nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
+    renamed_from: str | None = ...,
+    retired: Literal[True],
+    generated: Callable[[Any], Any] | None = ...,
+    default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None = ...,
+    alias: str | None = ...,
+    alias_priority: int | None = ...,
+    validation_alias: str | AliasPath | AliasChoices | None = ...,
+    serialization_alias: str | None = ...,
+    title: str | None = ...,
+    field_title_generator: Callable[[str, FieldInfo], str] | None = ...,
+    description: str | None = ...,
+    examples: list[Any] | None = ...,
+    exclude: bool | None = ...,
+    exclude_if: Callable[[Any], bool] | None = ...,
+    discriminator: str | types.Discriminator | None = ...,
+    deprecated: Deprecated | str | bool | None = ...,
+    json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
+    frozen: bool | None = ...,
+    validate_default: bool | None = ...,
+    repr: bool = ...,
+    init: Literal[False] = False,
+    init_var: bool | None = ...,
+    kw_only: bool | None = ...,
+    pattern: str | re.Pattern[str] | None = ...,
+    strict: bool | None = ...,
+    coerce_numbers_to_str: bool | None = ...,
+    gt: annotated_types.SupportsGt | None = ...,
+    ge: annotated_types.SupportsGe | None = ...,
+    lt: annotated_types.SupportsLt | None = ...,
+    le: annotated_types.SupportsLe | None = ...,
+    multiple_of: float | None = ...,
+    allow_inf_nan: bool | None = ...,
+    max_digits: int | None = ...,
+    decimal_places: int | None = ...,
+    min_length: int | None = ...,
+    max_length: int | None = ...,
+    union_mode: Literal["smart", "left_to_right"] = ...,
+    fail_fast: bool | None = ...,
+) -> Any: ...
+
+
+@overload
+def Field(
+    default: Any = ...,
+    *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
+    nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
+    renamed_from: str | None = ...,
+    retired: bool = ...,
+    generated: Callable[[Any], Any],
+    default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None = ...,
+    alias: str | None = ...,
+    alias_priority: int | None = ...,
+    validation_alias: str | AliasPath | AliasChoices | None = ...,
+    serialization_alias: str | None = ...,
+    title: str | None = ...,
+    field_title_generator: Callable[[str, FieldInfo], str] | None = ...,
+    description: str | None = ...,
+    examples: list[Any] | None = ...,
+    exclude: bool | None = ...,
+    exclude_if: Callable[[Any], bool] | None = ...,
+    discriminator: str | types.Discriminator | None = ...,
+    deprecated: Deprecated | str | bool | None = ...,
+    json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
+    frozen: bool | None = ...,
+    validate_default: bool | None = ...,
+    repr: bool = ...,
+    init: Literal[False] = False,
+    init_var: bool | None = ...,
+    kw_only: bool | None = ...,
+    pattern: str | re.Pattern[str] | None = ...,
+    strict: bool | None = ...,
+    coerce_numbers_to_str: bool | None = ...,
+    gt: annotated_types.SupportsGt | None = ...,
+    ge: annotated_types.SupportsGe | None = ...,
+    lt: annotated_types.SupportsLt | None = ...,
+    le: annotated_types.SupportsLe | None = ...,
+    multiple_of: float | None = ...,
+    allow_inf_nan: bool | None = ...,
+    max_digits: int | None = ...,
+    decimal_places: int | None = ...,
+    min_length: int | None = ...,
+    max_length: int | None = ...,
+    union_mode: Literal["smart", "left_to_right"] = ...,
+    fail_fast: bool | None = ...,
+) -> Any: ...
+
+
 @overload
 def Field(
     default: Literal[Ellipsis],
@@ -783,164 +902,181 @@ class BackRef:
         )
 
 
-def ManyToMany(
-    *,
-    through: str | None = None,
-    related_name: str | None = None,
-    reverse_index: bool = True,
-    **kwargs: Any,
-) -> Any:
-    """Declare a many-to-many relation, assigned as the field's default.
+if TYPE_CHECKING:
+    # How a relation reads to a type checker: a field specifier that is never
+    # an `__init__` parameter (PEP 681). The runtime functions below take no
+    # `init` keyword; the constructor refuses a relation keyword itself.
+    def ManyToMany(
+        *,
+        through: str | None = None,
+        related_name: str | None = None,
+        reverse_index: bool = True,
+        init: Literal[False] = False,
+        **kwargs: Any,
+    ) -> Any: ...
 
-    Annotate the field `Relation[list[Target]]` and name its join table.
-    Ferro creates that table, with one `<table>_id` column per model, a
-    unique index over the pair and an index for reads from the other side.
-    The target reads the relation back through a
-    [`Reverse`][ferro.Reverse] naming this field, which it may leave out.
-    See [Many-to-many](../guide/relationships.md#many-to-many).
+    def Forward(column: str, *, init: Literal[False] = False) -> Any: ...
 
-    Args:
-        through: The join table's name. Required: a model with no `through=`
-            is refused when its class is defined, naming the table to write.
-        reverse_index: Add an index on the join table's `(target, source)`
-            columns for queries from the other side. Defaults to `True`; turn
-            it off for a write-heavy join table.
-        **kwargs: Other keyword arguments of [`Field`][ferro.Field].
+    def Reverse(attribute: str, *, init: Literal[False] = False) -> Any: ...
 
-    Returns:
-        The field's metadata, as [`Field`][ferro.Field] returns it.
+else:
 
-    Examples:
-        ```python {test=run prelude=reference}
-        from ferro import Field, ManyToMany, Model, Relation, Reverse, create_tables
+    def ManyToMany(
+        *,
+        through: str | None = None,
+        related_name: str | None = None,
+        reverse_index: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Declare a many-to-many relation, assigned as the field's default.
 
+        Annotate the field `Relation[list[Target]]` and name its join table.
+        Ferro creates that table, with one `<table>_id` column per model, a
+        unique index over the pair and an index for reads from the other side.
+        The target reads the relation back through a
+        [`Reverse`][ferro.Reverse] naming this field, which it may leave out.
+        See [Many-to-many](../guide/relationships.md#many-to-many).
 
-        class Tag(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            label: str
-            articles: Relation[list["Article"]] = Reverse("tags")
+        Args:
+            through: The join table's name. Required: a model with no `through=`
+                is refused when its class is defined, naming the table to write.
+            reverse_index: Add an index on the join table's `(target, source)`
+                columns for queries from the other side. Defaults to `True`; turn
+                it off for a write-heavy join table.
+            **kwargs: Other keyword arguments of [`Field`][ferro.Field].
 
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
 
-        class Article(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            title: str
-            tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
-
-
-        await create_tables()
-        history = await Tag.create(label="history")
-        article = await Article.create(title="Babbage's engines")
-        await article.tags.add(history)
-        assert [tag.label for tag in await article.tags.all()] == ["history"]
-        assert [found.title for found in await history.articles.all()] == [
-            "Babbage's engines"
-        ]
-        ```
-    """
-    options = {} if related_name is None else {"related_name": related_name}
-    return Field(
-        many_to_many=True,
-        through=through,
-        reverse_index=reverse_index,
-        **options,
-        **kwargs,
-    )
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, ManyToMany, Model, Relation, Reverse, create_tables
 
 
-def Forward(column: str) -> Any:
-    """Declare a forward relation over a foreign-key column of this model.
-
-    Assign it to a field annotated `Relation[Target]`, or
-    `Relation[Target | None]` when the column allows `None`. The relation
-    reads the row the column points at: awaiting it loads the target, and a
-    query's `include()` fills it in. It adds no column; the foreign-key
-    column is the field declared with `Field(foreign_key=Target)`. See
-    [Relationships](../guide/relationships.md).
-
-    Args:
-        column: The name of the foreign-key column on this model.
-
-    Returns:
-        The field's metadata, as [`Field`][ferro.Field] returns it.
-
-    Raises:
-        TypeError: `column` is not a non-empty string.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        from ferro import Field, Forward, Model, Relation, create_tables
+            class Tag(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
+                articles: Relation[list["Article"]] = Reverse("tags")
 
 
-        class Shelf(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            label: str
+            class Article(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
 
 
-        class Book(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            title: str
-            shelf_id: int = Field(foreign_key=Shelf, index=True)
-            shelf: Relation[Shelf] = Forward("shelf_id")
+            await create_tables()
+            history = await Tag.create(label="history")
+            article = await Article.create(title="Babbage's engines")
+            await article.tags.add(history)
+            assert [tag.label for tag in await article.tags.all()] == ["history"]
+            assert [found.title for found in await history.articles.all()] == [
+                "Babbage's engines"
+            ]
+            ```
+        """
+        options = {} if related_name is None else {"related_name": related_name}
+        return Field(
+            many_to_many=True,
+            through=through,
+            reverse_index=reverse_index,
+            **options,
+            **kwargs,
+        )
+
+    def Forward(column: str) -> Any:
+        """Declare a forward relation over a foreign-key column of this model.
+
+        Assign it to a field annotated `Relation[Target]`, or
+        `Relation[Target | None]` when the column allows `None`. The relation
+        reads the row the column points at: awaiting it loads the target, and a
+        query's `include()` fills it in. It adds no column; the foreign-key
+        column is the field declared with `Field(foreign_key=Target)`. See
+        [Relationships](../guide/relationships.md).
+
+        Args:
+            column: The name of the foreign-key column on this model.
+
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: `column` is not a non-empty string.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, Forward, Model, Relation, create_tables
 
 
-        await create_tables()
-        history = await Shelf.create(label="History")
-        await Book.create(title="SPQR", shelf_id=history.id)
-        book = await Book.select().include(lambda book: book.shelf).first()
-        assert book.shelf.label == "History"
-        ```
-    """
-    return _relation_field("Forward", "forward", column)
+            class Shelf(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
 
 
-def Reverse(attribute: str) -> Any:
-    """Declare a reverse relation over a foreign-key column of another model.
-
-    Assign it to a field annotated `Relation[list[Other]]`, where `Other`
-    declares the foreign-key column with `Field(foreign_key=ThisModel)`. On
-    an instance the relation is a query over the rows whose column holds
-    this instance's primary key. Neither side names the other: a
-    [`Forward`][ferro.Forward] needs no `Reverse`. See
-    [Relationships](../guide/relationships.md).
-
-    `attribute` may also name a [`ManyToMany`][ferro.ManyToMany] on the
-    other model, and the relation reads the rows its join table links.
-
-    Args:
-        attribute: The name of the foreign-key column, or of the
-            many-to-many, on the other model.
-
-    Returns:
-        The field's metadata, as [`Field`][ferro.Field] returns it.
-
-    Raises:
-        TypeError: `attribute` is not a non-empty string.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        from ferro import Field, Model, Relation, Reverse, create_tables
+            class Book(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                shelf_id: int = Field(foreign_key=Shelf, index=True)
+                shelf: Relation[Shelf] = Forward("shelf_id")
 
 
-        class Shelf(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            label: str
-            books: Relation[list["Book"]] = Reverse("shelf_id")
+            await create_tables()
+            history = await Shelf.create(label="History")
+            await Book.create(title="SPQR", shelf_id=history.id)
+            book = await Book.select().include(lambda book: book.shelf).first()
+            assert book.shelf.label == "History"
+            ```
+        """
+        return _relation_field("Forward", "forward", column)
+
+    def Reverse(attribute: str) -> Any:
+        """Declare a reverse relation over a foreign-key column of another model.
+
+        Assign it to a field annotated `Relation[list[Other]]`, where `Other`
+        declares the foreign-key column with `Field(foreign_key=ThisModel)`. On
+        an instance the relation is a query over the rows whose column holds
+        this instance's primary key. Neither side names the other: a
+        [`Forward`][ferro.Forward] needs no `Reverse`. See
+        [Relationships](../guide/relationships.md).
+
+        `attribute` may also name a [`ManyToMany`][ferro.ManyToMany] on the
+        other model, and the relation reads the rows its join table links.
+
+        Args:
+            attribute: The name of the foreign-key column, or of the
+                many-to-many, on the other model.
+
+        Returns:
+            The field's metadata, as [`Field`][ferro.Field] returns it.
+
+        Raises:
+            TypeError: `attribute` is not a non-empty string.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import Field, Model, Relation, Reverse, create_tables
 
 
-        class Book(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            title: str
-            shelf_id: int = Field(foreign_key=Shelf)
+            class Shelf(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                label: str
+                books: Relation[list["Book"]] = Reverse("shelf_id")
 
 
-        await create_tables()
-        history = await Shelf.create(label="History")
-        await Book.create(title="SPQR", shelf_id=history.id)
-        titles = [book.title for book in await history.books.all()]
-        assert titles == ["SPQR"]
-        ```
-    """
-    return _relation_field("Reverse", "reverse", attribute)
+            class Book(Model):
+                id: int | None = Field(default=None, primary_key=True)
+                title: str
+                shelf_id: int = Field(foreign_key=Shelf)
+
+
+            await create_tables()
+            history = await Shelf.create(label="History")
+            await Book.create(title="SPQR", shelf_id=history.id)
+            titles = [book.title for book in await history.books.all()]
+            assert titles == ["SPQR"]
+            ```
+        """
+        return _relation_field("Reverse", "reverse", attribute)
 
 
 def _relation_field(spelling: str, kind: str, name: Any) -> Any:
