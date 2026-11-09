@@ -213,6 +213,20 @@ def test_a_model_redefined_in_one_process_keeps_its_join_table():
     assert Player.__ferro_reverse_specs__["events"].join_table == "player_tournaments"
 
 
+@pytest.mark.usefixtures("clean_registry")
+def test_a_many_to_many_to_a_model_never_defined_fails_resolution():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        events: Relation[list["Nowhere"]] = ManyToMany(  # noqa: F821
+            through="player_events"
+        )
+
+    with pytest.raises(
+        RuntimeError, match="Relationship resolution failed: 'Nowhere' not found"
+    ):
+        ferro.ensure_resolved_modelset()
+
+
 def test_reverse_index_false_keeps_the_unique_index_only():
     class Player(Model):
         id: int | None = Field(default=None, primary_key=True)
