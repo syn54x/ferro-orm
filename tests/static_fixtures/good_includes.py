@@ -2,7 +2,7 @@
 
 test_static_contracts.py asserts this file produces no diagnostics — an
 included query stays ``Query[T]``-shaped (``.all()`` still ``list[T]``, no
-distinct loaded type, ADR-0008), and populated access types as the field's
+distinct loaded type, ADR-0008), and loaded access types as the field's
 declared annotation.
 """
 
@@ -37,7 +37,7 @@ async def _include_chain_stays_query_shaped() -> None:
 
     one: GITxn | None = await GITxn.select().include(lambda t: t.account).first()
 
-    # Populated access is a plain attribute matching the declared annotation.
+    # Loaded access is a plain attribute matching the declared annotation.
     label: str = txns[0].account.label
 
     n: int = await GITxn.select().include(lambda t: t.account).count()

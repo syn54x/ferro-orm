@@ -4,7 +4,7 @@ description: "Filter rows with lambda predicates, order and page them, reach acr
 
 # Queries
 
-This guide shows how to read rows with Ferro: filter them with a lambda, order and page them, reach across relations, populate related rows and select only the columns you need.
+This guide shows how to read rows with Ferro: filter them with a lambda, order and page them, reach across relations, load related rows and select only the columns you need.
 
 Here is a whole program. It connects, opens a session, and asks for every transaction of 100 or more going out, largest first:
 
@@ -773,7 +773,7 @@ Office coffee drops out at the `owner` join. `after()` and `before()` take a tup
 --8<-- "docs/examples/traversal.py:traversed-paging"
 ```
 
-The page starts after Office coffee, the last Petty cash row. `position_of()` and `after(row)` read the related value off the instance, so they need the relation [populated with `include()`](#populating-relations-with-include); a tuple does not.
+The page starts after Office coffee, the last Petty cash row. `position_of()` and `after(row)` read the related value off the instance, so they need the relation [loaded with `include()`](#loading-relations-with-include); a tuple does not.
 
 The query sends this; on PostgreSQL only the placeholders differ:
 
@@ -1057,7 +1057,7 @@ The reverse relation became a filter on `account_id`.
 
 ### Result type of traversed queries
 
-A traversed query returns the model you queried: filtering `Transaction` through `transaction.account.owner` still returns `Transaction` instances, and it does not load the accounts. `await transaction.account` still runs its own query. To load related rows with the results, use [`include()`](#populating-relations-with-include).
+A traversed query returns the model you queried: filtering `Transaction` through `transaction.account.owner` still returns `Transaction` instances, and it does not load the accounts. `await transaction.account` still runs its own query. To load related rows with the results, use [`include()`](#loading-relations-with-include).
 
 ### Traversal in `update()` and `delete()`
 
@@ -1312,17 +1312,17 @@ Each of the three refusals names the existence test to write instead.
 
 The [`Query` reference](../api/queries.md) describes `.exists()` with its parameters.
 
-## Populating relations with `include()`
+## Loading relations with `include()`
 
 Reading a relation runs a query. A list of 100 transactions that shows each account's label awaits `transaction.account` 100 times: 101 statements for one screen. [`include()`][ferro.query.builder.Query.include] asks the query to load the related rows in the same statement:
 
 ```python
---8<-- "docs/examples/populated_relations.py:basic"
+--8<-- "docs/examples/loaded_relations.py:basic"
 ```
 
 It prints:
 
-<!-- prints: populated_relations.py:basic -->
+<!-- prints: loaded_relations.py:basic -->
 ```text
 Weekly shop | Checking
 Office coffee | Petty cash
@@ -1334,7 +1334,7 @@ The query still returns `list[Transaction]`, and `transaction.account` is now th
 The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:basic (sqlite)
+-- loaded_relations.py:basic (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
 FROM "transaction"
 LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
@@ -1345,15 +1345,15 @@ LIMIT ?;
 
 The account's columns come back in the same rows, through a `LEFT JOIN`, under `j1_account__` names.
 
-### The population contract
+### The loaded-relation contract
 
-A relation on an instance is either populated or not:
+A relation on an instance is either loaded or not:
 
-- **Populated**, because a query included it: the attribute is the related instance. A nullable foreign key with no row populates as `None`.
-- **Not populated**: the attribute is awaitable and runs its own query:
+- **Loaded**, because a query included it: the attribute is the related instance. A nullable foreign key with no row loads as `None`.
+- **Not loaded**: the attribute is awaitable and runs its own query:
 
 ```python
---8<-- "docs/examples/populated_relations.py:awaitable"
+--8<-- "docs/examples/loaded_relations.py:awaitable"
 ```
 
 `await transaction.account.load()` fetched the Travel account with a second query.
@@ -1361,7 +1361,7 @@ A relation on an instance is either populated or not:
 The fetch and the await send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:awaitable (sqlite)
+-- loaded_relations.py:awaitable (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
 FROM "transaction"
 WHERE "transaction"."id" = ?
@@ -1375,23 +1375,23 @@ LIMIT ?;
 
 The second statement is the one `await transaction.account` ran.
 
-!!! warning "Awaiting a populated relation raises"
-    On a populated instance, `await transaction.account` raises `TypeError: 'Account' object can't be awaited`, because the attribute is the instance, not a coroutine. Decide at the query: if you will read the relation, include it.
+!!! warning "Awaiting a loaded relation raises"
+    On a loaded instance, `await transaction.account` raises `TypeError: 'Account' object can't be awaited`, because the attribute is the instance, not a coroutine. Decide at the query: if you will read the relation, include it.
 
-There is no separate "loaded" model type: an included query returns `list[Transaction]`, and a populated relation is an ordinary instance. [Typed query predicates](../concepts/query-typing.md#included-queries) explains why.
+There is no separate "loaded" model type: an included query returns `list[Transaction]`, and a loaded relation is an ordinary instance. [Typed query predicates](../concepts/query-typing.md#included-queries) explains why.
 
 ### Row membership under `include()`
 
-`include()` never changes which rows a query returns. A row whose relation is missing stays, with the relation populated as `None`:
+`include()` never changes which rows a query returns. A row whose relation is missing stays, with the relation loaded as `None`:
 
 ```python
---8<-- "docs/examples/populated_relations.py:membership"
+--8<-- "docs/examples/loaded_relations.py:membership"
 ```
 
 All nine transactions come back, and Salary's `category` is `None`. The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:membership (sqlite)
+-- loaded_relations.py:membership (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_category"."id" AS "j1_category__id", "j1_category"."name" AS "j1_category__name", "j1_category"."parent_id" AS "j1_category__parent_id"
 FROM "transaction"
 LEFT JOIN "category" AS "j1_category" ON "transaction"."category_id" = "j1_category"."id"
@@ -1401,23 +1401,23 @@ WHERE TRUE;
 A relation only `include()` uses becomes a `LEFT JOIN`, which keeps Salary. A relation a `where()` or `order_by()` also follows keeps that clause's inner join, so the filter still decides membership:
 
 ```python
---8<-- "docs/examples/populated_relations.py:interplay"
+--8<-- "docs/examples/loaded_relations.py:interplay"
 ```
 
 The `where()` keeps the two Travel rows, and `include()` attaches their account. The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:interplay (sqlite)
+-- loaded_relations.py:interplay (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
 FROM "transaction"
 INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
 WHERE "j1_account"."label" = ?;
 ```
 
-The filter and the population share one `INNER JOIN`. `count()` and `exists()` measure the same rows with or without `include()`:
+The filter and the loaded relation share one `INNER JOIN`. `count()` and `exists()` measure the same rows with or without `include()`:
 
 ```python
---8<-- "docs/examples/populated_relations.py:count"
+--8<-- "docs/examples/loaded_relations.py:count"
 ```
 
 Both count the seven debits.
@@ -1425,7 +1425,7 @@ Both count the seven debits.
 The two calls send the same statement; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:count (sqlite)
+-- loaded_relations.py:count (sqlite)
 SELECT COUNT(*)
 FROM "transaction"
 WHERE "transaction"."amount" < ?;
@@ -1439,10 +1439,10 @@ WHERE "transaction"."amount" < ?;
 
 ### Multi-hop paths
 
-Including a path populates every step of it. A `NULL` along the way ends the chain with `None`, and the row stays:
+Including a path loads every step of it. A `NULL` along the way ends the chain with `None`, and the row stays:
 
 ```python
---8<-- "docs/examples/populated_relations.py:multi-hop"
+--8<-- "docs/examples/loaded_relations.py:multi-hop"
 ```
 
 Salary's account and its owner are both loaded. Office coffee's account is Petty cash, whose owner is `None`.
@@ -1450,7 +1450,7 @@ Salary's account and its owner are both loaded. Office coffee's account is Petty
 The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:multi-hop (sqlite)
+-- loaded_relations.py:multi-hop (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id", "j2_owner"."email" AS "j2_owner__email", "j2_owner"."id" AS "j2_owner__id", "j2_owner"."name" AS "j2_owner__name"
 FROM "transaction"
 LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
@@ -1463,18 +1463,18 @@ Each step is one more `LEFT JOIN`, and each related row's columns come back unde
 
 Includes add up, in any order, and repeating one changes nothing: `.include(lambda transaction: transaction.account)` followed by `.include(lambda transaction: transaction.account.owner)` is the same query as the second one alone.
 
-### Identity of populated instances
+### Identity of loaded instances
 
-In a session, each row is one object. A populated account is the same object a direct fetch of that account returns, shared by every row that points at it:
+In a session, each row is one object. A loaded account is the same object a direct fetch of that account returns, shared by every row that points at it:
 
 ```python
---8<-- "docs/examples/populated_relations.py:identity"
+--8<-- "docs/examples/loaded_relations.py:identity"
 ```
 
 Both Travel transactions point at the `travel` object fetched first. Fetching Travel and the query send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:identity (sqlite)
+-- loaded_relations.py:identity (sqlite)
 SELECT "account"."id", "account"."label", "account"."owner_id"
 FROM "account"
 WHERE "account"."id" = ?
@@ -1486,18 +1486,18 @@ LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"
 WHERE "transaction"."account_id" = ?;
 ```
 
-The account's columns come back with each row, and the session hands back the object it already holds. Populations also accumulate on the objects a session holds: a later query's `include()` attaches to instances an earlier query returned:
+The account's columns come back with each row, and the session hands back the object it already holds. Loaded relations also accumulate on the objects a session holds: a later query's `include()` attaches to instances an earlier query returned:
 
 ```python
---8<-- "docs/examples/populated_relations.py:accumulate"
+--8<-- "docs/examples/loaded_relations.py:accumulate"
 ```
 
-`market_run` was fetched with nothing populated, and the two later queries populated its account and its category. Outside a session there is no identity map, so each row of an included query gets its own related instance. [Identity map](../concepts/identity-map.md) covers sessions and shared instances.
+`market_run` was fetched with nothing loaded, and the two later queries loaded its account and its category. Outside a session there is no identity map, so each row of an included query gets its own related instance. [Identity map](../concepts/identity-map.md) covers sessions and shared instances.
 
 The three queries send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
--- populated_relations.py:accumulate (sqlite)
+-- loaded_relations.py:accumulate (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
 FROM "transaction"
 WHERE "transaction"."id" = ?
@@ -1516,12 +1516,12 @@ WHERE TRUE;
 
 Neither later query names `market_run`; the session matched its row by primary key.
 
-### Population after a refresh
+### A loaded relation after a refresh
 
-Every fetch refreshes the instances a session already holds. A refresh keeps a population only while the row's foreign key still points at it; if the foreign key changed, the population is dropped and the relation reads as the account the new key names:
+Every fetch refreshes the instances a session already holds. A refresh keeps a loaded relation only while the row's foreign key still points at it; if the foreign key changed, the loaded relation is dropped and the relation reads as the account the new key names:
 
 ```python
---8<-- "docs/examples/populated_relations.py:refresh-rule"
+--8<-- "docs/examples/loaded_relations.py:refresh-rule"
 ```
 
 After the row moved to Checking, `from_checking.account` no longer claims Savings; it is the Checking account this session already holds, so `.load()` sends nothing.
@@ -1529,7 +1529,7 @@ After the row moved to Checking, `from_checking.account` no longer claims Saving
 The three statements are the same on PostgreSQL, apart from the placeholders Ferro writes:
 
 ```sql
--- populated_relations.py:refresh-rule (sqlite)
+-- loaded_relations.py:refresh-rule (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
 FROM "transaction"
 LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
@@ -1555,12 +1555,12 @@ Ferro refuses these when you build the query, before any SQL:
 | Form | Error | Use instead |
 | :--- | :--- | :--- |
 | A `BackRef` or `ManyToMany` relation | `TypeError` | `await account.transactions.all()`; to filter on the relation, an [existence test](#existence-tests-on-reverse-many-to-many-relations) |
-| A string (`include("account")`) or a column (`include(lambda transaction: transaction.account.label)`) | `TypeError` | A lambda that names a relation; each populated step is a whole row |
+| A string (`include("account")`) or a column (`include(lambda transaction: transaction.account.label)`) | `TypeError` | A lambda that names a relation; each loaded step is a whole row |
 | `include()` with `select(...)`, in either order | `ValueError` | [A projection that reaches across the relation](#reaching-across-a-relation) |
 | `update()` or `delete()` on an included query | `ValueError` | The same query without `include()` |
 
 ```python
---8<-- "docs/examples/populated_relations.py:limits"
+--8<-- "docs/examples/loaded_relations.py:limits"
 ```
 
 Each refusal names the form to use. `include()` also works on a many-to-many query (`tag.transactions.include(lambda transaction: transaction.account)`), and with `where()`, `order_by()`, `limit()`, `offset()` and `first()`. The [`Query` reference](../api/queries.md#ferro.query.Query.include) lists its parameters.
@@ -1839,7 +1839,7 @@ Aggregates build on projection: `select(lambda transaction: {"total": transactio
 These query features are not available yet; the [Roadmap](../roadmap.md) tracks them:
 
 - `having()`, to filter on an aggregate. `where()` refuses an aggregate and names `having()`.
-- Populating a reverse or many-to-many relation with its rows. `include()` covers foreign keys; until then, await the relation (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
+- Loading a reverse or many-to-many relation with its rows. `include()` covers foreign keys; until then, await the relation (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
 - Referring to the outer row inside an existence test's inner lambda, for example comparing a split line's amount to its transaction's amount. Ferro refuses it when you build the query.
 - Case-insensitive `ilike()`.
 

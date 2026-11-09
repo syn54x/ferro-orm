@@ -200,29 +200,29 @@ Each foreign key becomes a constraint named `fk_<table>_<column>_<target table>`
 
 To filter or order by a column of the related model, a lambda can follow the relation, as in `Player.where(lambda player: player.team.name == "Rustaceans")`. [Querying across relationships](queries.md#querying-across-relationships) covers it.
 
-### Populated relations
+### Loaded relations
 
 Awaiting a forward relation in a loop runs one query per row. When a query will read a relation, ask for it with `include()`, and the related rows arrive in the same statement:
 
 ```python
---8<-- "docs/examples/relationships.py:populated"
+--8<-- "docs/examples/relationships.py:loaded"
 ```
 
 It prints:
 
-<!-- prints: relationships.py:populated -->
+<!-- prints: relationships.py:loaded -->
 ```text
 Corro | Rustaceans
 Ferris | Rustaceans
 Gordon | Gophers
 ```
 
-`player.team` is now the `Team` instance itself: reading it needs no `await` and runs no query. `include()` covers forward foreign keys only; load a `BackRef` or many-to-many collection with `await rustaceans.players.all()`. [Populating relations with `include()`](queries.md#populating-relations-with-include) covers nullable relations, multi-hop paths and how long a relation stays populated.
+`player.team` is now the `Team` instance itself: reading it needs no `await` and runs no query. `include()` covers forward foreign keys only; load a `BackRef` or many-to-many collection with `await rustaceans.players.all()`. [Loading relations with `include()`](queries.md#loading-relations-with-include) covers nullable relations, multi-hop paths and how long a relation stays loaded.
 
 The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- relationships.py:populated (sqlite)
+-- relationships.py:loaded (sqlite)
 SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id", "j1_team"."id" AS "j1_team__id", "j1_team"."name" AS "j1_team__name"
 FROM "player"
 LEFT JOIN "team" AS "j1_team" ON "player"."team_id" = "j1_team"."id"

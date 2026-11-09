@@ -86,11 +86,11 @@ def _dotted_order_key(entry: OrderByEntry) -> str:
 
 
 def _read_instance_order_value(row: Any, entry: OrderByEntry) -> Any:
-    """Walk a populated relation path; unpopulated is a loud build-time error.
+    """Walk a loaded relation path; unloaded is a loud build-time error.
 
-    Include-population puts the relation name in the instance ``__dict__``,
+    Include-loading puts the relation name in the instance ``__dict__``,
     shadowing the class-level ``ForwardDescriptor``. A missing key, or an
-    unloaded instance a first read cached there, is not populated — do not
+    unloaded instance a first read cached there, is not loaded — do not
     follow the descriptor.
     """
     from ..models import _FERRO_UNLOADED_ATTR
@@ -103,7 +103,7 @@ def _read_instance_order_value(row: Any, entry: OrderByEntry) -> Any:
         ):
             dotted = _dotted_order_key(entry)
             raise ValueError(
-                f"position_of() requires relation path {dotted!r} populated "
+                f"position_of() requires relation path {dotted!r} loaded "
                 "on the instance; pass a tuple if you only have the values"
             )
         if hop_value is None:
@@ -265,7 +265,7 @@ def _reject_reverse_relation_include(exc: AttributeError) -> None:
     a column or a forward relation; when the failing name (carried
     structurally on the exception) is a declared reverse or many-to-many
     relation of the hop's model, include() has a sharper story than
-    "no queryable column": reverse population is a separate future mechanism
+    "no queryable column": reverse loading is a separate future mechanism
     — a batched second query stitched onto the results — deliberately not
     ``include()``.
     """
@@ -276,11 +276,11 @@ def _reject_reverse_relation_include(exc: AttributeError) -> None:
     if not name or model is None:
         return
     if isinstance(getattr(model, name, None), RelationshipDescriptor):
-        raise _reverse_population_error(name) from None
+        raise _reverse_load_error(name) from None
 
 
-def _reverse_population_error(name: str) -> TypeError:
-    """The pinned include()-cannot-populate-a-reverse-relation error (#287).
+def _reverse_load_error(name: str) -> TypeError:
+    """The pinned include()-cannot-load-a-reverse-relation error (#287).
 
     One construction site for the two paths that reach it: a reverse relation
     the predicate proxies resolve (a `ReverseRelationProxy` selector
@@ -289,10 +289,10 @@ def _reverse_population_error(name: str) -> TypeError:
     `_reject_reverse_relation_include`).
     """
     return TypeError(
-        f"include() cannot populate {name!r}: it is a reverse (Reverse) "
-        "or many-to-many relation, and include() populates forward "
+        f"include() cannot load {name!r}: it is a reverse (Reverse) "
+        "or many-to-many relation, and include() loads forward "
         "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
-        "M2M population will be a separate mechanism — a batched second "
+        "M2M loading will be a separate mechanism — a batched second "
         "query stitched onto the results — not include(). Until it "
         f"lands, fetch the collection through the relation itself "
         f"(await instance.{name}.all())."
@@ -318,7 +318,7 @@ def _resolve_include_selector(
         TypeError: If ``selector`` is a string or otherwise not callable
             (strings never traverse, #280 — include is lambda-selector only),
             resolves to a column (`FieldProxy`) rather than a relation,
-            names a reverse or M2M relation (reverse population is a separate
+            names a reverse or M2M relation (reverse loading is a separate
             future mechanism, #287), or returns any other non-relation value.
     """
     if isinstance(selector, str):
@@ -341,14 +341,14 @@ def _resolve_include_selector(
         dotted = ".".join((*result.path, result.column))
         raise TypeError(
             f"include() selector resolved to the column {dotted!r}, not a "
-            "relation; include() populates whole related instances "
-            "(e.g. `lambda t: t.account`) — every populated hop is a complete "
+            "relation; include() loads whole related instances "
+            "(e.g. `lambda t: t.account`) — every loaded hop is a complete "
             "row, so there is nothing to select per column."
         )
     if isinstance(result, ReverseRelationProxy):
         # The predicate proxies resolve reverse relations now (#314), so the
-        # population rejection fires here rather than via AttributeError.
-        raise _reverse_population_error(result._name)
+        # loading rejection fires here rather than via AttributeError.
+        raise _reverse_load_error(result._name)
     if not isinstance(result, RelationProxy):
         raise TypeError(
             "include() selector must return a relation path "
@@ -677,7 +677,7 @@ class Query(Generic[T]):
         # for LEFT on the wire — implicit where()/order_by() traversal never
         # touches this, so explicit always beats implicit (#272).
         self._explicit_edges: dict[tuple[str, ...], str] = {}
-        # Relation paths to populate (#286, ADR-0008), insertion-ordered and
+        # Relation paths to load (#286, ADR-0008), insertion-ordered and
         # deduped by path identity (dict-as-ordered-set). CRITICAL: include
         # paths never enter ``_joins``/the wire ``joins`` section — they ride the
         # ``instances`` materialization plan, so the ``joins`` wire section
@@ -831,11 +831,11 @@ class Query(Generic[T]):
             raise ValueError(
                 "select() with a projection cannot be combined with "
                 "include(): a query carries exactly one materialization plan "
-                "— projected records or populated instances, never both, and "
+                "— projected records or loaded instances, never both, and "
                 "record results are flat (ADR-0009). Reach across the "
                 "relation with traversed projection instead (e.g. "
                 'select(lambda t: {"account_name": t.account.name})), or '
-                "populate instances with include() on an unprojected query."
+                "load instances with include() on an unprojected query."
             )
         if any(isinstance(selector, str) for selector in selectors):
             if not all(isinstance(selector, str) for selector in selectors):
@@ -1030,7 +1030,7 @@ class Query(Generic[T]):
         plain attribute that holds the related instance, with no `await`
         and no second query. `include()` never changes which rows come back
         or how many. A path through several relations fills in each one. See
-        [Populating relations with include()](../guide/queries.md#populating-relations-with-include).
+        [Loading relations with include()](../guide/queries.md#loading-relations-with-include).
 
         Args:
             selector: A lambda returning a foreign key relation, such as
@@ -2060,10 +2060,10 @@ class ProjectedQuery(Query[T]):
         raise ValueError(
             "include() cannot be combined with a projection: a query carries "
             "exactly one materialization plan — projected records or "
-            "populated instances, never both, and record results are flat "
+            "loaded instances, never both, and record results are flat "
             "(ADR-0009). Reach across the relation with traversed projection "
             'instead (e.g. select(lambda t: {"account_name": '
-            "t.account.name})), or populate instances with include() on an "
+            "t.account.name})), or load instances with include() on an "
             "unprojected query."
         )
 

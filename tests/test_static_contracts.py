@@ -206,7 +206,7 @@ def test_junk_lambda_predicates_fail_the_type_checker():
 
 def test_include_chains_pass_the_type_checker():
     """An included query stays Query[T]-shaped: .all() is list[T], .first()
-    is T | None, and populated access types as the declared annotation
+    is T | None, and loaded access types as the declared annotation
     (#286, ADR-0008 — no distinct loaded type)."""
     result = _run_ty(FIXTURES / "good_includes.py")
     assert result.returncode == 0, (

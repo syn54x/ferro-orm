@@ -111,7 +111,7 @@ async def main() -> None:
         assert 'CONSTRAINT "fk_player_team_id_team"' in player_ddl
         assert '"idx_player_team_id" ON "player" ("team_id")' in player_ddl
 
-        # --8<-- [start:populated]
+        # --8<-- [start:loaded]
         players = (
             await Player.select()
             .include(lambda player: player.team)
@@ -120,7 +120,7 @@ async def main() -> None:
         )
         for player in players:
             print(player.name, "|", player.team.name)  # no await
-        # --8<-- [end:populated]
+        # --8<-- [end:loaded]
         assert [(player.name, player.team.name) for player in players] == [
             ("Corro", "Rustaceans"),
             ("Ferris", "Rustaceans"),

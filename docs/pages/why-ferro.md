@@ -50,7 +50,7 @@ Ferro is not the right choice for every project:
 
 - Ferro supports Python 3.13 and newer only.
 - The API is async-only. If your application is synchronous, such as classic Flask or scripts without an event loop, Ferro is a poor fit.
-- The feature set is young. Ferro covers models, queries, mutations, relationships (including forward-FK population with `include()`), partial selects, grouped aggregations, transactions and migrations. Some features of mature ORMs are missing: `having()`, reverse and many-to-many collection population, and the `*`, `/` and `.concat()` operators in update expressions. The [Roadmap](roadmap.md) lists what is planned.
+- The feature set is young. Ferro covers models, queries, mutations, relationships (including forward-FK loading with `include()`), partial selects, grouped aggregations, transactions and migrations. Some features of mature ORMs are missing: `having()`, reverse and many-to-many collection loading, and the `*`, `/` and `.concat()` operators in update expressions. The [Roadmap](roadmap.md) lists what is planned.
 - The ecosystem is smaller: fewer integrations, plugins and Stack Overflow answers than SQLAlchemy or Django.
 - Contributing to the engine, or building from source, needs a Rust toolchain. Using Ferro does not.
 

@@ -1078,8 +1078,8 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         raise ValueError(
             f"{operation}() does not support include(): a mutation is a "
             "single-table write shape and returns no instances to "
-            "populate. Drop the .include(...) call, or fetch the "
-            "populated rows first and mutate by primary-key set."
+            "load. Drop the .include(...) call, or fetch the "
+            "loaded rows first and mutate by primary-key set."
         )
 
 

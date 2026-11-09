@@ -456,23 +456,23 @@ pub fn refresh_model_instance<'py>(
     if dict.contains(UNLOADED_MARKER)? {
         dict.del_item(UNLOADED_MARKER)?;
     }
-    prune_stale_populations(py, cls, dict)?;
+    prune_stale_loaded_relations(py, cls, dict)?;
     Ok(())
 }
 
-/// The refresh rule for populated relations (#287, ADR-0008): keep each
-/// population iff it is still true.
+/// The refresh rule for loaded relations (#287, ADR-0008): keep each
+/// loaded relation iff it is still true.
 ///
-/// After a refresh overwrites the decoded columns, every populated relation
+/// After a refresh overwrites the decoded columns, every loaded relation
 /// (a `__dict__` entry under a relation field name) is checked against the
-/// freshly decoded shadow FK: the population survives iff the FK still
-/// equals the populated instance's primary key (a populated `None` survives
-/// iff the FK is still NULL) — so populations accumulate across a session's
+/// freshly decoded shadow FK: the loaded relation survives iff the FK still
+/// equals the loaded instance's primary key (a loaded `None` survives
+/// iff the FK is still NULL) — so loaded relations accumulate across a session's
 /// queries. An unloaded instance cached under the relation follows the same
 /// rule. An FK that changed or went NULL drops the entry: the next read
 /// finds or builds the instance the new key names (ADR-0063) — never
 /// silently wrong.
-fn prune_stale_populations<'py>(
+fn prune_stale_loaded_relations<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     dict: &Bound<'py, pyo3::types::PyDict>,
@@ -484,15 +484,15 @@ fn prune_stale_populations<'py>(
         return Ok(());
     };
     for (relation, spec) in specs.iter() {
-        let Some(population) = dict.get_item(&relation)? else {
-            continue; // unpopulated: nothing to check
+        let Some(loaded) = dict.get_item(&relation)? else {
+            continue; // unloaded: nothing to check
         };
         let fk_column = spec.getattr(pyo3::intern!(py, "fk_column"))?;
         let new_fk = dict.get_item(&fk_column)?;
-        let keep = match (&new_fk, population.is_none()) {
-            // Populated `None` stays truthful while the FK stays NULL.
+        let keep = match (&new_fk, loaded.is_none()) {
+            // Loaded `None` stays truthful while the FK stays NULL.
             (Some(fk), true) => fk.is_none(),
-            // A live population survives iff the fresh FK equals its PK.
+            // A live loaded relation survives iff the fresh FK equals its PK.
             // The target class's own primary-key field, not the engine's
             // registration: a key assigned before `connect()` runs this too.
             (Some(fk), false) if !fk.is_none() => {
@@ -505,10 +505,10 @@ fn prune_stale_populations<'py>(
                         crate::state::model_identity(&target)?
                     )));
                 }
-                let pk_val = population.getattr(pk_field.cast::<pyo3::types::PyString>()?)?;
+                let pk_val = loaded.getattr(pk_field.cast::<pyo3::types::PyString>()?)?;
                 fk.eq(pk_val)?
             }
-            // FK went NULL under a live population, or the shadow column is
+            // FK went NULL under a live loaded relation, or the shadow column is
             // missing from the refreshed row (cannot happen on a full-row
             // decode — the refresh precondition): drop, never guess.
             _ => false,
@@ -523,7 +523,7 @@ fn prune_stale_populations<'py>(
 /// Apply the refresh rule to an instance whose columns Python just replaced.
 ///
 /// `Model.refresh()` without an identity map copies a fetched row into the
-/// instance it holds; this runs [`prune_stale_populations`] on it, the rule a
+/// instance it holds; this runs [`prune_stale_loaded_relations`] on it, the rule a
 /// fetch applies when it refreshes an instance in place, so the two agree.
 ///
 /// # Errors
@@ -533,19 +533,19 @@ fn prune_stale_populations<'py>(
 pub fn prune_stale_relations(py: Python<'_>, instance: Bound<'_, PyAny>) -> PyResult<()> {
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
     let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-    prune_stale_populations(py, &instance.get_type().into_any(), dict)
+    prune_stale_loaded_relations(py, &instance.get_type().into_any(), dict)
 }
 
-/// Populate a forward-FK relation on a hydrated instance (#286, ADR-0008).
+/// Load a forward-FK relation on a hydrated instance (#286, ADR-0008).
 ///
-/// The population contract: the relation field name enters the instance's
+/// The loaded-relation contract: the relation field name enters the instance's
 /// `__dict__`, shadowing the class-level non-data `ForwardDescriptor`, so
 /// access is a plain attribute returning the complete related instance —
-/// no await, no query. `value: None` is a *populated* `None` (a nullable FK
+/// no await, no query. `value: None` is a *loaded* `None` (a nullable FK
 /// with no target). `value` may also be an unloaded instance, for an include
 /// whose key matched no row (ADR-0063). An instance with no entry under the
 /// relation name reads the relation through the descriptor on first access.
-pub fn set_populated_relation<'py>(
+pub fn set_loaded_relation<'py>(
     py: Python<'py>,
     instance: &Bound<'py, PyAny>,
     relation: &str,

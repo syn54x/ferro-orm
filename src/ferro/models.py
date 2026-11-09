@@ -868,7 +868,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         connection the instance came from and fills the same object, so every
         reference to it sees the row. On a complete instance it sends no
         statement. See
-        [Loaded relations](../guide/queries.md#populating-relations-with-include).
+        [Loaded relations](../guide/queries.md#loading-relations-with-include).
 
         Returns:
             The instance itself, now complete.

@@ -188,7 +188,7 @@ class InstanceNotLoaded(FerroError, AttributeError):
     query, or call `.load()` on the instance. It is also an
     `AttributeError`, so `hasattr()` returns `False` and `getattr()` with a
     default returns the default. See
-    [Loaded relations](../guide/queries.md#populating-relations-with-include).
+    [Loaded relations](../guide/queries.md#loading-relations-with-include).
 
     Examples:
         ```python {test=run prelude=reference}

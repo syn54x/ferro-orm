@@ -220,7 +220,7 @@ Once the models are all Ferro, move to Ferro's own [migrations](../guide/schema/
 
 Some SQLAlchemy features map differently, or have no Ferro counterpart today:
 
-- **Eager loading** (`selectinload` / `joinedload`): forward-FK paths populate with [`include()`](../guide/queries.md#populating-relations-with-include) in one statement; `BackRef` and many-to-many collections still load lazily per access.
+- **Eager loading** (`selectinload` / `joinedload`): forward-FK paths load with [`include()`](../guide/queries.md#loading-relations-with-include) in one statement; `BackRef` and many-to-many collections still load lazily per access.
 - **Partial column selects** (`select(User.id, User.name)`): [`select(lambda user: (user.id, user.username))`](../guide/queries.md#selecting-a-column-subset) returns projected records; traversal and output aliases use the dict form.
 - **`func.sum` / `avg` / `min` / `max` and `group_by()`**: aggregate methods on columns (`order.amount.sum()`), with [grouping derived from the projection](../guide/aggregations.md). There is deliberately no `group_by()` chainer. `having()` is not built yet; filter groups in Python or use [raw SQL](../guide/raw-sql.md).
 - **Atomic update expressions**: written as a recipe, not SQLAlchemy's `update().values(...)`: `update(lambda counter: {"n": counter.n + 1, "updated_at": now})`. Keyword `update()` accepts literals only. `update()` recipes support Postgres `.merge()`; `.concat()` is planned.

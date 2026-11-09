@@ -112,7 +112,7 @@ assert [(post.title, post.author.name) for post in posts] == [
 ]
 ```
 
-Each `post.author` arrives populated, with no second query. Reverse and many-to-many collections are not populated yet, so awaiting `author.posts` in a loop issues one query per author (the N+1 pattern); see the [roadmap](roadmap.md#query-features). See [Queries](guide/queries.md#populating-relations-with-include) for the full contract.
+Each `post.author` arrives loaded, with no second query. Reverse and many-to-many collections are not loaded yet, so awaiting `author.posts` in a loop issues one query per author (the N+1 pattern); see the [roadmap](roadmap.md#query-features). See [Queries](guide/queries.md#loading-relations-with-include) for the full contract.
 
 ## Speed
 
