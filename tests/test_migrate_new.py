@@ -47,7 +47,8 @@ HEADER = """\
 from enum import StrEnum
 from typing import Annotated
 
-from ferro import Forward, Model, Relation, Reverse, RowPolicy, RowSecurity
+# Every public name, so a model source any test writes finds what it uses.
+from ferro import *
 from ferro.base import FerroField
 """
 
