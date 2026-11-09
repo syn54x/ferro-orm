@@ -317,16 +317,30 @@ def _layers(annotation: Any) -> tuple[Any, bool, list[Any]]:
         return annotation, wrapped, metadata
 
 
-def _relation_in_metadata(metadata: list[Any]) -> tuple[str, str] | None:
-    """The ``(spelling, column)`` of a ``Forward``/``Reverse`` in ``Annotated`` metadata."""
-    for item in metadata:
-        if not isinstance(item, FieldInfo):
+_RELATION_KINDS = ("forward", "reverse", "many_to_many")
+
+
+def _relation_marker(
+    field_name: str, annotation: Any, namespace: dict
+) -> tuple[str, dict[str, Any], bool] | None:
+    """The relation a field declares: ``(kind, options, in_metadata)``.
+
+    ``kind`` is ``"forward"``, ``"reverse"`` or ``"many_to_many"``, and
+    ``options`` the keywords its ``Forward``, ``Reverse`` or ``ManyToMany``
+    carries. The marker is read from the annotation's ``Annotated`` metadata,
+    under any ``| None``, then from the value the field is assigned;
+    ``in_metadata`` says it sat in the metadata, where a relation is refused.
+    ``None`` when the field declares no relation.
+    """
+    holders = [(item, True) for item in _layers(annotation)[2]]
+    holders.append((namespace.get(field_name), False))
+    for holder, in_metadata in holders:
+        if not isinstance(holder, FieldInfo):
             continue
-        for option in item.metadata:
+        for option in holder.metadata:
             if isinstance(option, _RelationOptions):
-                for spelling in ("Forward", "Reverse"):
-                    if spelling.lower() in option.options:
-                        return spelling, option.options[spelling.lower()]
+                kind = next(k for k in _RELATION_KINDS if k in option.options)
+                return kind, option.options, in_metadata
     return None
 
 
@@ -1056,38 +1070,6 @@ class ModelMetaclass(type(BaseModel)):
         return declared
 
     @staticmethod
-    def _field_ferro_payload(obj: Any) -> dict[str, Any]:
-        """Return what a ``Forward``, ``Reverse`` or ``ManyToMany`` left in a field's metadata."""
-        if not isinstance(obj, FieldInfo):
-            return {}
-        payload: dict[str, Any] = {}
-        for metadata in obj.metadata:
-            if isinstance(metadata, _RelationOptions):
-                payload.update(metadata.options)
-        return payload
-
-    @staticmethod
-    def _relationship_field_payload(
-        field_name: str, hint: Any, namespace: dict
-    ) -> dict[str, Any]:
-        """Return the relation a ``Forward``, ``Reverse`` or ``ManyToMany`` declares.
-
-        Read from the field's default, then from its ``Annotated`` metadata,
-        under any ``| None`` wrapper.
-        """
-        default_val = namespace.get(field_name)
-        payload = ModelMetaclass._field_ferro_payload(default_val)
-        if payload:
-            return payload
-
-        for item in _layers(hint)[2]:
-            payload = ModelMetaclass._field_ferro_payload(item)
-            if payload:
-                return payload
-
-        return {}
-
-    @staticmethod
     def _resolve_deferred_annotations(namespace: dict) -> dict[str, Any]:
         """
         Resolve deferred annotations (PEP 649) if present.
@@ -1155,49 +1137,36 @@ class ModelMetaclass(type(BaseModel)):
             # or `Annotated[...]` wrapper, so every spelling is seen with or
             # without postponed annotations.
             evaluated = _evaluated(hint, namespace, frame_ns)
-            field_metadata = _layers(evaluated)[2]
-            relationship_payload = ModelMetaclass._relationship_field_payload(
-                field_name, evaluated, namespace
-            )
-            declared = _relation_in_metadata(field_metadata)
-            in_metadata = declared is not None
-            assigned = ModelMetaclass._field_ferro_payload(namespace.get(field_name))
-            for spelling in ("Forward", "Reverse"):
-                column = assigned.get(spelling.lower())
-                if column is not None and declared is None:
-                    declared = (spelling, column)
-            if declared is not None:
-                spelling, column = declared
+            marker = _relation_marker(field_name, evaluated, namespace)
+            if marker is None:
+                continue
+            kind, options, in_metadata = marker
+            if kind == "many_to_many":
+                if options.get("retired") is True:
+                    raise _many_to_many_retired(model_name, field_name)
+                relation = _declared_many_to_many(
+                    model_name,
+                    field_name,
+                    evaluated,
+                    options,
+                    in_metadata=in_metadata,
+                    table=ModelMetaclass._resolve_table_name(model_name, namespace),
+                    namespace=namespace,
+                    scope=scope,
+                )
+            else:
                 relation = _declared_relation(
                     model_name,
                     field_name,
                     evaluated,
-                    spelling,
-                    column,
+                    "Forward" if kind == "forward" else "Reverse",
+                    options[kind],
                     in_metadata=in_metadata,
                     namespace=namespace,
                     annotations=annotations,
                     frame_ns=frame_ns,
                     scope=scope,
                 )
-                local_relations[field_name] = relation
-                pending_relations.append((field_name, relation))
-                fields_to_remove.append(field_name)
-                continue
-            if relationship_payload.get("many_to_many") is not True:
-                continue
-            if relationship_payload.get("retired") is True:
-                raise _many_to_many_retired(model_name, field_name)
-            relation = _declared_many_to_many(
-                model_name,
-                field_name,
-                evaluated,
-                relationship_payload,
-                in_metadata=assigned.get("many_to_many") is not True,
-                table=ModelMetaclass._resolve_table_name(model_name, namespace),
-                namespace=namespace,
-                scope=scope,
-            )
             local_relations[field_name] = relation
             pending_relations.append((field_name, relation))
             fields_to_remove.append(field_name)
