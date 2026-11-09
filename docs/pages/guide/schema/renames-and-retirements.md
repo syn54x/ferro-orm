@@ -121,7 +121,7 @@ ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_author_id_author" TO
 ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO "fk_author_tags_tag_id_tag";
 ```
 
-Without `renamed_from=`, the new name is a new table: `new` writes a `CREATE TABLE` and a destructive `DROP TABLE`, and the links are lost. The hint follows the rules of every other hint: it is live only while the old table stands alone, auto-migrate honours it under `migrate_updates`, and a name it cannot have been (not a table name, the name `through=` gives now, or a table the models still declare) is refused before any migration runs, with the declaration to write instead. The example `docs/examples/migrations_rename_join_table.py` runs this rename end to end.
+Without `renamed_from=`, the new name is a new table: `new` writes a `CREATE TABLE` and a destructive `DROP TABLE`, and the links are lost. The hint follows the rules of every other hint: it is live only while the old table stands alone, auto-migrate honours it under `migrate_updates`, and an old name the models still declare is refused the same way. A name that is not a table name, or is the name `through=` gives now, is refused at class definition with the declaration to write instead. The example `docs/examples/migrations_rename_join_table.py` runs this rename end to end.
 
 ## Renaming under a rolling deploy
 
