@@ -17,7 +17,12 @@ from ..base import (
     ManyToManyRelation,
     ReverseRelation,
 )
-from ..columns import ColumnSpec, fk_column_spec, pk_python_type_for_model
+from ..columns import (
+    ColumnSpec,
+    RetiredField,
+    fk_column_spec,
+    pk_python_type_for_model,
+)
 from ..fields import annotation_text, field_line, field_options
 from ..ir.compiler import (
     RenameHints,
@@ -446,7 +451,7 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
     """
     info = model_cls.model_fields.get(name)
     if info is None:
-        return  # retired: its column keeps the spec it was compiled with
+        return  # retired: no field to check, its foreign key resolved above
     model = model_cls.__name__
     pk, key_type = _target_key(model_cls, name, target)
     nullable = annotation_allows_none(info.annotation)
@@ -1114,8 +1119,8 @@ def check_forward_relation(
         )
 
 
-def _retired_fields(model_cls: Any) -> dict:
-    """The model's retired columns, which a relation can no longer read."""
+def _retired_fields(model_cls: Any) -> dict[str, RetiredField]:
+    """The model's retired fields, whose columns a relation can no longer read."""
     return model_cls.__dict__.get("__ferro_retired_fields__") or {}
 
 
@@ -1329,7 +1334,12 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
                     relation.renamed_from,
                 )
             check_join_table_rename(model_cls, name, relation)
-    for name, meta in model_cls.__ferro_fields__.items():
+    # A retired key column keeps its foreign key, so its target resolves too.
+    key_columns = {
+        **model_cls.__ferro_fields__,
+        **{name: field.options for name, field in _retired_fields(model_cls).items()},
+    }
+    for name, meta in key_columns.items():
         if meta.foreign_key is None:
             continue
         if isinstance(meta.foreign_key, type):

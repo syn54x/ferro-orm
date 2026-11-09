@@ -36,7 +36,7 @@ from .base import (
     ManyToManyRelation,
     ReverseRelation,
 )
-from .columns import build_column_specs
+from .columns import RetiredField, build_column_specs
 from .fields import (
     Field,
     Forward,
@@ -986,9 +986,10 @@ class ModelMetaclass(type(BaseModel)):
         """Take the retired fields out of the model (ADR-0053).
 
         A retired field's column spec is derived here, once, while the field
-        is still a Pydantic field (its annotation resolved, its ``db_type``,
-        enum and foreign key read the one way every column's are); then the
-        field leaves the Pydantic model, so the model has no attribute,
+        is still a Pydantic field (its annotation resolved, its ``db_type``
+        and enum read the one way every column's are), and kept with its
+        options, from which every compile reads its foreign key again; then
+        the field leaves the Pydantic model, so the model has no attribute,
         keyword or dump key for it.
 
         Raises:
@@ -1017,8 +1018,10 @@ class ModelMetaclass(type(BaseModel)):
         if retired:
             specs = build_column_specs(cls)
             retired_fields = {
-                field_name: replace(specs[field_name], nullable=True, retired=True)
-                for field_name in retired
+                field_name: RetiredField(
+                    replace(specs[field_name], nullable=True, retired=True), meta
+                )
+                for field_name, meta in retired.items()
             }
             for field_name in retired:
                 del cls.__pydantic_fields__[field_name]

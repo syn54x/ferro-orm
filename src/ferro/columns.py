@@ -42,6 +42,7 @@ __all__ = [
     "ColumnSpec",
     "ForeignKeyRef",
     "RelationSpec",
+    "RetiredField",
     "ReverseSpec",
     "build_column_specs",
     "build_relation_specs",
@@ -457,6 +458,27 @@ def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
     return None
 
 
+def foreign_key_ref(options: FerroField) -> ForeignKeyRef | None:
+    """Return the foreign key a column's options declare, or `None`.
+
+    The one place a foreign-key column's target table is read: a target
+    written by name reads the table of the model the name resolves to now,
+    so a column compiled again once relations resolve points at it.
+
+    Args:
+        options: The column's declared options.
+
+    Returns:
+        The foreign key, or `None` when the column declares none.
+    """
+    if options.foreign_key is None:
+        return None
+    return ForeignKeyRef(
+        to_table=_target_table_name(options.foreign_key),
+        on_delete=options.on_delete,
+    )
+
+
 def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     """Build one `ColumnSpec` per schema property, in model-field order.
 
@@ -505,14 +527,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             declared.autoincrement, is_pk, _property_is_integer(prop)
         )
 
-        fk_ref = (
-            ForeignKeyRef(
-                to_table=_target_table_name(declared.foreign_key),
-                on_delete=declared.on_delete,
-            )
-            if declared.foreign_key is not None
-            else None
-        )
+        fk_ref = foreign_key_ref(declared)
 
         explicit_nullable = (
             declared.nullable if isinstance(declared.nullable, bool) else None
@@ -798,12 +813,23 @@ def fk_column_spec(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RetiredField:
+    """A retired field: its column as compiled while it was a field, and its options."""
+
+    spec: ColumnSpec
+    """The column, flagged retired and nullable, compiled at class creation."""
+    options: FerroField
+    """The options the field declared, its `foreign_key` among them."""
+
+
 def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     """Return the retired columns of `model_cls`, flagged and nullable.
 
-    A retired field's spec, a foreign-key column's included, was derived once
-    at class creation, before the field left the Pydantic model
-    (`__ferro_retired_fields__`).
+    A retired field's spec was derived once at class creation, before the
+    field left the Pydantic model (`__ferro_retired_fields__`). Its foreign
+    key is read again on every compile, as a live column's is, so a target
+    written by name points at the table it resolves to.
 
     Args:
         model_cls: The model class.
@@ -811,7 +837,13 @@ def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     Returns:
         The retired columns' specs, keyed by column name.
     """
-    return dict(model_cls.__dict__.get("__ferro_retired_fields__", {}))
+    retired: dict[str, RetiredField] = model_cls.__dict__.get(
+        "__ferro_retired_fields__", {}
+    )
+    return {
+        name: replace(field.spec, foreign_key=foreign_key_ref(field.options))
+        for name, field in retired.items()
+    }
 
 
 def retired_clause(model_cls: type[Any], name: str) -> str:
