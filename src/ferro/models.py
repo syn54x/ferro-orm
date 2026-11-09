@@ -380,14 +380,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
     __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
-    #: Reverse (BackRef) relation facts for existence tests (#314, ADR-0007),
+    #: Reverse and many-to-many relation facts for existence tests (#314, ADR-0007),
     #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
     __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}
     #: Retired columns (ADR-0053), refreshed at the same compile choke point:
     #: in the schema snapshot, never in ``__ferro_columns__``.
     __ferro_retired_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
-    #: Every name a retired declaration took out of the model: retired fields,
-    #: retired relations and their shadow ``*_id`` columns.
+    #: Every name a retired declaration took out of the model: its retired
+    #: fields, foreign-key columns included.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     #: Each generated column (ADR-0058) and the columns its expression reads,
     #: refreshed at the same compile choke point.

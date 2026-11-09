@@ -811,7 +811,7 @@ async def test_backref_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(BackRef\) or many-to-many.*batched second query",
+        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
     ):
         INAccount.select().include(lambda a: a.transactions)
 
@@ -821,7 +821,7 @@ async def test_m2m_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(BackRef\) or many-to-many.*batched second query",
+        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
     ):
         INMPost.select().include(lambda p: p.tags)
 

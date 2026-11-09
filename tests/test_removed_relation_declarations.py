@@ -10,6 +10,10 @@ Every refusal links the upgrading section; the form that replaces each one
 declares the key column itself.
 """
 
+import ast
+import re
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -120,9 +124,14 @@ def test_field_refuses_each_old_relation_keyword(keyword, value, reason):
     assert "Did you mean" not in str(refused.value)
 
 
-def test_many_to_many_refuses_related_name():
+@pytest.mark.parametrize(
+    "options",
+    [{"related_name": "players"}, {"related_name": "players", "through": "x"}],
+    ids=["alone", "beside through"],
+)
+def test_many_to_many_refuses_related_name(options):
     with pytest.raises(TypeError) as refused:
-        ManyToMany(related_name="players", through="player_tournaments")
+        ManyToMany(**options)
 
     assert str(refused.value) == (
         "ManyToMany(related_name=...) is gone: the other model declares "
@@ -130,9 +139,69 @@ def test_many_to_many_refuses_related_name():
     )
 
 
-def test_many_to_many_needs_through():
-    with pytest.raises(TypeError, match="through"):
-        ManyToMany()
+def test_a_misspelled_through_names_the_keyword():
+    with pytest.raises(TypeError) as refused:
+        ManyToMany(throgh="player_tournaments")
+
+    assert str(refused.value) == (
+        "ManyToMany() got an unknown keyword 'throgh'. Did you mean 'through'?"
+    )
+
+
+def test_a_many_to_many_without_through_is_refused_naming_the_table_to_write():
+    class Tournament(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    with pytest.raises(TypeError) as refused:
+
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            tournaments: Relation[list[Tournament]] = ManyToMany()
+
+    assert str(refused.value).endswith(
+        "Write: tournaments: Relation[list[Tournament]] = "
+        'ManyToMany(through="player_tournaments")'
+    )
+
+
+# -- no text names a removed declaration ---------------------------------------------
+
+_REMOVED = re.compile(r"\b(ForeignKey|BackRef)\b")
+
+
+def _refusal_of_a_removed_name(path: Path, node: ast.AST) -> bool:
+    """The refusals that name the removed declarations on purpose."""
+    if path.name != "__init__.py" or path.parent.name != "ferro":
+        return False
+    if isinstance(node, ast.FunctionDef):
+        return node.name == "__getattr__"
+    return isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "_REMOVED_NAMES"
+        for target in node.targets
+    )
+
+
+def test_no_message_or_docstring_names_a_removed_declaration():
+    root = Path(ferro.__file__).parent
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skipped = {
+            id(inner)
+            for node in tree.body
+            if _refusal_of_a_removed_name(path, node)
+            for inner in ast.walk(node)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in skipped
+                and _REMOVED.search(node.value)
+            ):
+                found.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert found == []
 
 
 # -- what replaces them ---------------------------------------------------------------

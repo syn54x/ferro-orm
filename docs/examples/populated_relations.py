@@ -151,7 +151,7 @@ async def main() -> None:
         try:
             Account.select().include(lambda account: account.transactions)
         except TypeError as error:
-            assert "reverse (BackRef) or many-to-many" in str(error)
+            assert "reverse (Reverse) or many-to-many" in str(error)
         else:
             raise AssertionError("including a reverse relation must raise")
 

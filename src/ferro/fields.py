@@ -860,7 +860,10 @@ def Field(
 if TYPE_CHECKING:
     # How a relation reads to a type checker: a field specifier that is never
     # an `__init__` parameter (PEP 681). At runtime each one refuses `init`,
-    # and the constructor refuses a relation keyword itself.
+    # and the constructor refuses a relation keyword itself. `through` is
+    # required here; at runtime it is optional, so Ferro's own refusals (a
+    # removed or unknown keyword, then a missing `through=` with the table to
+    # write) run before Python's argument binding could.
     def ManyToMany(
         *,
         through: str,
@@ -877,7 +880,7 @@ else:
 
     def ManyToMany(
         *,
-        through: str,
+        through: str | None = None,
         renamed_from: str | None = None,
         reverse_index: bool = True,
         **unknown: Any,
@@ -892,9 +895,9 @@ else:
         See [Many-to-many](../guide/relationships.md#many-to-many).
 
         Args:
-            through: The join table's name. Required; a name that is not a
-                table name is refused when the class is defined, naming the
-                table to write.
+            through: The join table's name. Required: a model with no
+                `through=`, or one that is not a table name, is refused when
+                its class is defined, naming the table to write.
             renamed_from: The join table's previous name, so that
                 `ferro migrate new` and auto-migrate rename the table and keep
                 its rows. See [Renaming a join
@@ -907,10 +910,9 @@ else:
             The field's metadata, as [`Field`][ferro.Field] returns it.
 
         Raises:
-            TypeError: `through` is missing, or any other keyword is given,
-                such as a column option (a many-to-many adds no column) or
-                `related_name`, which the other model's
-                [`Reverse`][ferro.Reverse] replaces.
+            TypeError: Any other keyword, such as a column option (a
+                many-to-many adds no column) or `related_name`, which the
+                other model's [`Reverse`][ferro.Reverse] replaces.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -1037,7 +1039,7 @@ else:
 
 
 def _many_to_many_field(
-    through: str,
+    through: str | None,
     renamed_from: str | None,
     reverse_index: bool,
     unknown: dict[str, Any],

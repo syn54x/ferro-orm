@@ -262,7 +262,7 @@ pub struct SchemaRenamedLabels {
 /// Foreign-key edge from `column` to `to_table.to_column`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaForeignKey {
-    /// Local column (shadow `*_id` when using `ForeignKey`).
+    /// The foreign-key column on this table.
     pub column: String,
     /// Referenced table.
     pub to_table: String,
@@ -649,7 +649,7 @@ pub struct QueryJoin {
 pub struct QueryJoinHop {
     /// Relation field name on the source side of this hop.
     pub relation: String,
-    /// Local column the hop joins from (shadow `*_id` for `ForeignKey`).
+    /// Local column the hop joins from (the forward relation's foreign-key column).
     pub from_column: String,
     /// Table this hop joins into.
     pub to_table: String,

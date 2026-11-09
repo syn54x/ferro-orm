@@ -43,7 +43,7 @@ def _first_read_route(instance: object) -> "RouteHandle | None":
 
 
 class RelationshipDescriptor(BaseModel):
-    """The attribute behind a reverse (`BackRef`) or many-to-many relation.
+    """The attribute behind a reverse (`Reverse`) or many-to-many relation.
 
     On an instance, the relation reads as a [`Relation`][ferro.Relation]
     query over the related rows at every cardinality; a one-to-one reverse
@@ -54,8 +54,7 @@ class RelationshipDescriptor(BaseModel):
     target_model_name: str
     """The related model's name."""
     field_name: str
-    """The relation's name: a `BackRef`'s forward relation on the related
-    model, or this relation's own field."""
+    """The relation's own field name."""
     fk_column: str | None = None
     """The related model's foreign-key column that points back; `None` for
     a many-to-many relation."""

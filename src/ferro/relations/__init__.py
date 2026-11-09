@@ -1383,25 +1383,48 @@ def _resolve_declared_foreign_key(
 _DECLARED_ORDER = {FerroField: 0, ForwardRelation: 1, ReverseRelation: 2}
 
 
-def _refuse_shared_join_table(
+def _refuse_taken_join_table(
     source_model: Any,
     field_name: str,
     relation: ManyToManyRelation,
     target_model: Any,
     join_table: str,
 ) -> None:
-    """Refuse a many-to-many whose join table another many-to-many declares.
+    """Refuse a many-to-many whose join table is a model's table, or one
+    another many-to-many declares.
 
-    Two relations over one join table would read and write each other's
-    rows, so the second one is refused, its fix a join table no other
-    declaration holds.
+    A join table over a model's table would write link rows into that
+    model's rows, and two relations over one join table would read and write
+    each other's rows, so the declaration is refused, its fix a join table
+    no other declaration holds.
     """
+    owner = next(
+        (
+            model.__name__
+            for model in REGISTRY.models().values()
+            if getattr(model, "__ferro_table__", None) == join_table
+        ),
+        None,
+    )
     held = REGISTRY.join_tables().get(join_table)
     declared_by = (source_model.__ferro_identity__, field_name)
-    if not isinstance(held, dict) or held.get("declared_by") in (None, declared_by):
+    if owner is not None:
+        reason = (
+            f"through={json.dumps(join_table)} names the table of the model "
+            f"{owner}, and a join table needs a table of its own"
+        )
+    elif isinstance(held, dict) and held.get("declared_by") not in (
+        None,
+        declared_by,
+    ):
+        holder, holder_field = held["declared_by"]
+        holder_name = REGISTRY.models()[holder].__name__
+        reason = (
+            f"{holder_name}.{holder_field} already declares the join table "
+            f"{join_table}, and two relations over one join table share their rows"
+        )
+    else:
         return
-    holder, holder_field = held["declared_by"]
-    holder_name = REGISTRY.models()[holder].__name__
     through = _free_table_name(
         _default_join_table(source_model.__ferro_table__, field_name),
         _tables_taken(source_model, field_name) | {join_table},
@@ -1416,11 +1439,7 @@ def _refuse_shared_join_table(
     )
     model = source_model.__name__
     raise DeclarationRefusal(
-        model,
-        field_name,
-        f"{holder_name}.{holder_field} already declares the join table "
-        f"{join_table}, and two relations over one join table share their rows",
-        [Edit(model, field_name, "replace", (line,))],
+        model, field_name, reason, [Edit(model, field_name, "replace", (line,))]
     )
 
 
@@ -1477,15 +1496,7 @@ def resolve_relationships():
         target_table = target_model.__ferro_table__
         join_table = rel.through
 
-        for key, other in REGISTRY.models().items():
-            if getattr(other, "__ferro_table__", None) == join_table:
-                raise RuntimeError(
-                    f"M2M relation '{model_name}.{field_name}' derives join "
-                    f"table '{join_table}', which is already the table of "
-                    f"model '{key}'. Set through= on the relation or "
-                    "__ferro_table__ on the model to resolve the collision."
-                )
-        _refuse_shared_join_table(
+        _refuse_taken_join_table(
             source_model, field_name, rel, target_model, join_table
         )
 

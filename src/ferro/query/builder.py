@@ -259,7 +259,7 @@ def _resolve_join_selector(
 
 
 def _reject_reverse_relation_include(exc: AttributeError) -> None:
-    """Raise pointedly when an include selector names a BackRef/M2M (#287).
+    """Raise pointedly when an include selector names a reverse or M2M relation (#287).
 
     The validating proxies raise ``AttributeError`` for any name that is not
     a column or a forward relation; when the failing name (carried
@@ -289,7 +289,7 @@ def _reverse_population_error(name: str) -> TypeError:
     `_reject_reverse_relation_include`).
     """
     return TypeError(
-        f"include() cannot populate {name!r}: it is a reverse (BackRef) "
+        f"include() cannot populate {name!r}: it is a reverse (Reverse) "
         "or many-to-many relation, and include() populates forward "
         "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
         "M2M population will be a separate mechanism — a batched second "
@@ -318,7 +318,7 @@ def _resolve_include_selector(
         TypeError: If ``selector`` is a string or otherwise not callable
             (strings never traverse, #280 — include is lambda-selector only),
             resolves to a column (`FieldProxy`) rather than a relation,
-            names a BackRef/M2M relation (reverse population is a separate
+            names a reverse or M2M relation (reverse population is a separate
             future mechanism, #287), or returns any other non-relation value.
     """
     if isinstance(selector, str):
@@ -2157,7 +2157,7 @@ if TYPE_CHECKING:
 
 
 class Relation(Query[T]):
-    """The type of a reverse (`BackRef`) or many-to-many collection on an instance.
+    """The type of a reverse (`Reverse`) or many-to-many collection on an instance.
 
     Annotate the field as `Relation[list[Target]]`. On an instance, the field
     is a query over the related rows: await `.all()` to load them, or chain

@@ -123,7 +123,7 @@ class UniqueViolationError(IntegrityError):
 class ForeignKeyViolationError(IntegrityError):
     """A `FOREIGN KEY` constraint rejected the statement.
 
-    Includes a parent delete blocked by `ForeignKey(on_delete="RESTRICT")`.
+    Includes a parent delete blocked by `Field(foreign_key=..., on_delete="RESTRICT")`.
     PostgreSQL 18 reports SQLSTATE `23001` for that case; PostgreSQL 17
     reports `23503`. `sqlstate` is the raw driver code.
     """

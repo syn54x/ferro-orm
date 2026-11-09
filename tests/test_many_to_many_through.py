@@ -421,11 +421,10 @@ def test_many_to_many_refuses_every_option_it_would_not_use(option):
 
 def test_a_misspelled_many_to_many_option_names_the_closest_one():
     with pytest.raises(TypeError) as refused:
-        ManyToMany(through="post_tags", reverse_indx=False)
+        ManyToMany(throgh="post_tags")
 
     assert str(refused.value) == (
-        "ManyToMany() got an unknown keyword 'reverse_indx'. "
-        "Did you mean 'reverse_index'?"
+        "ManyToMany() got an unknown keyword 'throgh'. Did you mean 'through'?"
     )
 
 
@@ -438,7 +437,7 @@ _NEEDS_THROUGH = (
 
 
 @pytest.mark.parametrize(
-    "marker", ["ManyToMany(through=None)", 'ManyToMany(through="")']
+    "marker", ["ManyToMany()", "ManyToMany(through=None)", 'ManyToMany(through="")']
 )
 def test_a_many_to_many_without_through_is_refused(tmp_path, marker):
     with pytest.raises(TypeError) as refused:
@@ -455,6 +454,24 @@ class Player(Model):
     message = str(refused.value)
     assert message.startswith("Player.tournaments: ")
     assert message.endswith(_NEEDS_THROUGH)
+
+
+def test_a_join_table_named_as_a_models_table_is_refused_naming_a_free_one():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        teams: Relation[list[Team]] = ManyToMany(through="team")
+
+    with pytest.raises(DeclarationRefusal) as refused:
+        ferro.ensure_resolved_modelset()
+
+    assert str(refused.value) == (
+        'Player.teams: through="team" names the table of the model Team, and a '
+        "join table needs a table of its own. Write: teams: Relation[list[Team]] "
+        '= ManyToMany(through="player_teams")'
+    )
 
 
 def test_a_reverse_naming_a_many_to_many_aimed_elsewhere_is_refused():
@@ -498,7 +515,7 @@ _EVERY_SPELLING = {**_SPELLINGS, **_M2M_EXTRA_SPELLINGS}
 
 _M2M_MARKERS = {
     "through": 'ManyToMany(through="post_tags")',
-    "no through": "ManyToMany(through=None)",
+    "no through": "ManyToMany()",
     "empty through": 'ManyToMany(through="")',
     "no reverse index": 'ManyToMany(through="post_tags", reverse_index=False)',
     "Reverse": 'Reverse("tags")',

@@ -458,7 +458,7 @@ def _cases(storage: str) -> dict[str, dict]:
         "reverse", "players", local=False, Player=[tournaments, elsewhere]
     )
     spellings = {
-        "with no through": 'Relation[list["{t}"]] = ManyToMany(through=None)',
+        "with no through": 'Relation[list["{t}"]] = ManyToMany()',
         "under | None": 'Relation[list["{t}"]] | None = ManyToMany(through="player_links")',
         "with | None inside": (
             'Relation[list["{t}"] | None] = ManyToMany(through="player_links")'
@@ -513,7 +513,7 @@ def _cases(storage: str) -> dict[str, dict]:
         "many-to-many",
         _LONG_FIELD,
         local=True,
-        Player=[f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany(through=None)'],
+        Player=[f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany()'],
     )
     # The fix's join table is free of every other declaration: here the name
     # the long field's derived one shortens to is taken already.
@@ -524,7 +524,7 @@ def _cases(storage: str) -> dict[str, dict]:
         local=True,
         Player=[
             f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany(through="{shortened}")',
-            f'{_LONG_FIELD}_b: Relation[list["Tournament"]] = ManyToMany(through=None)',
+            f'{_LONG_FIELD}_b: Relation[list["Tournament"]] = ManyToMany()',
         ],
     )
     cases["two many-to-manys declaring one join table"] = _case(
@@ -535,6 +535,12 @@ def _cases(storage: str) -> dict[str, dict]:
             'links: Relation[list["Tag"]] = ManyToMany(through="player_links")',
             'others: Relation[list["Tournament"]] = ManyToMany(through="player_links")',
         ],
+    )
+    cases["many-to-many whose join table is a model's table"] = _case(
+        "many-to-many",
+        "links",
+        local=True,
+        Player=['links: Relation[list["Tag"]] = ManyToMany(through="team")'],
     )
     # A join table's renamed_from that cannot be its previous name.
     for spelling, previous in {
