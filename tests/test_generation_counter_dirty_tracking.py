@@ -4,6 +4,7 @@ from typing import Annotated
 
 import pytest
 
+import ferro
 from ferro import Model, connect, reset_engine
 from ferro._core import _bulk_install_count_for_test
 from ferro.base import FerroField
@@ -88,6 +89,43 @@ async def test_clean_reconnect_zero_compiles_zero_bulk_install(
     await connect(db_url, auto_migrate=False)
     assert schema_ir_compile_count_for_test() == 0
     assert _bulk_install_count_for_test() - after_first == 0
+
+
+def test_dirty_resolve_recompiles_only_affected_subset(
+    clean_registry, monkeypatch
+) -> None:
+    """Relationship resolution recompiles the model whose foreign-key column
+    names its target by string, not the entire registry."""
+    from ferro.relations import resolve_relationships
+
+    compile_calls: list[str] = []
+    real_compile = ferro.ir.compiler._compile_and_persist_model_envelope
+
+    def tracking_compile(model_name, columns, **kwargs):
+        compile_calls.append(model_name)
+        return real_compile(model_name, columns, **kwargs)
+
+    monkeypatch.setattr(
+        ferro.ir.compiler, "_compile_and_persist_model_envelope", tracking_compile
+    )
+
+    class GcIsland(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        note: str
+
+    class GcBystander(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    class GcLeaf(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        island_id: Annotated[int, FerroField(foreign_key="GcIsland")]
+
+    compile_calls.clear()
+    resolve_relationships()
+
+    assert compile_calls == [GcLeaf.__ferro_identity__]
+    assert GcIsland.__ferro_identity__ not in compile_calls
+    assert GcBystander.__ferro_identity__ not in compile_calls
 
 
 @pytest.mark.asyncio

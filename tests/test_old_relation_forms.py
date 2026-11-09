@@ -11,7 +11,6 @@ from typing import Annotated
 
 import pytest
 
-import ferro
 from ferro import (
     BackRef,
     FerroField,
@@ -136,40 +135,6 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
 # -- from tests/test_alembic_nullability.py
 
 
-def test_override_foreign_key_nullable_false_optional_relation():
-    class Parent(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        name: str
-        children: Relation[list["ChildOv"]] = BackRef()
-
-    class ChildOv(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        parent: Annotated[
-            Parent | None,
-            ForeignKey(related_name="children", nullable=False),
-        ] = None
-
-    t = get_metadata().tables["childov"]
-    assert t.c.parent_id.nullable is False
-
-
-def test_override_foreign_key_nullable_true_required_relation():
-    class Parent(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        name: str
-        children: Relation[list["ChildFkTrue"]] = BackRef()
-
-    class ChildFkTrue(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        parent: Annotated[
-            Parent,
-            ForeignKey(related_name="children", nullable=True),
-        ]
-
-    t = get_metadata().tables["childfktrue"]
-    assert t.c.parent_id.nullable is True
-
-
 def test_on_delete_set_null_infers_nullable_shadow_fk():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
@@ -215,44 +180,3 @@ def test_m2m_self_referential_reverse_index():
     _, join = join_tables[0]
     non_unique = [i for i in join.indexes if not i.unique]
     assert len(non_unique) == 1
-
-
-# -- from tests/test_generation_counter_dirty_tracking.py
-
-
-def test_dirty_resolve_recompiles_only_affected_subset(
-    clean_registry, monkeypatch
-) -> None:
-    """Relationship resolution recompiles changed models and shadow-FK targets,
-    not the entire registry."""
-    from ferro.relations import resolve_relationships
-
-    compile_calls: list[str] = []
-    real_compile = ferro.ir.compiler._compile_and_persist_model_envelope
-
-    def tracking_compile(model_name, columns, **kwargs):
-        compile_calls.append(model_name)
-        return real_compile(model_name, columns, **kwargs)
-
-    monkeypatch.setattr(
-        ferro.ir.compiler, "_compile_and_persist_model_envelope", tracking_compile
-    )
-
-    class GcIsland(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        note: str
-        leaves: Relation[list["GcLeaf"]] = BackRef()
-
-    island_identity = GcIsland.__ferro_identity__
-
-    class GcLeaf(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        island_id: int | None = None
-        island: Annotated[GcIsland, ForeignKey(related_name="leaves")]
-
-    compile_calls.clear()
-    resolve_relationships()
-
-    assert island_identity in compile_calls
-    assert GcLeaf.__ferro_identity__ in compile_calls
-    assert len(compile_calls) == 2

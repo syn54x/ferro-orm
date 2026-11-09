@@ -223,3 +223,31 @@ def test_override_field_nullable_true_on_required_type():
 
     t = get_metadata().tables["row"]
     assert t.c.field_a.nullable is True
+
+
+def test_override_foreign_key_nullable_false_optional_relation():
+    class Parent(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        name: str
+
+    class ChildOv(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        parent_id: Annotated[
+            int | None, FerroField(foreign_key=Parent, nullable=False)
+        ] = None
+
+    t = get_metadata().tables["childov"]
+    assert t.c.parent_id.nullable is False
+
+
+def test_override_foreign_key_nullable_true_required_relation():
+    class Parent(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        name: str
+
+    class ChildFkTrue(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        parent_id: Annotated[int, FerroField(foreign_key=Parent, nullable=True)]
+
+    t = get_metadata().tables["childfktrue"]
+    assert t.c.parent_id.nullable is True
