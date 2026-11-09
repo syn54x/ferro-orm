@@ -465,7 +465,7 @@ pub fn refresh_model_instance<'py>(
 ///
 /// After a refresh overwrites the decoded columns, every loaded relation
 /// (a `__dict__` entry under a relation field name) is checked against the
-/// freshly decoded shadow FK: the loaded relation survives iff the FK still
+/// freshly decoded foreign-key column: the loaded relation survives iff the FK still
 /// equals the loaded instance's primary key (a loaded `None` survives
 /// iff the FK is still NULL) — so loaded relations accumulate across a session's
 /// queries. An unloaded instance cached under the relation follows the same
@@ -508,7 +508,7 @@ fn prune_stale_loaded_relations<'py>(
                 let pk_val = loaded.getattr(pk_field.cast::<pyo3::types::PyString>()?)?;
                 fk.eq(pk_val)?
             }
-            // FK went NULL under a live loaded relation, or the shadow column is
+            // FK went NULL under a live loaded relation, or the foreign-key column is
             // missing from the refreshed row (cannot happen on a full-row
             // decode — the refresh precondition): drop, never guess.
             _ => false,

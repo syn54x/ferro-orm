@@ -258,8 +258,8 @@ class Registry:
     def models(self) -> dict[str, FerroModelClass]:
         """Return the registered models, keyed by canonical identity.
 
-        A read view: callers iterate, look up, and pass it on (shadow
-        foreign-key reconciliation, say) and never mutate it. Mutation goes
+        A read view: callers iterate, look up, and pass it on (relationship
+        resolution, say) and never mutate it. Mutation goes
         through `register` and `deregister`, which own the generation
         counter bump.
 

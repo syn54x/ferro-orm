@@ -1,7 +1,7 @@
 """RelationSpec: forward-FK traversal facts at resolved registration (#268).
 
 Prefactor for query-time joins (PRD #267 stage 1) — a per-model lookup of
-declared forward-FK relations (field name -> target model, shadow FK column,
+declared forward relations (field name -> target model, foreign-key column,
 nullability), authoritative once ``resolve_relationships()`` has run. Zero
 behavior change: this only adds ``cls.__ferro_relation_specs__`` alongside the
 existing ``__ferro_columns__``.
@@ -74,8 +74,8 @@ class TestNullability:
 
         assert Project.__ferro_relation_specs__["org"].nullable is False
 
-    def test_nullable_matches_compiled_shadow_column_spec(self, clean_registry):
-        """Single-source: RelationSpec.nullable must equal the shadow ColumnSpec's."""
+    def test_nullable_matches_compiled_fk_column_spec(self, clean_registry):
+        """Single-source: RelationSpec.nullable must equal the foreign-key ColumnSpec's."""
 
         class Org(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -202,4 +202,4 @@ def test_a_relation_spec_names_its_declared_key_column(clean_registry):
         "keeper_owner_id",
         False,
     )
-    assert not hasattr(spec, "shadow_column")
+    assert RelationSpec.__slots__ == ("field_name", "target", "fk_column", "nullable")

@@ -8780,7 +8780,7 @@ mod select_join_render_tests {
         .expect("v2 envelope parses")
     }
 
-    /// `t.account == instance` desugars to a shadow-FK leaf (`account_id`) with
+    /// `t.account == instance` desugars to a foreign-key column leaf (`account_id`) with
     /// an EMPTY path and NO joins entry — the join-free proof (#273). The
     /// rendered SELECT must contain no JOIN and a WHERE qualified by the ROOT
     /// table's `account_id`, never a relation alias.
@@ -8826,7 +8826,7 @@ mod select_join_render_tests {
         );
         assert!(
             sql.contains("WHERE \"transaction\".\"account_id\""),
-            "WHERE must filter the ROOT-qualified shadow FK: {sql}"
+            "WHERE must filter the ROOT-qualified foreign-key column: {sql}"
         );
     }
 

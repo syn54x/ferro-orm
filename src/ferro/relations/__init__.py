@@ -11,14 +11,14 @@ from pydantic_core import PydanticUndefined
 
 from .. import _core
 from .._annotation_utils import annotation_allows_none
-from .._shadow_fk_types import pk_python_type_for_model
+from .._fk_column_types import pk_python_type_for_model
 from ..base import (
     FerroField,
     ForwardRelation,
     ManyToManyRelation,
     ReverseRelation,
 )
-from ..columns import ColumnSpec, fk_shadow_spec
+from ..columns import ColumnSpec, fk_column_spec
 from ..fields import annotation_text, field_line, field_options
 from ..ir.compiler import (
     RenameHints,
@@ -1522,12 +1522,12 @@ def resolve_relationships():
         )
 
         join_columns = (
-            fk_shadow_spec(
+            fk_column_spec(
                 source_col,
                 python_type=pk_python_type_for_model(source_model),
                 to_table=source_table,
             ),
-            fk_shadow_spec(
+            fk_column_spec(
                 target_col,
                 python_type=pk_python_type_for_model(target_model),
                 to_table=target_table,

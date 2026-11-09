@@ -5,7 +5,7 @@ from uuid import UUID
 
 from ferro import Field, Model
 from ferro.base import FerroField
-from ferro.columns import build_column_specs, fk_shadow_spec, pk_spec
+from ferro.columns import build_column_specs, fk_column_spec, pk_spec
 
 
 class TestAutoincrementDerivation:
@@ -181,8 +181,8 @@ class TestJoinTableProducers:
         assert spec.logical_type == "uuid" and spec.format == "uuid"
         assert spec.primary_key is False and spec.nullable is False
 
-    def test_fk_shadow_spec(self):
-        spec = fk_shadow_spec("user_id", python_type=int, to_table="user")
+    def test_fk_column_spec(self):
+        spec = fk_column_spec("user_id", python_type=int, to_table="user")
         assert spec.foreign_key.to_table == "user"
         assert spec.foreign_key.on_delete == "CASCADE"
         assert spec.nullable is False and spec.logical_type == "integer"

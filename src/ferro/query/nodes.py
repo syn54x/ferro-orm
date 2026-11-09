@@ -1302,8 +1302,8 @@ class RelationProxy:
         """The last-hop relation field name (the one being compared)."""
         return self._path[-1]
 
-    def _last_hop_shadow_column(self) -> tuple[str, type]:
-        """Shadow FK column of the LAST hop and the model declaring it.
+    def _last_hop_fk_column(self) -> tuple[str, type]:
+        """Foreign-key column of the LAST hop and the model declaring it.
 
         For ``t.account`` this is ``account_id`` on the root table (owner =
         root model); for ``t.account.owner`` it is ``owner_id`` on the hop-1
@@ -1322,9 +1322,9 @@ class RelationProxy:
         return spec.fk_column, declaring
 
     def _instance_comparison(self, other: object, operator: str) -> QueryNode:
-        """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).
+        """Desugar ``== instance`` / ``== None`` to a foreign-key column leaf (#273).
 
-        The node targets the last hop's shadow FK column with the proxy path
+        The node targets the last hop's foreign-key column with the proxy path
         MINUS that hop, so it registers only the PREFIX joins (none for a
         one-hop proxy — genuinely join-free).
 
@@ -1335,15 +1335,15 @@ class RelationProxy:
                 the relation-vs-scalar guardrail, suggesting a column compare.
         """
         relation = self._relation_name()
-        shadow, shadow_owner = self._last_hop_shadow_column()
+        fk_column, fk_column_owner = self._last_hop_fk_column()
         prefix_path = self._path[:-1]
         if other is None:
             return QueryNode(
-                column=shadow,
+                column=fk_column,
                 operator=operator,
                 value=None,
                 path=prefix_path,
-                owner=shadow_owner,
+                owner=fk_column_owner,
             )
         if isinstance(other, self._target):
             # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
@@ -1359,11 +1359,11 @@ class RelationProxy:
                     "save it first"
                 )
             return QueryNode(
-                column=shadow,
+                column=fk_column,
                 operator=operator,
                 value=pk_value,
                 path=prefix_path,
-                owner=shadow_owner,
+                owner=fk_column_owner,
             )
         raise TypeError(
             f"cannot compare relation {relation!r} to {other!r}: expected a "

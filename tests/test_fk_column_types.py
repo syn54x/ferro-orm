@@ -1,4 +1,4 @@
-"""Tests for ferro._shadow_fk_types."""
+"""Tests for ferro._fk_column_types."""
 
 import warnings
 from typing import Annotated
@@ -17,7 +17,7 @@ from ferro import (
     Reverse,
     connect,
 )
-from ferro._shadow_fk_types import pk_python_type_for_model
+from ferro._fk_column_types import pk_python_type_for_model
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -58,7 +58,7 @@ def test_a_join_table_types_its_columns_as_each_model_s_primary_key():
 
 @pytest.mark.asyncio
 async def test_uuid_fk_create_get_dump(db_url):
-    """Regression for GitHub #16: UUID PK through shadow FK without validation/serialization issues."""
+    """Regression for GitHub #16: UUID PK through a foreign-key column without validation/serialization issues."""
     ferro.reset_engine()
     ferro.clear_registry()
 
@@ -75,16 +75,17 @@ async def test_uuid_fk_create_get_dump(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         parent = await UuidIssueParent.create(name="p")
-        child = await UuidIssueChild.create(parent_id=parent.id)
+        # An API payload carries the UUID key as a string.
+        child = await UuidIssueChild.create(parent_id=str(parent.id))
 
         fetched = await UuidIssueChild.get(child.id)
         assert fetched.parent_id == parent.id
 
-        by_shadow = await UuidIssueChild.where(
-            lambda c: c.parent_id == parent.id
+        by_fk_column = await UuidIssueChild.where(
+            lambda uuid_issue_child: uuid_issue_child.parent_id == parent.id
         ).first()
-        assert by_shadow is not None
-        assert by_shadow.id == child.id
+        assert by_fk_column is not None
+        assert by_fk_column.id == child.id
 
         for dumper in (fetched.model_dump, fetched.model_dump_json):
             with warnings.catch_warnings(record=True) as w:
@@ -123,7 +124,7 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
 
 
 def test_uuid_child_model_validate_accepts_string_parent_id():
-    """API / JSON payloads often send UUID FKs as strings; shadow typing should coerce."""
+    """API / JSON payloads send UUID keys as strings; the foreign-key column coerces."""
     ferro.clear_registry()
 
     class VParent(Model):

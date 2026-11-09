@@ -13,7 +13,7 @@ derived by the SchemaIR compiler from the shared Rust builder
 
 Supported predicate dialect (ADR-0016, ADR-0059): the root-column ``where()``
 dialect — comparisons (including column-to-column), ``== None`` / ``!= None``
-on a column or forward-FK relation (or its shadow ``*_id`` column),
+on a column or forward relation (or its foreign-key column),
 ``.in_()``, ``.like()``, enum members as inlined labels, combined with ``&``,
 ``|``, and ``~`` — and comparisons of value expressions: arithmetic and the
 ``ferro.fn`` functions, typed under the value parity a generated column's
@@ -187,9 +187,9 @@ class _CheckProxy(QueryProxy[Any]):
     reads the column specs and relation metadata the compile just built.
 
     Relation resolution deliberately does not need a resolved target class: a
-    forward FK's shadow column is ``{field}_id`` by the single ferro
-    convention, which is all a null test needs, so a forward-referenced FK
-    compiles at class definition like any other.
+    forward relation names its foreign-key column, which is all a null test
+    needs, so a forward-referenced key compiles at class definition like any
+    other.
     """
 
     __slots__ = ("_columns", "_relations", "_reverse_relations")
@@ -210,9 +210,9 @@ class _CheckProxy(QueryProxy[Any]):
         self._reverse_relations = reverse_relations
 
     def __getattr__(self, name: str) -> Any:
-        shadow = self._relations.get(name)
-        if shadow is not None:
-            return _RelationNullProxy(self._model_cls, name, shadow)
+        fk_column = self._relations.get(name)
+        if fk_column is not None:
+            return _RelationNullProxy(self._model_cls, name, fk_column)
         if name in self._reverse_relations:
             raise TypeError(
                 f"check predicate references the reverse relation {name!r}: an "
@@ -239,22 +239,22 @@ class _CheckProxy(QueryProxy[Any]):
 
 
 class _RelationNullProxy:
-    """A forward-FK relation inside a check predicate: null tests only.
+    """A forward relation inside a check predicate: null tests only.
 
-    ``t.<relation> == None`` desugars to the shadow ``{relation}_id`` column —
+    ``t.<relation> == None`` desugars to the relation's foreign-key column —
     the same join-free leaf ``RelationProxy._instance_comparison`` builds for
     ``where()``. It cannot reuse that proxy: ``RelationProxy`` resolves the
-    shadow column through the model's *published* ``__ferro_relation_specs__``
+    foreign-key column through the model's *published* ``__ferro_relation_specs__``
     (which requires a resolved target class), while a check predicate compiles
     before publication and, for a forward-referenced FK, before resolution.
     """
 
-    __slots__ = ("_model_cls", "_relation", "_shadow")
+    __slots__ = ("_model_cls", "_relation", "_fk_column")
 
-    def __init__(self, model_cls: type, relation: str, shadow: str) -> None:
+    def __init__(self, model_cls: type, relation: str, fk_column: str) -> None:
         self._model_cls = model_cls
         self._relation = relation
-        self._shadow = shadow
+        self._fk_column = fk_column
 
     def _null_comparison(self, other: object, operator: str) -> QueryNode:
         if other is not None:
@@ -262,11 +262,11 @@ class _RelationNullProxy:
                 f"check predicate compares the relation {self._relation!r} to "
                 f"{other!r}: a check predicate supports only "
                 f"t.{self._relation} == None / != None (equivalently "
-                f"t.{self._shadow} == None). Comparing to a row would bake a "
+                f"t.{self._fk_column} == None). Comparing to a row would bake a "
                 "primary key into the schema (ADR-0016)."
             )
         return QueryNode(
-            column=self._shadow,
+            column=self._fk_column,
             operator=operator,
             value=None,
             owner=self._model_cls,
@@ -285,14 +285,14 @@ class _RelationNullProxy:
             f"check predicate traverses the relation {self._relation!r} to reach "
             f"{name!r}: relation traversal reads another table, which a CHECK "
             f"cannot do. Test the relation itself (t.{self._relation} == None) or "
-            f"its shadow column (t.{self._shadow}) — richer traversal stays "
+            f"its foreign-key column (t.{self._fk_column}) — richer traversal stays "
             "rejected (ADR-0016)."
         )
 
     def _reject_operator(self, symbol: str) -> Any:
         raise TypeError(
             f"check predicate applies {symbol} to the relation {self._relation!r}: "
-            f"only == None / != None are supported (or use t.{self._shadow})."
+            f"only == None / != None are supported (or use t.{self._fk_column})."
         )
 
     def __lt__(self, other: object) -> Any:
@@ -315,7 +315,8 @@ class _RelationNullProxy:
 
     def __repr__(self) -> str:
         return (
-            f"_RelationNullProxy(relation={self._relation!r}, shadow={self._shadow!r})"
+            f"_RelationNullProxy(relation={self._relation!r}, "
+            f"fk_column={self._fk_column!r})"
         )
 
 
@@ -348,7 +349,7 @@ def _declared_checks(model_cls: type[Any]) -> tuple[Check, ...]:
     return raw
 
 
-def _relation_shadow_columns(
+def _relation_fk_columns(
     model_cls: type[Any], columns: Mapping[str, Any]
 ) -> dict[str, str]:
     """Map each forward relation field to the key column its ``Forward`` names.
@@ -749,7 +750,7 @@ def _resolve_check_node(
     proxy = _CheckProxy(
         model_cls,
         columns,
-        _relation_shadow_columns(model_cls, columns),
+        _relation_fk_columns(model_cls, columns),
         _reverse_relation_names(model_cls),
     )
     prefix = f"{model_name}.{FERRO_CHECKS} check {check.suffix!r}: "
@@ -790,7 +791,7 @@ def compile_table_checks(
     The single validate-and-lower choke point for table checks: the SchemaIR
     compiler calls it on every compile pass (class definition and the resolved
     second pass) with the column specs that pass just built, so a check can
-    reference a shadow FK column without waiting for relationship resolution.
+    reference a foreign-key column without waiting for relationship resolution.
 
     Args:
         model_cls: The model class carrying ``__ferro_checks__``.

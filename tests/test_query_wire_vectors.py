@@ -51,9 +51,9 @@ def _vector(name: str) -> dict[str, Any]:
 def _build_models() -> dict[str, type]:
     """Declare the model graph the query vectors reference.
 
-    Class names, relation field names, and shadow columns must line up with
+    Class names, relation field names, and foreign-key columns must line up with
     the vectors' hop facts (``account``/``owner`` tables, ``account_id``/
-    ``owner_id`` shadow FKs), so the classes carry the vectors' bare names.
+    ``owner_id`` foreign-key columns), so the classes carry the vectors' bare names.
     """
 
     class Owner(Model):
@@ -259,7 +259,7 @@ def _q_not_compound(m: dict[str, type]) -> Any:
 
 def _q_exists_bare(m: dict[str, type]) -> Any:
     # Bare 1-hop existence test on a reverse FK (#314, ADR-0007): one `exists`
-    # node whose hop correlates the child's shadow FK to the root PK; the
+    # node whose hop correlates the child's foreign-key column to the root PK; the
     # inner condition tree is empty and no `joins` entry is registered.
     return m["Account"].where(lambda a: a.transactions.exists()).order_by("id")
 

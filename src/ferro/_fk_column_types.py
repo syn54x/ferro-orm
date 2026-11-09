@@ -4,19 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, get_args, get_origin
 
-from pydantic import BaseModel
-
-
-def is_concrete_ferro_model(obj: Any) -> bool:
-    return (
-        isinstance(obj, type)
-        and issubclass(obj, BaseModel)
-        and hasattr(obj, "__ferro_fields__")
-    )
-
 
 def _scalar_part_of_annotation(ann: Any) -> Any:
-    """Strip ``Annotated[T, ...]`` to ``T`` so shadow columns stay plain unions/scalars."""
+    """Strip ``Annotated[T, ...]`` to ``T`` so a column spec stores plain unions/scalars."""
     origin = get_origin(ann)
     if origin is Annotated:
         return get_args(ann)[0]
