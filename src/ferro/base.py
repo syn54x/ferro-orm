@@ -494,6 +494,7 @@ class ManyToManyRelation:
         reverse_index: bool = True,
         refusal: str | None = None,
         bound: frozenset[str] | None = None,
+        renamed_from: str | None = None,
     ):
         """Store the options of a many-to-many relation.
 
@@ -513,6 +514,8 @@ class ManyToManyRelation:
             bound: The names defined where the relation was declared, so a
                 refusal quotes a target declared later; `None` under
                 postponed annotations, where no target needs quotes.
+            renamed_from: The join table's previous name, which a migration
+                renames from. Defaults to `None`.
         """
         self.to = None  # Resolved later
         """The target model class, set once Ferro resolves the relation."""
@@ -527,3 +530,5 @@ class ManyToManyRelation:
         """A refusal waiting for resolution to name its target, or `None`."""
         self.bound = bound
         """The names defined where the relation was declared, or `None`."""
+        self.renamed_from = renamed_from
+        """The join table's previous name, or `None`."""

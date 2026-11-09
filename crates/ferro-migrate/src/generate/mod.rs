@@ -2673,6 +2673,7 @@ mod tests {
             table: "author".into(),
             field: None,
             old: "author".into(),
+            join_table: false,
         };
         let hinted = Plan {
             reports: vec![crate::plan::hint_refusal_warning(&refusal)],

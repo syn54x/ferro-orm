@@ -30,8 +30,8 @@
 use crate::emit::{backfill_value_sql, render_create_table_as};
 use crate::{Dialect, EmissionError, Execution, PlannedOp};
 use ferro_ddl_lowering::{
-    CanonicalType, ResolvedStorage, quote_ident, render_relabel_copy, resolve_column_storage,
-    sqlite_declared_type,
+    CanonicalType, ResolvedStorage, is_join_table, quote_ident, render_relabel_copy,
+    resolve_column_storage, sqlite_declared_type,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeSet;
@@ -70,19 +70,19 @@ pub fn render_table(
     new: &IrEnvelope<SchemaIrPayload>,
     relabels: &[(String, String, String)],
 ) -> Result<Vec<String>, EmissionError> {
-    let find = |ir: &'_ IrEnvelope<SchemaIrPayload>, side: &str| {
+    let find = |ir: &'_ IrEnvelope<SchemaIrPayload>| {
         ir.payload
             .models
             .iter()
             .find(|model| model.table_name == table)
             .cloned()
-            .ok_or_else(|| EmissionError {
-                message: format!(
-                    "cannot rebuild table '{table}': it is missing from the {side} snapshot"
-                ),
-            })
     };
-    let (before, after) = (find(old, "old")?, find(new, "new")?);
+    let before = find(old).ok_or_else(|| EmissionError {
+        message: format!("cannot rebuild table '{table}': it is missing from the old snapshot"),
+    })?;
+    let after = find(new).ok_or_else(|| EmissionError {
+        message: missing_from_new(&before),
+    })?;
     let mut values = Vec::new();
     for col in &after.columns {
         if let Some(value) = copy_value(col, &before)? {
@@ -99,6 +99,28 @@ pub fn render_table(
         }
     }
     render(table, &after, &before, &values)
+}
+
+/// The refusal of a rebuild of `before`'s table, which the step's other
+/// changes need but the new snapshot no longer declares under that name: it
+/// was renamed with no hint, or dropped beside them. Each has its fix.
+fn missing_from_new(before: &SchemaModel) -> String {
+    let table = &before.table_name;
+    let hint = if is_join_table(before) {
+        format!(
+            "If the join table was renamed, declare ManyToMany(renamed_from=\"{table}\") on \
+             the many-to-many that names it now"
+        )
+    } else {
+        format!(
+            "If the table was renamed, declare __ferro_renamed_from__ = \"{table}\" on the \
+             model whose table it is now"
+        )
+    };
+    format!(
+        "cannot rebuild table '{table}': it is missing from the new snapshot. {hint}; if it \
+         was dropped, drop it in a migration of its own before this change"
+    )
 }
 
 /// The value a rebuild copies into `col` of the new table when the old table

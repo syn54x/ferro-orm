@@ -90,6 +90,39 @@ Auto-migrate honours every hint under `migrate_updates` (on SQLite a label hint 
 
 The example `docs/examples/migrations_rename.py` in the repository runs this rename end to end, the revert included.
 
+### Renaming a join table
+
+A many-to-many's join table is the table `through=` names, and renaming the model leaves it alone. To rename the table itself, give `through=` the new name and `renamed_from=` the old one. Here `Author` has gained tags through a join table called `writer_tags`, which becomes `author_tags`:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/migrations_rename_join_table.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/migrations_rename_join_table_annotated.py:models"
+    ```
+
+`ferro migrate new rename_author_tags` renames the table and every name derived from it, so each link row stays:
+
+```sql
+-- 0002_rename_author_tags/01_schema.up.postgres.sql
+ALTER TABLE "writer_tags" RENAME TO "author_tags";
+
+ALTER INDEX "idx_writer_tags_tag_id_author_id" RENAME TO "idx_author_tags_tag_id_author_id";
+
+ALTER INDEX "uq_writer_tags_author_id_tag_id" RENAME TO "uq_author_tags_author_id_tag_id";
+
+ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_author_id_author" TO "fk_author_tags_author_id_author";
+
+ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO "fk_author_tags_tag_id_tag";
+```
+
+Without `renamed_from=`, the new name is a new table: `new` writes a `CREATE TABLE` and a destructive `DROP TABLE`, and the links are lost. The hint follows the rules of every other hint: it is live only while the old table stands alone, auto-migrate honours it under `migrate_updates`, and an old name the models still declare is refused the same way. A name that is not a table name, or is the name `through=` gives now, is refused at class definition with the declaration to write instead. The example `docs/examples/migrations_rename_join_table.py` runs this rename end to end.
+
 ## Renaming under a rolling deploy
 
 A rename hint renames in one migration, so the previous release's code, still naming `nickname`, fails the moment the migration runs. When old and new code serve side by side, rename over three releases instead:

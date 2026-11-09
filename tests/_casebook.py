@@ -209,6 +209,11 @@ CASES: tuple[Case, ...] = (
         renames.b3("writer", "postgres"),
         renames.b3("author", "postgres"),
     ),
+    Case(
+        "B3-rename-a-join-table",
+        renames.JOIN_TABLE_BEFORE,
+        renames.JOIN_TABLE_AFTER,
+    ),
     # -- C: foreign keys ----------------------------------------------------------
     Case("C1-add-an-optional-foreign-key", columns.TEAM + AUTHOR, _TEAM_FK),
     Case(

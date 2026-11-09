@@ -58,11 +58,18 @@ def _join_column(table: str) -> str:
 
 
 def _join_table_rename_hints(
-    source_model: type, target_model: type, field_name: str, through: str | None
+    source_model: type,
+    target_model: type,
+    field_name: str,
+    relation: ManyToManyRelation,
 ) -> RenameHints:
-    """What a join table and its columns were called before its source or
-    target model's declared table rename (ADR-0032), named by the same two
-    functions that name them now, so a table rename drags its join table."""
+    """What a join table and its columns were called before (ADR-0032).
+
+    The table's previous name is the relation's ``renamed_from``; a join
+    table the old form derived follows its source model's table rename. Its
+    columns follow their models' table renames, named by the same function
+    that names them now.
+    """
     source_prev = getattr(source_model, "__ferro_renamed_from__", None)
     target_prev = getattr(target_model, "__ferro_renamed_from__", None)
     columns: dict[str, str] = {}
@@ -70,11 +77,9 @@ def _join_table_rename_hints(
         columns[_join_column(source_model.__ferro_table__)] = _join_column(source_prev)
     if target_prev is not None:
         columns[_join_column(target_model.__ferro_table__)] = _join_column(target_prev)
-    table = (
-        _default_join_table(source_prev, field_name)
-        if source_prev is not None and not through
-        else None
-    )
+    table = relation.renamed_from
+    if table is None and source_prev is not None and not relation.through:
+        table = _default_join_table(source_prev, field_name)
     return RenameHints(table=table, columns=columns)
 
 
@@ -651,19 +656,101 @@ def _free_table_name(name: str, taken: set[str]) -> str:
 def _many_to_many_line(
     field_name: str,
     target: str,
-    through: str,
+    through: str | None,
     reverse_index: bool,
     bound: frozenset[str] | None,
     related_name: str | None = None,
+    renamed_from: str | None = None,
 ) -> str:
-    """Write a many-to-many: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``."""
-    options = f"through={json.dumps(through)}"
-    if related_name is not None:
-        options = f"related_name={json.dumps(related_name)}, {options}"
+    """Write a many-to-many: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
+
+    A ``renamed_from`` the line could not keep (see `_renamed_from_reason`)
+    is left out, so the line is one Ferro accepts.
+    """
+    options = [
+        f"{option}={json.dumps(value)}"
+        for option, value in (("related_name", related_name), ("through", through))
+        if value is not None
+    ]
+    if (
+        renamed_from is not None
+        and through is not None
+        and _renamed_from_reason(renamed_from, through) is None
+    ):
+        options.append(f"renamed_from={json.dumps(renamed_from)}")
     if not reverse_index:
-        options += ", reverse_index=False"
+        options.append("reverse_index=False")
     shown = f'"{target}"' if bound is not None and target not in bound else target
-    return f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
+    return f"{field_name}: Relation[list[{shown}]] = ManyToMany({', '.join(options)})"
+
+
+def _renamed_from_reason(renamed_from: str, through: str) -> str | None:
+    """Why a join table's ``renamed_from`` cannot be its previous name, or ``None``."""
+    if not is_table_name(renamed_from):
+        return (
+            "renamed_from is the join table's previous name, a table name: letters, "
+            "digits and underscores, not starting with a digit, at most 63 characters"
+        )
+    if renamed_from == through:
+        return (
+            f"renamed_from is the join table's previous name, and {through} is the "
+            "name through= gives it now"
+        )
+    return None
+
+
+def check_join_table_rename(
+    model_cls: Any, name: str, relation: ManyToManyRelation
+) -> None:
+    """Refuse a many-to-many's ``renamed_from`` that cannot be its join table's
+    previous name: one that is no table name, or the name ``through=`` gives
+    the table now. A name another declaration holds is the planner's to
+    refuse, as for every table hint.
+
+    Raises:
+        DeclarationRefusal: The hint cannot be meant; the fix drops it.
+    """
+    if relation.renamed_from is None or relation.through is None:
+        return
+    reason = _renamed_from_reason(relation.renamed_from, relation.through)
+    if reason is None:
+        return
+    line = _many_to_many_line(
+        name,
+        annotation_text(relation.to),
+        relation.through,
+        relation.reverse_index,
+        relation.bound,
+        relation.related_name,
+    )
+    model = model_cls.__name__
+    raise DeclarationRefusal(
+        model, name, reason, [Edit(model, name, "replace", (line,))]
+    )
+
+
+def related_name_rename_refusal(
+    model: str,
+    field_name: str,
+    target: str,
+    related_name: str,
+    through: str | None,
+    reverse_index: bool,
+    bound: frozenset[str] | None,
+) -> DeclarationRefusal:
+    """The refusal of ``renamed_from`` on ``ManyToMany(related_name=...)``,
+    whose join table follows its model's table rename; the fix drops it."""
+    line = _many_to_many_line(
+        field_name, target, through, reverse_index, bound, related_name
+    )
+    return DeclarationRefusal(
+        model,
+        field_name,
+        "renamed_from renames a join table named with through=, and "
+        "related_name= derives its join table from the model, which "
+        "__ferro_renamed_from__ renames",
+        [Edit(model, field_name, "replace", (line,))],
+    )
 
 
 def many_to_many_refusal(
@@ -674,6 +761,7 @@ def many_to_many_refusal(
     through: str,
     reverse_index: bool,
     bound: frozenset[str] | None,
+    renamed_from: str | None = None,
 ) -> DeclarationRefusal:
     """The refusal whose fix is a many-to-many on ``owner`` linking one of ``targets``.
 
@@ -697,6 +785,8 @@ def many_to_many_refusal(
         bound: The names defined where ``owner``'s class statement runs, or
             ``None`` under postponed annotations; a target outside them is
             written by name.
+        renamed_from: The join table's previous name the declaration gives,
+            kept on the line when it can be. Defaults to `None`.
 
     Returns:
         The refusal, carrying one way to fix it per target.
@@ -746,7 +836,14 @@ def many_to_many_refusal(
         )
     ways = []
     for target in targets:
-        line = _many_to_many_line(field_name, target, through, reverse_index, bound)
+        line = _many_to_many_line(
+            field_name,
+            target,
+            through,
+            reverse_index,
+            bound,
+            renamed_from=renamed_from,
+        )
         way = [Edit(model, field_name, "replace", (line,))]
         claimed = taken | {through}
         others: list[Any] = list(REGISTRY.models().values())
@@ -810,6 +907,7 @@ def _refuse_unnamed_many_to_many(
             relation.through or "",
             relation.reverse_index,
             relation.bound,
+            relation.renamed_from,
         )
     # No edit can be written: nothing names the model the relation links.
     raise DeclarationRefusal(
@@ -1271,7 +1369,9 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
                     relation.through or "",
                     relation.reverse_index,
                     relation.bound,
+                    relation.renamed_from,
                 )
+            check_join_table_rename(model_cls, name, relation)
     for name, meta in model_cls.__ferro_fields__.items():
         if meta.foreign_key is None:
             continue
@@ -1355,6 +1455,7 @@ def _refuse_shared_join_table(
         relation.reverse_index,
         relation.bound,
         relation.related_name,
+        relation.renamed_from,
     )
     model = source_model.__name__
     raise DeclarationRefusal(
@@ -1467,7 +1568,7 @@ def resolve_relationships():
             source_col = _join_column(source_table)
             target_col = _join_column(target_table)
             join_hints = _join_table_rename_hints(
-                source_model, target_model, field_name, rel.through
+                source_model, target_model, field_name, rel
             )
 
             # Inject M2M descriptors into BOTH sides

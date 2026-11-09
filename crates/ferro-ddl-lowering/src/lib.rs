@@ -17,7 +17,7 @@ pub use value_expr::{
 
 use std::collections::BTreeMap;
 
-use ferro_schema_ir::{SchemaColumn, ValueExpr};
+use ferro_schema_ir::{SchemaColumn, SchemaModel, ValueExpr};
 use sea_query::{ColumnDef, ForeignKeyAction};
 
 /// The one SQL dialect / database backend Ferro targets. Selects both the
@@ -4351,12 +4351,31 @@ pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) ->
     )
 }
 
+/// Whether `model` is a many-to-many's join table: its model is named for its
+/// table, where a model class is named for itself.
+pub fn is_join_table(model: &SchemaModel) -> bool {
+    model.model_name == model.table_name
+}
+
+/// The declaration that says table `table` was called `old`: a model's
+/// `__ferro_renamed_from__`, or for a join table the `renamed_from` of the
+/// `ManyToMany` naming it.
+fn table_hint_declared(table: &str, old: &str, join_table: bool) -> String {
+    if join_table {
+        format!("join table \"{table}\" declares ManyToMany(renamed_from=\"{old}\")")
+    } else {
+        format!("table \"{table}\" declares __ferro_renamed_from__ = \"{old}\"")
+    }
+}
+
 /// The pass's warning for a live table hint on a pass that does not
-/// reconcile (`connect(auto_migrate=True)`, `create_tables()`): table `new` is
-/// neither renamed nor created beside its old self, nor is any new table in
-/// `waiting` that references it, and the two strategies that rename it are named.
-/// It holds until one of them renames the table, so it recurs.
-pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) -> Report {
+/// reconcile (`connect(auto_migrate=True)`, `create_tables()`): `model`'s
+/// table is neither renamed from `old` nor created beside its old self, nor
+/// is any new table in `waiting` that references it, and the two strategies
+/// that rename it are named. It holds until one of them renames the table, so
+/// it recurs.
+pub fn pending_table_rename_warning(model: &SchemaModel, old: &str, waiting: &[String]) -> Report {
+    let new = &model.table_name;
     let waiting = match waiting {
         [] => String::new(),
         tables => {
@@ -4368,10 +4387,10 @@ pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) ->
         ReportKind::PendingTableRename,
         Subject::table(new),
         format!(
-            "table \"{new}\" declares __ferro_renamed_from__ = \"{old}\", and the database \
-             holds \"{old}\" and no \"{new}\": \"{new}\" was not created{waiting}. The rename \
-             runs under connect(..., migrate_updates=True) or in a migration from ferro \
-             migrate new."
+            "{}, and the database holds \"{old}\" and no \"{new}\": \"{new}\" was not \
+             created{waiting}. The rename runs under connect(..., migrate_updates=True) or in \
+             a migration from ferro migrate new.",
+            table_hint_declared(new, old, is_join_table(model))
         ),
     )
 }
@@ -4448,6 +4467,10 @@ pub enum HintError {
         field: Option<String>,
         /// The name the hint claims.
         old: String,
+        /// Whether `table` is a join table, whose hint is the `renamed_from`
+        /// of the `ManyToMany` naming it.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        join_table: bool,
     },
     /// Two declarations claim one old name: within `table` (two columns), or
     /// across the modelset (`table` is `None`, two tables).
@@ -4458,6 +4481,10 @@ pub enum HintError {
         old: String,
         /// Every claimant, in declaration order: columns, or tables.
         claimants: Vec<String>,
+        /// The claimants that are join tables, whose hint is the
+        /// `renamed_from` of the `ManyToMany` naming them.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        join_tables: Vec<String>,
     },
     /// A label rename hint whose old label the enum still declares: a label
     /// cannot be renamed from one the enum keeps.
@@ -4501,6 +4528,7 @@ impl std::fmt::Display for HintError {
                 table,
                 field: Some(field),
                 old,
+                ..
             } => write!(
                 f,
                 "{table}.{field} declares renamed_from=\"{old}\", but {table} still declares \
@@ -4511,15 +4539,22 @@ impl std::fmt::Display for HintError {
                 table,
                 field: None,
                 old,
+                join_table,
             } => write!(
                 f,
-                "table \"{table}\" declares __ferro_renamed_from__ = \"{old}\", but the models \
-                 still declare table \"{old}\": delete the hint or the old model"
+                "{}, but the models still declare table \"{old}\": delete the hint or {}",
+                table_hint_declared(table, old, *join_table),
+                if *join_table {
+                    format!("the declaration of table \"{old}\"")
+                } else {
+                    "the old model".to_string()
+                }
             ),
             HintError::Ambiguous {
                 table: Some(table),
                 old,
                 claimants,
+                ..
             } => {
                 let fields: Vec<String> = claimants
                     .iter()
@@ -4536,6 +4571,24 @@ impl std::fmt::Display for HintError {
                 table: None,
                 old,
                 claimants,
+                join_tables,
+            } if !join_tables.is_empty() => {
+                let declarations: Vec<String> = claimants
+                    .iter()
+                    .map(|t| table_hint_declared(t, old, join_tables.contains(t)))
+                    .collect();
+                write!(
+                    f,
+                    "{}: one table becomes one table; keep the hint on the table \"{old}\" \
+                     became",
+                    and_list(&declarations)
+                )
+            }
+            HintError::Ambiguous {
+                table: None,
+                old,
+                claimants,
+                ..
             } => {
                 let tables: Vec<String> = claimants.iter().map(|t| format!("\"{t}\"")).collect();
                 write!(
@@ -8996,6 +9049,7 @@ mod tests {
             table: "t".into(),
             field: Some("b".into()),
             old: "a".into(),
+            join_table: false,
         });
         let wire = serde_json::to_value(&refused).unwrap();
         assert_eq!(

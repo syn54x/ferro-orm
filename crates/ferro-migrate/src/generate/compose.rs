@@ -695,6 +695,7 @@ impl Lineage {
                 table,
                 field: None,
                 old,
+                ..
             } => {
                 let re_added_at = since(&|p| sides[p].models.iter().any(|m| m.table_name == old));
                 Err(ComposeError::OldNameReAdded {
@@ -706,6 +707,7 @@ impl Lineage {
                 table,
                 field: Some(field),
                 old,
+                ..
             } => {
                 let table_id = self.id(last, &Key::Table(table.clone()));
                 let re_added_at = since(&|p| {

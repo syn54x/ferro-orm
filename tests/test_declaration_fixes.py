@@ -544,6 +544,40 @@ def _cases(storage: str) -> dict[str, dict]:
             'others: Relation[list["Tournament"]] = ManyToMany(through="player_links")',
         ],
     )
+    # A join table's renamed_from that cannot be its previous name.
+    for spelling, previous in {
+        "its own join table": "player_links",
+        "a name that is no table": "player-links",
+    }.items():
+        cases[f"many-to-many renamed from {spelling}"] = _case(
+            "many-to-many",
+            "links",
+            local=True,
+            Player=[
+                'links: Relation[list["Tag"]] = '
+                f'ManyToMany(through="player_links", renamed_from="{previous}")'
+            ],
+        )
+    cases["related_name many-to-many by Field renamed from a join table"] = _case(
+        "many-to-many",
+        "links",
+        local=True,
+        Tag=['linked: Relation[list["Player"]] = BackRef()'],
+        Player=[
+            'links: Relation[list["Tag"]] = Field(many_to_many=True, '
+            'related_name="linked", renamed_from="old_links")'
+        ],
+    )
+    cases["related_name many-to-many renamed from a join table"] = _case(
+        "many-to-many",
+        "links",
+        local=True,
+        Tag=['linked: Relation[list["Player"]] = BackRef()'],
+        Player=[
+            'links: Relation[list["Tag"]] = '
+            'ManyToMany(related_name="linked", renamed_from="old_links")'
+        ],
+    )
     # The key shared with the primary key, and every relation that names it.
     cases["key shared with the primary key"] = _case(
         "shared key",

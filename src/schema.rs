@@ -320,7 +320,7 @@ fn warn_pending_renames(
             .filter(|(table, roots)| *table != new && roots.contains(new))
             .map(|(table, _)| table.clone())
             .collect();
-        report.warn(pending_table_rename_warning(old, new, &dependents));
+        report.warn(pending_table_rename_warning(model, old, &dependents));
     }
 }
 

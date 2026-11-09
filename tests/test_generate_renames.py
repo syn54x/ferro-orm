@@ -463,6 +463,139 @@ def test_a_hint_after_its_migration_is_no_schema_change(
     assert listing(project / "migrations") == written
 
 
+# -- B3: rename a join table --------------------------------------------------------
+
+JOIN_TABLE_BEFORE = (
+    IMPORTS
+    + """
+class Tag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    label: str
+
+
+class Author(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    tags: Relation[list["Tag"]] = ManyToMany(through="writer_tags")
+"""
+)
+
+JOIN_TABLE_AFTER = JOIN_TABLE_BEFORE.replace(
+    'ManyToMany(through="writer_tags")',
+    'ManyToMany(through="author_tags", renamed_from="writer_tags")',
+)
+
+
+def _two_links(db) -> None:
+    db.execute('INSERT INTO "author" ("name") VALUES (\'Ann\')')
+    db.execute("INSERT INTO \"tag\" (\"label\") VALUES ('poetry'), ('prose')")
+    db.execute(
+        'INSERT INTO "writer_tags" ("author_id", "tag_id") VALUES (1, 1), (1, 2)'
+    )
+
+
+@backend_matrix
+def test_a_join_table_renamed_from_its_old_name_keeps_its_rows(
+    project, pkg, db, capsys
+):
+    start(project, pkg, db, JOIN_TABLE_BEFORE)
+    _two_links(db)
+    write_models(project, pkg, JOIN_TABLE_AFTER)
+    new("rename_writer_tags")
+
+    up = statements(schema_file(project, 2, "up", db.backend))
+    assert up[0] == 'ALTER TABLE "writer_tags" RENAME TO "author_tags"'
+    assert 'DROP TABLE "writer_tags"' not in up
+    assert not any(
+        sql.startswith('CREATE TABLE IF NOT EXISTS "author_tags"') for sql in up
+    )
+    if db.backend == "postgres":
+        # Every name derived from the table follows it.
+        assert up[1:] == [
+            'ALTER INDEX "idx_writer_tags_tag_id_author_id" RENAME TO '
+            '"idx_author_tags_tag_id_author_id"',
+            'ALTER INDEX "uq_writer_tags_author_id_tag_id" RENAME TO '
+            '"uq_author_tags_author_id_tag_id"',
+            'ALTER TABLE "author_tags" RENAME CONSTRAINT '
+            '"fk_writer_tags_author_id_author" TO "fk_author_tags_author_id_author"',
+            'ALTER TABLE "author_tags" RENAME CONSTRAINT '
+            '"fk_writer_tags_tag_id_tag" TO "fk_author_tags_tag_id_tag"',
+        ]
+    else:
+        # The renamed constraint names need the renamed table rebuilt.
+        assert rebuilt(up) == ["author_tags"]
+    assert "destructive" not in schema_file(project, 2, "up", db.backend).read_text()
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert "writer_tags" not in db.tables()
+    links = 'SELECT "author_id", "tag_id" FROM "author_tags" ORDER BY "tag_id"'
+    assert db.rows(links) == [(1, 1), (1, 2)]
+    capsys.readouterr()
+    assert run("migrate", "drift", "--url", db.url) == 0
+    assert "no drift against 0002_rename_writer_tags" in capsys.readouterr().out
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert db.rows(links.replace("author_tags", "writer_tags")) == [(1, 1), (1, 2)]
+
+
+def test_a_join_table_renamed_from_a_declared_table_is_refused_by_the_generator(
+    project, pkg
+):
+    from tests.test_many_to_many_through import DECLARED_TABLE_REFUSAL
+
+    from_tag = JOIN_TABLE_AFTER.replace(
+        'renamed_from="writer_tags"', 'renamed_from="tag"'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, from_tag)
+
+    assert f"rename hint refused: {DECLARED_TABLE_REFUSAL}" in err
+
+
+def test_two_join_tables_renamed_from_one_name_are_refused_naming_the_relations(
+    project, pkg
+):
+    twice = JOIN_TABLE_AFTER + (
+        "    labels: Relation[list[Tag]] = "
+        'ManyToMany(through="author_labels", renamed_from="writer_tags")\n'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, twice)
+
+    assert (
+        'join table "author_labels" declares ManyToMany(renamed_from="writer_tags") '
+        'and join table "author_tags" declares '
+        'ManyToMany(renamed_from="writer_tags"): one table becomes one table; keep '
+        'the hint on the table "writer_tags" became'
+    ) in err
+
+
+def test_a_join_table_renamed_without_its_hint_names_the_hint_on_sqlite(project, pkg):
+    """The model rename carries the join table's key column, which SQLite
+    rebuilds the table to rename, but the table itself is gone from the
+    models under its old name."""
+    renamed = b3("author", "sqlite").replace(
+        'through="writer_tags"', 'through="author_tags"'
+    )
+
+    err = refused(project, pkg, "sqlite", b3("writer", "sqlite"), renamed)
+
+    assert err.splitlines()[-1].endswith(
+        "cannot rebuild table 'writer_tags': it is missing from the new snapshot. "
+        "If the join table was renamed, declare "
+        'ManyToMany(renamed_from="writer_tags") on the many-to-many that names it '
+        "now; if it was dropped, drop it in a migration of its own before this change"
+    )
+    # Followed, the fix renames the join table and its key column.
+    hinted = renamed.replace(
+        'through="author_tags"', 'through="author_tags", renamed_from="writer_tags"'
+    )
+    write_models(project, pkg, hinted)
+    new("rename_writer")
+    up = statements(schema_file(project, 2, "up", "sqlite"))
+    assert 'ALTER TABLE "writer_tags" RENAME TO "author_tags"' in up
+    assert 'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"' in up
+
+
 # -- a rename and a type change in one edit ------------------------------------------
 
 

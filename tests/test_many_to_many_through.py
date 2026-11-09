@@ -17,6 +17,7 @@ snapshot `tests/fixtures/many_to_many_pre_conversion/` recorded from the old
 form.
 """
 
+import inspect
 import shutil
 from pathlib import Path
 
@@ -26,7 +27,15 @@ import ferro
 from ferro import Field, ManyToMany, Model, Relation, Reverse
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.relations.fixes import DeclarationRefusal
-from tests._pass_harness import auto_migrate
+from ferro.raw import fetch_all
+from tests._alembic_harness import autogenerate
+from tests._pass_harness import (
+    auto_migrate,
+    on,
+    schema_sql,
+    warned_auto_migrate,
+    warning_texts,
+)
 from tests.test_migrate_new import listing, run, write_config, write_models
 from tests.test_postponed_annotations import (
     _ASSIGNED,
@@ -227,6 +236,225 @@ def test_reverse_index_false_keeps_the_unique_index_only():
         "uq_player_tournaments_player_id_tournament_id"
     ]
     assert join["indexes"] == []
+
+
+# -- renaming the join table ---------------------------------------------------------
+
+
+def _authors(through: str, renamed_from: str | None = None):
+    _wipe()
+
+    class Tag(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+
+    class Author(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        tags: Relation[list["Tag"]] = ManyToMany(
+            through=through, renamed_from=renamed_from
+        )
+
+    return Author, Tag
+
+
+async def _ann_with_two_tags(db_url: str) -> None:
+    Author, Tag = _authors("writer_tags")
+    await auto_migrate(db_url)
+    async with ferro.engines.session():
+        ann = await Author.create(name="Ann")
+        for label in ("poetry", "prose"):
+            await ann.tags.add(await Tag.create(label=label))
+    ferro.reset_engine()
+
+
+async def _tables(db_url: str) -> set[str]:
+    rows = await fetch_all(
+        on(
+            db_url,
+            sqlite="SELECT name FROM sqlite_master WHERE type = 'table'",
+            postgres="SELECT table_name::text AS name FROM information_schema.tables "
+            "WHERE table_schema = current_schema()",
+        )
+    )
+    return {row["name"] for row in rows}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_auto_migrate_renames_a_join_table_in_place(db_url):
+    await _ann_with_two_tags(db_url)
+    Author, _ = _authors("author_tags", renamed_from="writer_tags")
+
+    report = await warned_auto_migrate(db_url, updates=True)
+
+    # SQLite renames a table in place but not its constraints, which only a
+    # migration's rebuild renames (ADR-0047), and says so.
+    stale = [
+        f"Constraint 'fk_writer_tags_{column}' on 'author_tags' is now named "
+        f"'fk_author_tags_{column}', and SQLite cannot rename a table constraint "
+        "in place; `ferro migrate new` renames it by rebuilding the table."
+        for column in ("author_id_author", "tag_id_tag")
+    ]
+    assert warning_texts(report) == on(db_url, sqlite=stale, postgres=[])
+    statements = schema_sql(report)
+    assert statements[0] == 'ALTER TABLE "writer_tags" RENAME TO "author_tags"'
+    assert 'DROP TABLE "writer_tags"' not in statements
+    assert not any(
+        sql.startswith('CREATE TABLE IF NOT EXISTS "author_tags"') for sql in statements
+    )
+    async with ferro.engines.session():
+        assert "writer_tags" not in await _tables(db_url)
+        ann = await Author.where(lambda author: author.name == "Ann").first()
+        assert sorted(tag.label for tag in await ann.tags.all()) == ["poetry", "prose"]
+    ferro.reset_engine()
+    # A second pass finds nothing to change and says nothing.
+    again = await warned_auto_migrate(db_url, updates=True)
+    assert (schema_sql(again), warning_texts(again)) == ([], [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_join_table_rename_without_migrate_updates_names_the_relation(db_url):
+    await _ann_with_two_tags(db_url)
+    _authors("author_tags", renamed_from="writer_tags")
+
+    report = await warned_auto_migrate(db_url)
+
+    assert schema_sql(report) == []
+    assert warning_texts(report) == [
+        'join table "author_tags" declares ManyToMany(renamed_from="writer_tags"), '
+        'and the database holds "writer_tags" and no "author_tags": "author_tags" '
+        "was not created. The rename runs under connect(..., migrate_updates=True) "
+        "or in a migration from ferro migrate new."
+    ]
+
+
+DECLARED_TABLE_REFUSAL = (
+    'join table "author_tags" declares ManyToMany(renamed_from="tag"), but the '
+    'models still declare table "tag": delete the hint or the declaration of '
+    'table "tag"'
+)
+"""The planner's one refusal of a join table renamed from a declared table,
+which every emitter prints."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_join_table_renamed_from_a_declared_table_is_refused_by_pass_and_bridge(
+    db_url, postgres_base_url, db_schema_name
+):
+    await _ann_with_two_tags(db_url)
+    _authors("author_tags", renamed_from="tag")
+
+    report = await warned_auto_migrate(db_url, updates=True)
+
+    assert schema_sql(report) == []
+    assert warning_texts(report) == [f"rename hint refused: {DECLARED_TABLE_REFUSAL}"]
+    with pytest.raises(RuntimeError) as refused:
+        autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert f"rename hint refused: {DECLARED_TABLE_REFUSAL}" in str(refused.value)
+
+
+_POST_TAGS = """
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    {line}
+"""
+_KEPT = 'tags: Relation[list[Tag]] = ManyToMany(through="post_tags")'
+
+
+@pytest.mark.parametrize(
+    ("renamed_from", "reason"),
+    [
+        (
+            "post_tags",
+            "renamed_from is the join table's previous name, and post_tags is "
+            "the name through= gives it now",
+        ),
+        (
+            "bad-name",
+            "renamed_from is the join table's previous name, a table name: "
+            "letters, digits and underscores, not starting with a digit, at "
+            "most 63 characters",
+        ),
+    ],
+    ids=["its own name", "not a table name"],
+)
+def test_a_join_table_rename_that_cannot_be_meant_is_refused(
+    tmp_path, renamed_from, reason
+):
+    line = (
+        "tags: Relation[list[Tag]] = "
+        f'ManyToMany(through="post_tags", renamed_from="{renamed_from}")'
+    )
+
+    message = _refusal(tmp_path, _POST_TAGS.format(line=line), future=False)
+
+    assert message == f"Post.tags: {reason}. Write: {_KEPT}"
+    _wipe()
+    _import(tmp_path, _POST_TAGS.format(line=_KEPT), future=False)
+    ferro.ensure_resolved_modelset()
+
+
+def test_renamed_from_on_the_old_many_to_many_is_refused(tmp_path):
+    body = """
+from ferro import BackRef
+
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    posts: Relation[list["Post"]] = BackRef()
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tags: Relation[list[Tag]] = {marker}
+"""
+    refused = 'ManyToMany(related_name="posts", renamed_from="old_tags")'
+    kept = 'ManyToMany(related_name="posts")'
+
+    message = _refusal(tmp_path, body.format(marker=refused), future=False)
+
+    assert message == (
+        "Post.tags: renamed_from renames a join table named with through=, and "
+        "related_name= derives its join table from the model, which "
+        "__ferro_renamed_from__ renames. "
+        f"Write: tags: Relation[list[Tag]] = {kept}"
+    )
+    _wipe()
+    _import(tmp_path, body.format(marker=kept), future=False)
+    ferro.ensure_resolved_modelset()
+
+
+_ACCEPTED = {"through", "related_name", "renamed_from", "reverse_index"}
+# Every option of `Field` a many-to-many does not use; `retired` is refused
+# with the declaration it is on (tests/test_retired_columns.py).
+_UNUSED = sorted(
+    set(inspect.signature(Field).parameters) - _ACCEPTED - {"retired", "unknown"}
+)
+
+
+@pytest.mark.parametrize("option", _UNUSED)
+def test_many_to_many_refuses_every_option_it_would_not_use(option):
+    with pytest.raises(TypeError) as refused:
+        ManyToMany(through="post_tags", **{option: True})
+
+    assert str(refused.value) == (
+        f"ManyToMany() got an unknown keyword {option!r}. A many-to-many adds no "
+        "column, so it takes no column or field option: its options are "
+        "through=, renamed_from= and reverse_index="
+    )
+
+
+def test_a_misspelled_many_to_many_option_names_the_closest_one():
+    with pytest.raises(TypeError) as refused:
+        ManyToMany(throgh="post_tags")
+
+    assert str(refused.value) == (
+        "ManyToMany() got an unknown keyword 'throgh'. Did you mean 'through'?"
+    )
 
 
 # -- refusals ------------------------------------------------------------------------
