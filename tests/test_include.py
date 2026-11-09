@@ -809,7 +809,7 @@ async def test_backref_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
+        match=r"^include\(\) cannot load 'transactions'.*include\(\) loads forward.*M2M loading will be",
     ):
         INAccount.select().include(lambda a: a.transactions)
 
@@ -819,7 +819,7 @@ async def test_m2m_include_selector_names_the_future_mechanism(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     with pytest.raises(
         TypeError,
-        match=r"reverse \(Reverse\) or many-to-many.*batched second query",
+        match=r"^include\(\) cannot load 'tags'.*include\(\) loads forward.*M2M loading will be",
     ):
         INMPost.select().include(lambda p: p.tags)
 
@@ -829,14 +829,14 @@ def test_include_and_projection_raise_in_both_chain_orders():
     # projection as the record-shaped way across a relation, permanently.
     with pytest.raises(
         ValueError,
-        match=r"exactly one materialization plan.*traversed projection",
+        match=r"projected records or loaded instances, never both.*traversed projection.*load instances with include\(\)",
     ):
         INTransaction.select().include(lambda t: t.account).select(
             lambda t: (t.id, t.amount)
         )
     with pytest.raises(
         ValueError,
-        match=r"exactly one materialization plan.*traversed projection",
+        match=r"projected records or loaded instances, never both.*traversed projection.*load instances with include\(\)",
     ):
         INTransaction.select(lambda t: (t.id, t.amount)).include(  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             lambda t: t.account
@@ -848,7 +848,13 @@ async def test_mutations_on_an_included_query_raise_before_any_round_trip():
     """No ferro.connect in scope: the build-time guard fires before any
     route or SQL exists."""
     included = INTransaction.select().include(lambda t: t.account)
-    with pytest.raises(ValueError, match=r"update\(\) does not support include\(\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"update\(\) does not support include\(\).*returns no instances to load.*fetch the loaded rows first",
+    ):
         await included.update(note="x")
-    with pytest.raises(ValueError, match=r"delete\(\) does not support include\(\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"delete\(\) does not support include\(\).*returns no instances to load.*fetch the loaded rows first",
+    ):
         await included.delete()

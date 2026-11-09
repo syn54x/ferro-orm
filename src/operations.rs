@@ -1048,7 +1048,7 @@ fn include_column_alias(hop_alias: &str, column: &str) -> String {
 /// # Errors
 /// `PyValueError` when a path's prefix has no join-plan entry (cannot happen
 /// with a [`QueryPlan::build_join_plan`]-built plan — defense in depth), no
-/// registration (the walker loads every rendered join's table first), or
+/// registration (resolve each rendered join's table registration first), or
 /// the hop model has no primary key (loading runs the identity protocol
 /// per hop, which needs one; Python validates this at build time too).
 fn resolve_include_hops(
@@ -8417,6 +8417,30 @@ mod instances_select_list_tests {
             ),
         );
         plan
+    }
+
+    #[test]
+    fn an_included_table_without_a_primary_key_says_loading_runs_the_identity_protocol() {
+        let mut plan = include_plan();
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({"properties": {"label": {"type": "string"}}}),
+                "account".to_string(),
+            ),
+        );
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
+            panic!("include plan expected");
+        };
+        let Err(err) = resolve_include_hops(paths, &join_plan, &plan) else {
+            panic!("a table without a primary key must be refused");
+        };
+        assert!(
+            err.to_string()
+                .contains("loading runs the identity protocol per hop"),
+            "msg: {err}"
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ def test_related_id_is_not_the_model_primary_key():
 
 def test_position_of_unloaded_traversed_key_raises():
     row = PosTravTransaction.model_construct(id=1, amount=10, account_id=1)
-    with pytest.raises(ValueError, match=r"account\.label"):
+    with pytest.raises(ValueError, match=r"'account\.label' loaded on the instance"):
         _traversed().position_of(row)
 
 
