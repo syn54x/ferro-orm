@@ -95,7 +95,7 @@ What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existin
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
 | Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
-| Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team: Annotated[Team, ForeignKey(...)]` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
+| Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team_id: int = Field(foreign_key=Team)` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
 | Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](../guide/schema/data-steps.md) writes the backfill first |
