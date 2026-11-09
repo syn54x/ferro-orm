@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import fn as _fn
+from ._bind_payload import relation_key_columns
 from .base import ForwardRelation
 from .query.nodes import (
     FieldProxy,
@@ -354,17 +355,15 @@ def _relation_fk_columns(
 ) -> dict[str, str]:
     """Map each forward relation field to the key column its ``Forward`` names.
 
-    Read from the class-body-registered ``__ferro_relations__`` (not from resolved
-    relation specs) so the mapping is complete at class definition, before
-    ``resolve_relationships`` has a target class to offer.
+    The forward relations among `relation_key_columns`, read from the
+    class body so the mapping is complete at class definition, whose key
+    column is one of ``columns``.
     """
-    relations: dict[str, str] = {}
-    for field_name, meta in (
-        getattr(model_cls, "__ferro_relations__", {}) or {}
-    ).items():
-        if isinstance(meta, ForwardRelation) and meta.fk_column in columns:
-            relations[field_name] = meta.fk_column
-    return relations
+    return {
+        name: column
+        for name, column in relation_key_columns(model_cls).items()
+        if column in columns
+    }
 
 
 def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:

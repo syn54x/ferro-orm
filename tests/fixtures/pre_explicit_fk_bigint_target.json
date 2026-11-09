@@ -1,0 +1,73 @@
+{
+  "ir_kind": "schema",
+  "ir_version": 4,
+  "parent_checksum": null,
+  "payload": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_player_team_id_team",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "rec_pkg.models.Player",
+        "table_name": "player",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "db_type": "bigint",
+            "db_type_explicit": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "rec_pkg.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  }
+}

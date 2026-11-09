@@ -40,7 +40,7 @@ raise DeclarationRefusal(
     'on_delete="SET NULL" needs a nullable column',  # the reason, no full stop
     [
         Edit(model, name, "replace", (line,)),
-        Edit(model, "team", "replace", (relation_line(...),)),
+        Edit(model, "team", "replace", (forward_line(..., nullable=True),)),
     ],
 )
 ```
@@ -49,7 +49,7 @@ The message comes out as numbered steps because the second edit is not on
 the refused field. With only the first edit it would print `Write: <line>`.
 
 1. **Build each line with the builders** (`key_column_line`,
-   `relation_line`, `field_line`), passing `bound` for the class the line is
+   `forward_line`, `reverse_line`, `field_line`), passing `bound` for the class the line is
    pasted in: the relation's own `bound` for its class, `ON_ANOTHER_MODEL`
    for any other model.
 2. **Choose the action from what the edit does to that class**: `replace`

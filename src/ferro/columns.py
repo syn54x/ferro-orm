@@ -42,6 +42,7 @@ __all__ = [
     "ColumnSpec",
     "ForeignKeyRef",
     "RelationSpec",
+    "RetiredField",
     "ReverseSpec",
     "build_column_specs",
     "build_relation_specs",
@@ -457,6 +458,72 @@ def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
     return None
 
 
+# Each field option a `json_schema_extra` key once declared, and the `Field()`
+# argument that declares it now.
+_SCHEMA_EXTRA_OPTIONS = {
+    "primary_key": "primary_key",
+    "unique": "unique",
+    "index": "index",
+    "autoincrement": "autoincrement",
+    "db_type": "db_type",
+    "db_check": "db_check",
+    "ferro_nullable": "nullable",
+}
+
+# The key the old `Field()` wrote its options under: a dict keyed by the
+# `Field()` arguments themselves.
+_OLD_FIELD_OPTIONS_KEY = "ferro_field"
+
+
+def _refuse_options_in_schema_extra(
+    model: str, field_name: str, extra: dict[str, Any]
+) -> None:
+    """Refuse a field option given through ``json_schema_extra``.
+
+    ``extra`` is the dict as written, or for a callable the field's schema
+    property it wrote into, so both are refused alike. The options live in
+    the field's metadata, so a key there would be printed into the JSON
+    schema and read by nothing.
+    """
+    for key, value in extra.items():
+        if key == _OLD_FIELD_OPTIONS_KEY:
+            arguments = (
+                ", ".join(f"{option}={given!r}" for option, given in value.items())
+                if isinstance(value, dict) and value
+                else "its options"
+            )
+        elif key in _SCHEMA_EXTRA_OPTIONS:
+            arguments = f"{_SCHEMA_EXTRA_OPTIONS[key]}={value!r}"
+        else:
+            continue
+        raise TypeError(
+            f"{model}.{field_name} declares {key!r} in json_schema_extra, "
+            f"which Ferro does not read. Pass {arguments} to Field() "
+            "instead of json_schema_extra"
+        )
+
+
+def foreign_key_ref(options: FerroField) -> ForeignKeyRef | None:
+    """Return the foreign key a column's options declare, or `None`.
+
+    The one place a foreign-key column's target table is read: a target
+    written by name reads the table of the model the name resolves to now,
+    so a column compiled again once relations resolve points at it.
+
+    Args:
+        options: The column's declared options.
+
+    Returns:
+        The foreign key, or `None` when the column declares none.
+    """
+    if options.foreign_key is None:
+        return None
+    return ForeignKeyRef(
+        to_table=_target_table_name(options.foreign_key),
+        on_delete=options.on_delete,
+    )
+
+
 def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     """Build one `ColumnSpec` per schema property, in model-field order.
 
@@ -469,6 +536,10 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 
     Returns:
         The column specs, keyed by column name.
+
+    Raises:
+        TypeError: A field's ``json_schema_extra`` names a field option,
+            which `Field()` declares instead.
     """
     schema = model_cls.model_json_schema()
     properties = schema.get("properties")
@@ -490,6 +561,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         prop = _resolve_nested_refs(schema, _resolve_ref(schema, raw_prop))
 
         field_info = model_fields.get(field_name)
+        extra = field_info.json_schema_extra if field_info is not None else None
+        if extra is not None:
+            # A dict as written; a callable by what it wrote into the schema.
+            _refuse_options_in_schema_extra(
+                model_cls.__name__,
+                field_name,
+                extra if isinstance(extra, dict) else raw_prop,
+            )
         ann = resolved_annotations.get(
             field_name, field_info.annotation if field_info is not None else None
         )
@@ -505,14 +584,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             declared.autoincrement, is_pk, _property_is_integer(prop)
         )
 
-        fk_ref = (
-            ForeignKeyRef(
-                to_table=_target_table_name(declared.foreign_key),
-                on_delete=declared.on_delete,
-            )
-            if declared.foreign_key is not None
-            else None
-        )
+        fk_ref = foreign_key_ref(declared)
 
         explicit_nullable = (
             declared.nullable if isinstance(declared.nullable, bool) else None
@@ -798,12 +870,23 @@ def fk_column_spec(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RetiredField:
+    """A retired field: its column as compiled while it was a field, and its options."""
+
+    spec: ColumnSpec
+    """The column, flagged retired and nullable, compiled at class creation."""
+    options: FerroField
+    """The options the field declared, its `foreign_key` among them."""
+
+
 def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     """Return the retired columns of `model_cls`, flagged and nullable.
 
-    A retired field's spec, a foreign-key column's included, was derived once
-    at class creation, before the field left the Pydantic model
-    (`__ferro_retired_fields__`).
+    A retired field's spec was derived once at class creation, before the
+    field left the Pydantic model (`__ferro_retired_fields__`). Its foreign
+    key is read again on every compile, as a live column's is, so a target
+    written by name points at the table it resolves to.
 
     Args:
         model_cls: The model class.
@@ -811,7 +894,13 @@ def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     Returns:
         The retired columns' specs, keyed by column name.
     """
-    return dict(model_cls.__dict__.get("__ferro_retired_fields__", {}))
+    retired: dict[str, RetiredField] = model_cls.__dict__.get(
+        "__ferro_retired_fields__", {}
+    )
+    return {
+        name: replace(field.spec, foreign_key=foreign_key_ref(field.options))
+        for name, field in retired.items()
+    }
 
 
 def retired_clause(model_cls: type[Any], name: str) -> str:

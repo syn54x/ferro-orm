@@ -276,7 +276,7 @@ def test_m2m_join_artifacts_follow_custom_table_names():
 
     assert "wiki_pages_tags" in REGISTRY.join_tables()
     bundle = REGISTRY.join_tables()["wiki_pages_tags"]
-    columns_by_name = {spec.name: spec for spec in bundle["columns"]}
+    columns_by_name = {spec.name: spec for spec in bundle.columns}
     assert set(columns_by_name) == {"wiki_pages_id", "wiki_tags_id"}
     assert columns_by_name["wiki_pages_id"].foreign_key.to_table == "wiki_pages"
     assert columns_by_name["wiki_tags_id"].foreign_key.to_table == "wiki_tags"

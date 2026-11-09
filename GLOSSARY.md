@@ -53,7 +53,7 @@ A database setting declared on one model field (`primary_key`, `unique`, `index`
 _Avoid_: `ferro_field`, raw path, column option
 
 **Foreign-key column**:
-A column the model declares with `Field(foreign_key=Target)`, holding the target's primary-key value. Its constraint, `fk_<table>_<column>_<target table>`, and its index are derived from the declaration; a *forward relation* names it. Nullability, rename and retirement are the column's own options.
+A column the model declares with `Field(foreign_key=Target)`, holding the target's primary-key value. Its constraint, `fk_<table>_<column>_<target table>`, and its index are derived from the declaration; a *forward relation* names it. Its nullability comes from its annotation alone (`int | None`), never `nullable=`; rename and retirement are its own options.
 _Avoid_: shadow column, shadow FK, `*_id` column, injected column, reference column
 
 **Forward relation**:
