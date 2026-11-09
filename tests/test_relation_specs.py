@@ -9,7 +9,7 @@ existing ``__ferro_columns__``.
 
 from typing import Annotated
 
-from ferro import BackRef, ForeignKey, ManyToMany, Model, Relation
+from ferro import Forward, ManyToMany, Model, Relation, Reverse
 from ferro.base import FerroField
 from ferro.columns import RelationSpec
 
@@ -18,11 +18,12 @@ class TestRelationSpecBasics:
     def test_single_fk_produces_relation_spec(self, clean_registry):
         class Account(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            entries: Relation[list["Entry"]] = BackRef()
+            entries: Relation[list["Entry"]] = Reverse("account_id")
 
         class Entry(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            account: Annotated[Account, ForeignKey(related_name="entries")]
+            account_id: Annotated[int, FerroField(foreign_key=Account)]
+            account: Relation[Account] = Forward("account_id")
 
         specs = Entry.__ferro_relation_specs__
         assert set(specs) == {"account"}
@@ -52,22 +53,24 @@ class TestNullability:
     def test_nullable_fk(self, clean_registry):
         class Org(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            projects: Relation[list["Project"]] = BackRef()
+            projects: Relation[list["Project"]] = Reverse("org_id")
 
         class Project(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            org: Annotated[Org | None, ForeignKey(related_name="projects")] = None
+            org_id: Annotated[int | None, FerroField(foreign_key=Org)] = None
+            org: Relation[Org | None] = Forward("org_id")
 
         assert Project.__ferro_relation_specs__["org"].nullable is True
 
     def test_non_nullable_fk(self, clean_registry):
         class Org(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            projects: Relation[list["Project"]] = BackRef()
+            projects: Relation[list["Project"]] = Reverse("org_id")
 
         class Project(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            org: Annotated[Org, ForeignKey(related_name="projects")]
+            org_id: Annotated[int, FerroField(foreign_key=Org)]
+            org: Relation[Org] = Forward("org_id")
 
         assert Project.__ferro_relation_specs__["org"].nullable is False
 
@@ -76,11 +79,12 @@ class TestNullability:
 
         class Org(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            projects: Relation[list["Project"]] = BackRef()
+            projects: Relation[list["Project"]] = Reverse("org_id")
 
         class Project(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            org: Annotated[Org | None, ForeignKey(related_name="projects")] = None
+            org_id: Annotated[int | None, FerroField(foreign_key=Org)] = None
+            org: Relation[Org | None] = Forward("org_id")
 
         rel_spec = Project.__ferro_relation_specs__["org"]
         col_spec = Project.__ferro_columns__[rel_spec.fk_column]
@@ -94,8 +98,10 @@ class TestMultipleAndSelfReferentialFKs:
 
         class Transfer(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            from_account: Annotated[Account, ForeignKey(related_name="transfers_out")]
-            to_account: Annotated[Account, ForeignKey(related_name="transfers_in")]
+            from_account_id: Annotated[int, FerroField(foreign_key=Account)]
+            from_account: Relation[Account] = Forward("from_account_id")
+            to_account_id: Annotated[int, FerroField(foreign_key=Account)]
+            to_account: Relation[Account] = Forward("to_account_id")
 
         specs = Transfer.__ferro_relation_specs__
         assert set(specs) == {"from_account", "to_account"}
@@ -110,8 +116,9 @@ class TestMultipleAndSelfReferentialFKs:
 
         class Employee(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            manager: Annotated["Employee", ForeignKey(related_name="reports")]
-            reports: Relation[list["Employee"]] = BackRef()
+            manager_id: Annotated[int, FerroField(foreign_key="Employee")]
+            manager: Relation["Employee"] = Forward("manager_id")
+            reports: Relation[list["Employee"]] = Reverse("manager_id")
 
         # A self-FK is necessarily a forward (string) ref at class-body time —
         # the class doesn't exist yet — so the spec only completes once
@@ -130,22 +137,23 @@ class TestExclusions:
     def test_many_to_many_field_absent_from_lookup(self, clean_registry):
         class Tag(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            posts: Relation[list["Post"]] = BackRef()
+            posts: Relation[list["Post"]] = Reverse("tags")
 
         class Post(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            tags: Relation[list[Tag]] = ManyToMany(related_name="posts")
+            tags: Relation[list[Tag]] = ManyToMany(through="post_tags")
 
         assert Post.__ferro_relation_specs__ == {}
 
     def test_back_ref_field_absent_from_lookup(self, clean_registry):
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            books: Relation[list["Book"]] = BackRef()
+            books: Relation[list["Book"]] = Reverse("author_id")
 
         class Book(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            author: Annotated[Author, ForeignKey(related_name="books")]
+            author_id: Annotated[int, FerroField(foreign_key=Author)]
+            author: Relation[Author] = Forward("author_id")
 
         assert "books" not in Author.__ferro_relation_specs__
 
@@ -158,11 +166,12 @@ class TestProvisionalVsResolved:
 
         class FwdChild(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            parent: Annotated["FwdParent", ForeignKey(related_name="children")]
+            parent_id: Annotated[int, FerroField(foreign_key="FwdParent")]
+            parent: Relation["FwdParent"] = Forward("parent_id")
 
         class FwdParent(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            children: Relation[list["FwdChild"]] = BackRef()
+            children: Relation[list["FwdChild"]] = Reverse("parent_id")
 
         # Attribute exists pre-resolution regardless of contents (invariant).
         assert hasattr(FwdChild, "__ferro_relation_specs__")
@@ -176,7 +185,7 @@ class TestProvisionalVsResolved:
 
 
 def test_a_relation_spec_names_its_declared_key_column(clean_registry):
-    from ferro import Field, Forward
+    from ferro import Field
 
     class Owner(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
