@@ -333,9 +333,7 @@ async def test_loaded_typed_columns_equal_a_direct_query(db_url):
     assert isinstance(loaded.created_at, datetime)
     assert isinstance(loaded.external_id, UUID)
     assert isinstance(loaded.tier, INTier) and loaded.tier is INTier.PRO
-    assert isinstance(loaded.balance, Decimal) and loaded.balance == Decimal(
-        "12.50"
-    )
+    assert isinstance(loaded.balance, Decimal) and loaded.balance == Decimal("12.50")
     # The root's same-named enum column still decodes as the root's enum.
     assert user.tag is INTier.PRO
     assert isinstance(loaded.tag, str) and loaded.tag == "vip"
