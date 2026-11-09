@@ -1,16 +1,16 @@
 """End-to-end behavior of existence tests on reverse relations (ADR-0007).
 
-A reverse (BackRef) relation appears in a predicate in exactly one form — the
+A reverse relation appears in a predicate in exactly one form — the
 existence test ``t.rel.exists(...)`` — rendered as a correlated EXISTS at
-every cardinality (one-to-one BackRefs included), negated with ``~``, and
+every cardinality (one-to-one reverse relations included), negated with ``~``, and
 optionally scoped by a full ferro predicate over the related model (#315).
 These tests assert result sets only, on both database backends via the
 backend matrix; the wire shape is pinned separately by the ``exists`` golden
 vectors.
 
 The model graph mirrors the #307/#308 workloads: a transaction with two
-one-to-one BackRefs into a transfer link row (membership via either FK
-column), a to-many BackRef onto split lines, and a category the lines and
+one-to-one reverse relations into a transfer link row (membership via either FK
+column), a to-many reverse relation onto split lines, and a category the lines and
 transactions both point at (the line-aware category filter).
 """
 
@@ -18,12 +18,12 @@ import pytest
 from typing import Annotated
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     connect,
     engines,
 )
@@ -34,37 +34,42 @@ pytestmark = pytest.mark.backend_matrix
 class ExCat(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    txns: Relation[list["ExTxn"]] = BackRef()
-    lines: Relation[list["ExLine"]] = BackRef()
+    txns: Relation[list["ExTxn"]] = Reverse("category_id")
+    lines: Relation[list["ExLine"]] = Reverse("category_id")
 
 
 class ExTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    category: Annotated[
-        ExCat | None, ForeignKey(related_name="txns", on_delete="SET NULL")
+    category_id: Annotated[
+        int | None, FerroField(foreign_key=ExCat, on_delete="SET NULL")
     ] = None
-    transfer_out: "ExTransfer" = BackRef()
-    transfer_in: "ExTransfer" = BackRef()
-    lines: Relation[list["ExLine"]] = BackRef()
+    category: Relation[ExCat | None] = Forward("category_id")
+    transfer_out: Relation[list["ExTransfer"]] = Reverse("outflow_transaction_id")
+    transfer_in: Relation[list["ExTransfer"]] = Reverse("inflow_transaction_id")
+    lines: Relation[list["ExLine"]] = Reverse("txn_id")
 
 
 class ExTransfer(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    outflow_transaction: Annotated[
-        ExTxn | None, ForeignKey(related_name="transfer_out", unique=True)
+    outflow_transaction_id: Annotated[
+        int | None, FerroField(foreign_key=ExTxn, unique=True)
     ] = None
-    inflow_transaction: Annotated[
-        ExTxn | None, ForeignKey(related_name="transfer_in", unique=True)
+    outflow_transaction: Relation[ExTxn | None] = Forward("outflow_transaction_id")
+    inflow_transaction_id: Annotated[
+        int | None, FerroField(foreign_key=ExTxn, unique=True)
     ] = None
+    inflow_transaction: Relation[ExTxn | None] = Forward("inflow_transaction_id")
 
 
 class ExLine(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    txn: Annotated[ExTxn, ForeignKey(related_name="lines", on_delete="CASCADE")]
-    category: Annotated[
-        ExCat | None, ForeignKey(related_name="lines", on_delete="SET NULL")
+    txn_id: Annotated[int, FerroField(foreign_key=ExTxn, on_delete="CASCADE")]
+    txn: Relation[ExTxn] = Forward("txn_id")
+    category_id: Annotated[
+        int | None, FerroField(foreign_key=ExCat, on_delete="SET NULL")
     ] = None
+    category: Relation[ExCat | None] = Forward("category_id")
     amount: int = 0
     memo: str = ""
 
@@ -89,7 +94,7 @@ async def _amounts(query) -> list[int]:
 @pytest.mark.asyncio
 async def test_bare_exists_on_one_to_one_backref(db_url):
     """``t.transfer_out.exists()`` matches exactly the rows with a child row —
-    a one-to-one BackRef spells identically to a to-many one."""
+    a one-to-one reverse relation spells identically to a to-many one."""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         await _seed_transfers()
@@ -519,13 +524,13 @@ async def test_inner_lambda_must_return_a_predicate(db_url):
 class ExTag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    users: Relation[list["ExUser"]] = ManyToMany(related_name="tags")
+    users: Relation[list["ExUser"]] = ManyToMany(through="extag_users")
 
 
 class ExUser(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: str = ""
-    tags: Relation[list["ExTag"]] = BackRef()
+    tags: Relation[list["ExTag"]] = Reverse("users")
 
 
 async def _seed_tags() -> dict[str, object]:
