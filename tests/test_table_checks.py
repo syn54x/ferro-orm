@@ -18,15 +18,16 @@ from typing import Annotated, ClassVar
 import pytest
 import sqlalchemy as sa
 
+import ferro
 from ferro import (
-    BackRef,
     Check,
     CheckViolationError,
     Field,
     FerroField,
-    ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     connect,
     engines,
@@ -197,7 +198,7 @@ def test_unsupported_check_predicates_fail_at_class_definition(predicate, expect
     class RejectOwner(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str | None = None
-        rejects: Relation[list["Rejecting"]] = BackRef()
+        rejects: Relation[list["Rejecting"]] = Reverse("owner_id")
 
     with pytest.raises(TypeError, match=expected):
 
@@ -207,14 +208,14 @@ def test_unsupported_check_predicates_fail_at_class_definition(predicate, expect
             id: int | None = Field(default=None, primary_key=True)
             memo: str | None = None
             amount: int = 0
-            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = (
-                None
-            )
-            notes: Relation[list["RejectNote"]] = BackRef()
+            owner_id: int | None = Field(default=None, foreign_key=RejectOwner)
+            owner: Relation[RejectOwner | None] = Forward("owner_id")
+            notes: Relation[list["RejectNote"]] = Reverse("rejecting_id")
 
         class RejectNote(Model):
             id: int | None = Field(default=None, primary_key=True)
-            rejecting: Annotated[Rejecting, ForeignKey(related_name="notes")]
+            rejecting_id: int = Field(foreign_key=Rejecting)
+            rejecting: Relation[Rejecting] = Forward("rejecting_id")
 
 
 # ---------------------------------------------------------------------------
@@ -233,14 +234,16 @@ def _build_transfer_models():
     class Activity(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str = ""
-        outflow_transfers: Relation[list["Transfer"]] = BackRef()
-        inflow_transfers: Relation[list["Transfer"]] = BackRef()
+        outflow_transfers: Relation[list["Transfer"]] = Reverse("outflow_activity_id")
+        inflow_transfers: Relation[list["Transfer"]] = Reverse("inflow_activity_id")
 
     class Txn(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str = ""
-        outflow_transfers: Relation[list["Transfer"]] = BackRef()
-        inflow_transfers: Relation[list["Transfer"]] = BackRef()
+        outflow_transfers: Relation[list["Transfer"]] = Reverse(
+            "outflow_transaction_id"
+        )
+        inflow_transfers: Relation[list["Transfer"]] = Reverse("inflow_transaction_id")
 
     class Transfer(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -277,18 +280,14 @@ def _build_transfer_models():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        outflow_transaction: Annotated[
-            Txn | None, ForeignKey(related_name="outflow_transfers")
-        ] = None
-        outflow_activity: Annotated[
-            Activity | None, ForeignKey(related_name="outflow_transfers")
-        ] = None
-        inflow_transaction: Annotated[
-            Txn | None, ForeignKey(related_name="inflow_transfers")
-        ] = None
-        inflow_activity: Annotated[
-            Activity | None, ForeignKey(related_name="inflow_transfers")
-        ] = None
+        outflow_transaction_id: int | None = Field(default=None, foreign_key=Txn)
+        outflow_transaction: Relation[Txn | None] = Forward("outflow_transaction_id")
+        outflow_activity_id: int | None = Field(default=None, foreign_key=Activity)
+        outflow_activity: Relation[Activity | None] = Forward("outflow_activity_id")
+        inflow_transaction_id: int | None = Field(default=None, foreign_key=Txn)
+        inflow_transaction: Relation[Txn | None] = Forward("inflow_transaction_id")
+        inflow_activity_id: int | None = Field(default=None, foreign_key=Activity)
+        inflow_activity: Relation[Activity | None] = Forward("inflow_activity_id")
 
     return Activity, Txn, Transfer
 
@@ -334,7 +333,7 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
 
     class SpellTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
-        spellings: Relation[list["Spelling"]] = BackRef()
+        spellings: Relation[list["Spelling"]] = Reverse("target_id")
 
     class Spelling(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -343,9 +342,8 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        target: Annotated[SpellTarget | None, ForeignKey(related_name="spellings")] = (
-            None
-        )
+        target_id: int | None = Field(default=None, foreign_key=SpellTarget)
+        target: Relation[SpellTarget | None] = Forward("target_id")
 
     table_checks = _model_payload("spelling")["table_checks"]
     assert table_checks[0]["predicate"] == table_checks[1]["predicate"]
@@ -362,13 +360,13 @@ def test_forward_referenced_relation_spelling_compiles():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        later: Annotated[
-            "LaterTarget", ForeignKey(related_name="forwards", nullable=True)
-        ] = None
+        later_id: int | None = Field(default=None, foreign_key="LaterTarget")
+        # The class is named Forward, so the relation reads ferro.Forward.
+        later: Relation["LaterTarget | None"] = ferro.Forward("later_id")
 
     class LaterTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
-        forwards: Relation[list[Forward]] = BackRef()
+        forwards: Relation[list[Forward]] = Reverse("later_id")
 
     ensure_resolved_modelset()
     assert _model_payload("forward")["table_checks"] == [
