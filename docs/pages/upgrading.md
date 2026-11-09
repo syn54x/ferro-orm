@@ -92,7 +92,7 @@ Each old declaration has one replacement. The rows use the models of this sectio
 | `Field(back_ref=True)`, `Field(many_to_many=True, ...)` | The `Reverse` or `ManyToMany` assignment; a `Field` is always a column |
 | `await note.account` | `note.account` after `include()`, or `await note.account.load()` |
 
-In a class that writes its options as `Annotated[..., FerroField(...)]`, write the key the same way, `account_id: Annotated[int, FerroField(foreign_key=Account)]`, with `on_delete=` inside the same `FerroField`; it declares the same column as `Field(foreign_key=Account)` does.
+In a class that writes its options as `Annotated[..., FerroField(...)]`, write the key the same way, `account_id: Annotated[int, FerroField(foreign_key=Account)]`, with `on_delete=` inside the same `FerroField`; it declares the same column as `Field(foreign_key=Account)` does. `FerroField` takes no `default=`, so an optional key keeps its default after the annotation, `account_id: Annotated[int | None, FerroField(foreign_key=Account, on_delete="SET NULL")] = None`, where the other two styles write `default=None` inside the `Field`.
 
 The `through=` name is the one Ferro derived before, the owning table and the attribute joined by `_`, so the join table keeps its name and the conversion plans nothing for it. Ferro still creates and owns that table.
 
@@ -357,8 +357,15 @@ A key column that gained a `db_type` is the one change that plans a statement, i
       key the same way, `account_id: Annotated[int, FerroField(foreign_key=Account)]`,
       with `on_delete=` inside the same `FerroField`; it declares the same
       column. Relations are always assignments.
-    - Give the key column the target's primary-key type. Add `| None` (and
-      `default=None`) only when the old relation was optional.
+    - Give the key column the target's primary-key type. Add `| None` and a
+      `None` default only when the old relation was optional, and put the
+      default where the file's style puts it: in assignment,
+      `account_id: int | None = Field(default=None, foreign_key=Account, on_delete="SET NULL")`;
+      in Annotated,
+      `account_id: Annotated[int | None, Field(default=None, foreign_key=Account, on_delete="SET NULL")]`;
+      in a `FerroField` class, which takes no `default=`, after the
+      annotation,
+      `account_id: Annotated[int | None, FerroField(foreign_key=Account, on_delete="SET NULL")] = None`.
     - Name each query lambda's parameter after its model in lowercase singular:
       `lambda note: note.account_id == 1`, never `lambda n: ...`.
 
@@ -372,7 +379,8 @@ A key column that gained a `db_type` is the one change that plans a statement, i
          `on_delete="SET NULL"`
          -> `reply_to_id: int | None = Field(default=None, foreign_key="Note", on_delete="SET NULL")`
             and `reply_to: Relation["Note | None"] = Forward("reply_to_id")`,
-            keeping the on_delete the old key declared (CASCADE when none)
+            keeping the on_delete the old key declared (CASCADE when none),
+            and the None default where the Rules put it for the file's style
        - `nullable=False` on an `Account | None` annotation
          -> the required column `account_id: int` and `Relation[Account]`
        - `ForeignKey(renamed_from="owner")` -> `renamed_from="owner_id"` on the column

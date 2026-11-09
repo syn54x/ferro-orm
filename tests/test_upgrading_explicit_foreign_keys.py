@@ -1,3 +1,4 @@
+# ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
 """The upgrading guide's explicit foreign-key section.
 
 The section holds the conversion table, the call-site changes, the acceptance
@@ -6,19 +7,23 @@ anchor and the conversion slices run its prompt as written, so the page text is
 pinned here; its fences run in ``tests/test_docs_examples.py``.
 """
 
-from __future__ import annotations
-
 import asyncio
 import importlib
 import re
 from pathlib import Path
+from typing import Annotated
 
 import pytest
 
 import ferro
-from ferro import reset_engine
+from ferro import FerroField, Field, Model, clear_registry, reset_engine
 from tests._docs_sql import captured
-from tests.test_migrate_new import write_config, write_models
+from tests.test_migrate_new import (  # noqa: F401 - fixtures
+    pkg,
+    project,
+    write_config,
+    write_models,
+)
 from tests.test_migrate_up import new
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +210,80 @@ def test_the_prompt_and_the_table_name_the_ferro_field_spelling() -> None:
     assert section.index(sentence) < section.index("The `through=` name")
 
 
+FERRO_FIELD_OPTIONAL = (
+    "account_id: Annotated[int | None, "
+    'FerroField(foreign_key=Account, on_delete="SET NULL")] = None'
+)
+ASSIGNMENT_OPTIONAL = (
+    "account_id: int | None = "
+    'Field(default=None, foreign_key=Account, on_delete="SET NULL")'
+)
+ANNOTATED_OPTIONAL = (
+    "account_id: Annotated[int | None, "
+    'Field(default=None, foreign_key=Account, on_delete="SET NULL")]'
+)
+
+
+def test_the_prompt_and_the_table_say_where_an_optional_keys_default_goes() -> None:
+    section = _section()
+    prompt = " ".join(_prompt(section).split())
+    [sentence] = [
+        line for line in section.splitlines() if line.startswith(FERRO_FIELD_RULE)
+    ]
+    for page_text in (prompt, sentence):
+        assert f"`{FERRO_FIELD_OPTIONAL}`" in page_text
+        assert "takes no `default=`" in page_text
+    assert f"`{ASSIGNMENT_OPTIONAL}`" in prompt
+    assert f"`{ANNOTATED_OPTIONAL}`" in prompt
+    assert "Add `| None` (and `default=None`)" not in prompt
+
+
+def _optional_key(style: str) -> object:
+    """`Item.account_id` as the prompt writes an optional key in `style`."""
+    clear_registry()
+
+    class Account(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    if style == "assignment":
+
+        class Item(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            account_id: int | None = Field(
+                default=None, foreign_key=Account, on_delete="SET NULL"
+            )
+
+    elif style == "annotated":
+
+        class Item(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            account_id: Annotated[
+                int | None,
+                Field(default=None, foreign_key=Account, on_delete="SET NULL"),
+            ]
+
+    else:
+
+        class Item(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            account_id: Annotated[
+                int | None, FerroField(foreign_key=Account, on_delete="SET NULL")
+            ] = None
+
+    return Item.__ferro_columns__["account_id"]
+
+
+@pytest.mark.usefixtures("clean_registry")
+def test_the_three_spellings_of_an_optional_key_declare_one_column() -> None:
+    columns = [
+        _optional_key(style) for style in ("assignment", "annotated", "ferro_field")
+    ]
+    assert columns[0] == columns[1] == columns[2]
+    assert columns[0].nullable
+    with pytest.raises(TypeError):
+        FerroField(default=None)  # type: ignore[call-arg]
+
+
 _FERRO_FIELD_IMPORTS = "from ferro import Field, Forward, Reverse\n"
 
 # The old form and its conversion by the rule above, one pair per `on_delete`.
@@ -271,18 +350,9 @@ class Item(Model):
 
 
 @pytest.fixture
-def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.delenv("FERRO_CONFIG", raising=False)
-    root = tmp_path / "proj"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    monkeypatch.syspath_prepend(str(root))
-    return root
-
-
-@pytest.fixture
-def pkg(tmp_path: Path) -> str:
-    return "ferro_u903_" + tmp_path.name.replace("-", "_").lower()
+def importable(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let `_ddl` import the models module in-process; the CLI adds the path itself."""
+    monkeypatch.syspath_prepend(str(project))
 
 
 def _ddl(project: Path, pkg: str, body: str) -> list[str]:
@@ -302,7 +372,7 @@ def _ddl(project: Path, pkg: str, body: str) -> list[str]:
         reset_engine()
 
 
-@pytest.mark.usefixtures("isolated_imports", "clean_registry")
+@pytest.mark.usefixtures("isolated_imports", "clean_registry", "importable")
 @pytest.mark.parametrize("on_delete", ["CASCADE", "SET NULL"])
 def test_a_ferro_field_class_converts_to_the_same_ddl(
     on_delete: str, project: Path, pkg: str
