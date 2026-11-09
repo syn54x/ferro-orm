@@ -135,6 +135,8 @@ _OPTION_NAMES = (
     "many_to_many",
     "through",
     "reverse_index",
+    "foreign_key",
+    "on_delete",
 )
 
 
@@ -150,8 +152,14 @@ class _Mood(StrEnum):
 
 
 def test_field_options_leave_the_json_schema_and_land_in_ferro_fields():
+    class OptionedTeam(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
     class OptionedPlayer(Model):
         id: int | None = Field(default=None, primary_key=True, autoincrement=True)
+        team_id: int | None = Field(
+            default=None, foreign_key=OptionedTeam, on_delete="SET NULL"
+        )
         handle: str = Field(unique=True, min_length=2)
         rank: int = Field(index=True)
         nickname: str | None = Field(default=None, nullable=True)
@@ -194,8 +202,14 @@ def _option_tuple(options: FerroField) -> tuple:
 
 
 def test_annotated_field_options_equal_the_assignment_ones():
+    class RosterTeam(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
     class AssignedRoster(Model):
         id: int | None = Field(default=None, primary_key=True, autoincrement=True)
+        team_id: int | None = Field(
+            default=None, foreign_key=RosterTeam, on_delete="SET NULL"
+        )
         handle: str = Field(unique=True, min_length=2)
         rank: int = Field(index=True)
         nickname: str | None = Field(default=None, nullable=True)
@@ -206,6 +220,10 @@ def test_annotated_field_options_equal_the_assignment_ones():
 
     class AnnotatedRoster(Model):
         id: Annotated[int | None, Field(primary_key=True, autoincrement=True)] = None
+        team_id: Annotated[
+            int | None,
+            Field(foreign_key=RosterTeam, on_delete="SET NULL"),
+        ] = None
         handle: Annotated[str, Field(unique=True, min_length=2)]
         rank: Annotated[int, Field(index=True)]
         nickname: Annotated[str | None, Field(nullable=True)] = None
@@ -224,6 +242,7 @@ def test_annotated_field_options_equal_the_assignment_ones():
         == set(annotated)
         == {
             "id",
+            "team_id",
             "handle",
             "rank",
             "nickname",

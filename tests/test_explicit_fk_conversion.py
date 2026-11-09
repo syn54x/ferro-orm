@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from ferro import _core, clear_registry, reset_engine
+from ferro import clear_registry, reset_engine
 from ferro.registry import REGISTRY
 from tests._casebook import CASES
 from tests.test_migrate_down import migration_dir
@@ -130,26 +130,6 @@ def test_each_converted_side_compiles_to_the_old_forms_snapshot(
     )
 
 
-@pytest.mark.parametrize("side", CONVERTED)
-def test_a_converted_key_plans_nothing_against_the_old_forms_snapshot(
-    side, recorded, tmp_path
-):
-    converted = recorded_envelope(side_body(side), tmp_path)
-
-    assert converted["payload"] == recorded[side]
-    for dialect in ("postgres", "sqlite"):
-        plan = json.loads(
-            _core._plan_from_ir(
-                json.dumps({**converted, "payload": recorded[side]}),
-                json.dumps(converted),
-                dialect,
-                json.dumps({"destructive": True}),
-                True,
-            )
-        )
-        assert plan["operations"] == []
-
-
 _WRITER = """
 from ferro import Field
 
@@ -188,3 +168,99 @@ def test_a_key_columns_renamed_from_renames_it(tmp_path):
 
     assert 'RENAME COLUMN "writer_id" TO "author_id"' in postgres
     assert "DROP COLUMN" not in every_dialect
+
+
+def _plan_from(
+    project: Path, pkg: str, recorded_envelope_: dict, body: str, name: str
+) -> Path | None:
+    """Plan `body` through `ferro migrate new` against a recorded `ir.json`.
+
+    The recording is migration 0001; the result is the migration `new` writes
+    after it, or `None` when it finds no schema change.
+    """
+    write_config(project, pkg)
+    write_models(project, pkg, body)
+    new("recorded")
+    (migration_dir(project, 1) / "ir.json").write_text(json.dumps(recorded_envelope_))
+    new(name)
+    written = sorted((project / "migrations").glob("0002_*"))
+    return written[0] if written else None
+
+
+@pytest.mark.parametrize("side", CONVERTED)
+def test_a_converted_key_plans_nothing_against_the_old_forms_snapshot(
+    side, recorded, tmp_path
+):
+    envelope = recorded_envelope(side_body(side), tmp_path)
+    project = tmp_path / "plan"
+    project.mkdir()
+    with _project(project, "ferro_p876_plan"):
+        migration = _plan_from(
+            project,
+            "ferro_p876_plan",
+            {**envelope, "payload": recorded[side]},
+            side_body(side),
+            "convert",
+        )
+
+    assert migration is None
+
+
+_BIGINT = """
+from ferro import Field
+
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True, db_type="bigint")
+
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key=Team{db_type})
+"""
+
+
+def test_adding_db_type_to_a_converted_key_plans_only_its_widening(tmp_path):
+    """The old form stored a key `integer` beside a `bigint` target. Converting
+    it with `db_type="bigint"` widens the column and changes nothing else."""
+    envelope = recorded_envelope(_BIGINT.format(db_type=', db_type="bigint"'), tmp_path)
+    [team_id] = [
+        column
+        for model in envelope["payload"]["models"]
+        if model["table_name"] == "player"
+        for column in model["columns"]
+        if column["name"] == "team_id"
+    ]
+    del team_id["db_type"], team_id["db_type_explicit"]
+    project = tmp_path / "widen"
+    project.mkdir()
+    with _project(project, "ferro_p876_widen"):
+        migration = _plan_from(
+            project,
+            "ferro_p876_widen",
+            envelope,
+            _BIGINT.format(db_type=', db_type="bigint"'),
+            "widen",
+        )
+
+    assert migration is not None
+
+    def statements(dialect: str) -> list[str]:
+        text = "".join(
+            path.read_text() for path in sorted(migration.glob(f"*.up.{dialect}.sql"))
+        )
+        lines = [line for line in text.splitlines() if not line.startswith("--")]
+        return [part.strip() for part in "\n".join(lines).split(";") if part.strip()]
+
+    assert statements("postgres") == [
+        'ALTER TABLE "player" ALTER COLUMN "team_id" TYPE bigint USING "team_id"::bigint'
+    ]
+    rebuild = statements("sqlite")
+    # the rebuild of `player` alone: the key widens, its constraint is kept
+    assert [sql for sql in rebuild if sql.startswith("CREATE TABLE")] == [
+        'CREATE TABLE IF NOT EXISTS "_ferro_new_player" ( "id" integer NOT NULL '
+        'PRIMARY KEY AUTOINCREMENT, "team_id" bigint NOT NULL, CONSTRAINT '
+        '"fk_player_team_id_team" FOREIGN KEY ("team_id") REFERENCES "team" ("id") '
+        "ON DELETE CASCADE )"
+    ]
+    assert all("player" in sql or "rebuild_guard" in sql for sql in rebuild)
+    assert not any("team" in sql.replace("team_id", "") for sql in rebuild[1:])
