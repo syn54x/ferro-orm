@@ -23,13 +23,13 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from ferro import (
-    BackRef,
     FerroField,
     Field,
-    ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     connect,
     engines,
     transaction,
@@ -49,16 +49,15 @@ def show_step(title: str, code: str):
 class Category(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    products: Relation[list["Product"]] = BackRef()
+    products: Relation[list["Product"]] = Reverse("category_id")
 
 
 class Product(Model):
     id: Annotated[int | None, FerroField(primary_key=True, autoincrement=True)] = None
     name: Annotated[str, FerroField(index=True)]
     price: float
-    category: Annotated[
-        Category, ForeignKey(related_name="products", on_delete="CASCADE")
-    ]
+    category_id: Annotated[int, FerroField(foreign_key=Category, on_delete="CASCADE")]
+    category: Relation[Category] = Forward("category_id")
     in_stock: bool
     sku: Annotated[str | None, FerroField(unique=True)] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -67,13 +66,13 @@ class Product(Model):
 class Actor(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
+    movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
 
 class Movie(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: Annotated[str, FerroField(index=True)]
-    actors: Relation[list[Actor]] = BackRef()
+    actors: Relation[list[Actor]] = Reverse("movies")
 
 
 async def run_demo():

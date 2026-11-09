@@ -8,23 +8,22 @@ page's tests against it.
 import asyncio
 
 # --8<-- [start:models]
-from typing import Annotated
-
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class User(Model):
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True)
     email: str = Field(unique=True)
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
     content: str
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key=User)
+    author: Relation[User] = Forward("author_id")
 
 
 # --8<-- [end:models]

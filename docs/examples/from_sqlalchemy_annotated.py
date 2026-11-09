@@ -1,13 +1,12 @@
 """Runnable companion to the SQLAlchemy migration how-to (docs/pages/howto/migrate-from-sqlalchemy.md)."""
 
 import asyncio
+from typing import Annotated
 
 from ferro import ModelDoesNotExist, connect, engines, transaction
 
 # --8<-- [start:models]
-from typing import Annotated
-
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class User(Model):
@@ -15,13 +14,14 @@ class User(Model):
     username: Annotated[str, Field(unique=True)]
     email: str
     age: int
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     title: str
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    author_id: Annotated[int, Field(foreign_key=User)]
+    author: Relation[User] = Forward("author_id")
 
 
 # --8<-- [end:models]

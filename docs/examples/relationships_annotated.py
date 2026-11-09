@@ -9,43 +9,46 @@ in page order, so later sections build on the rows earlier ones added.
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
+from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 
 
 # --8<-- [start:models]
 class Team(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    players: Relation[list["Player"]] = BackRef()
-    titles: Relation[list["Tournament"]] = BackRef()
+    players: Relation[list["Player"]] = Reverse("team_id")
+    titles: Relation[list["Tournament"]] = Reverse("winner_id")
 
 
 class Player(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    team: Annotated[Team, ForeignKey(related_name="players", index=True)]
-    mentor: Annotated[
-        "Player",
-        ForeignKey(related_name="mentees", nullable=True, on_delete="SET NULL"),
+    team_id: Annotated[int, Field(foreign_key=Team, index=True)]
+    team: Relation[Team] = Forward("team_id")
+    mentor_id: Annotated[
+        int | None, Field(foreign_key="Player", on_delete="SET NULL")
     ] = None
-    mentees: Relation[list["Player"]] = BackRef()
-    profile: "Profile" = BackRef()
-    tournaments: Relation[list["Tournament"]] = ManyToMany(related_name="players")
+    mentor: Relation["Player | None"] = Forward("mentor_id")
+    mentees: Relation[list["Player"]] = Reverse("mentor_id")
+    profile: Relation[list["Profile"]] = Reverse("player_id")
+    tournaments: Relation[list["Tournament"]] = ManyToMany(through="player_tournaments")
 
 
 class Profile(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     bio: str
-    player: Annotated[Player, ForeignKey(related_name="profile", unique=True)]
+    player_id: Annotated[int, Field(foreign_key=Player, unique=True)]
+    player: Relation[Player] = Forward("player_id")
 
 
 class Tournament(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    winner: Annotated[
-        Team | None, ForeignKey(related_name="titles", on_delete="SET NULL")
-    ] = None
-    players: Relation[list[Player]] = BackRef()
+    winner_id: Annotated[int | None, Field(foreign_key=Team, on_delete="SET NULL")] = (
+        None
+    )
+    winner: Relation[Team | None] = Forward("winner_id")
+    players: Relation[list[Player]] = Reverse("tournaments")
 
 
 # --8<-- [end:models]

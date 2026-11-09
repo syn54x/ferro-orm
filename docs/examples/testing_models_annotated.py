@@ -6,25 +6,25 @@ page's tests against it.
 """
 
 import asyncio
-
-# --8<-- [start:models]
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+# --8<-- [start:models]
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 class User(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     username: Annotated[str, Field(unique=True)]
     email: Annotated[str, Field(unique=True)]
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     title: str
     content: str
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    author_id: Annotated[int, Field(foreign_key=User)]
+    author: Relation[User] = Forward("author_id")
 
 
 # --8<-- [end:models]
