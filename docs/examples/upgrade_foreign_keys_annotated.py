@@ -68,7 +68,7 @@ def storage_refusal() -> None:
             ledger: Relation[Ledger] = Forward("ledger_id")
 
     except TypeError as error:
-        print(f"{type(error).__name__}: {error}")
+        print(f"TypeError: {error}")
         assert 'db_type="bigint"' in str(error)
     else:
         raise AssertionError("an integer key column beside a bigint key was accepted")
