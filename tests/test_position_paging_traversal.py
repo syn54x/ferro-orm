@@ -9,27 +9,29 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro.query.rows import Row
 
 
 class PosTravAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    transactions: Relation[list["PosTravTransaction"]] = BackRef()
-    notes: Relation[list["PosTravNote"]] = BackRef()
+    transactions: Relation[list["PosTravTransaction"]] = Reverse("account_id")
+    notes: Relation[list["PosTravNote"]] = Reverse("account_id")
 
 
 class PosTravTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[PosTravAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=PosTravAccount)]
+    account: Relation[PosTravAccount] = Forward("account_id")
 
 
 class PosTravNote(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     body: str = ""
-    account: Annotated[PosTravAccount | None, ForeignKey(related_name="notes")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=PosTravAccount)] = None
+    account: Relation[PosTravAccount | None] = Forward("account_id")
 
 
 class PosTravAggItem(Model):

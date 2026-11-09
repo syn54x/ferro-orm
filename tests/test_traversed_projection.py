@@ -22,7 +22,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro.query import Row, Rows
 
 pytestmark = pytest.mark.backend_matrix
@@ -44,7 +44,7 @@ class TPOwner(Model):
     tier: TPTier = TPTier.FREE
     joined_at: datetime | None = None
     external_id: UUID | None = None
-    accounts: Relation[list["TPAccount"]] = BackRef()
+    accounts: Relation[list["TPAccount"]] = Reverse("owner_id")
 
 
 class TPAccount(Model):
@@ -53,14 +53,16 @@ class TPAccount(Model):
     # traversed field decodes to None even from a NOT NULL source column.
     name: str = ""
     balance: Decimal | None = None
-    owner: Annotated[TPOwner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["TPTransaction"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=TPOwner)] = None
+    owner: Relation[TPOwner | None] = Forward("owner_id")
+    transactions: Relation[list["TPTransaction"]] = Reverse("account_id")
 
 
 class TPTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[TPAccount | None, ForeignKey(related_name="transactions")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=TPAccount)] = None
+    account: Relation[TPAccount | None] = Forward("account_id")
 
 
 _JOINED = datetime(2026, 2, 1, 9, 0, 0, tzinfo=timezone.utc)

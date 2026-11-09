@@ -25,16 +25,17 @@ from pydantic import SecretBytes, SecretStr
 import ferro
 import ferro._sql_log
 from ferro import (
-    BackRef,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     engines,
     raw,
     transaction,
 )
 from ferro._sql_log import REDACTED
-from ferro.base import FerroField, ForeignKey
+from ferro.base import FerroField
 from ferro.exceptions import IntegrityError
 from ferro.migrations.testing import harness
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -372,20 +373,21 @@ class SlogAccount(Model):
     email: Annotated[str, FerroField(unique=True)]
     token: SecretStr
     key: SecretBytes | None = None
-    notes: Relation[list["SlogNote"]] = BackRef()
-    tags: Relation[list["SlogTag"]] = ManyToMany(related_name="accounts")
+    notes: Relation[list["SlogNote"]] = Reverse("account_id")
+    tags: Relation[list["SlogTag"]] = ManyToMany(through="slogaccount_tags")
 
 
 class SlogNote(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    account: Annotated[SlogAccount | None, ForeignKey(related_name="notes")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=SlogAccount)] = None
+    account: Relation[SlogAccount | None] = Forward("account_id")
 
 
 class SlogTag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
-    accounts: Relation[list["SlogAccount"]] = BackRef()
+    accounts: Relation[list["SlogAccount"]] = Reverse("tags")
 
 
 class SlogItem(Model):
