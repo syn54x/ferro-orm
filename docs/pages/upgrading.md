@@ -316,7 +316,7 @@ The old relation keywords, `back_ref`, `many_to_many`, `related_name`, `through`
 
 Write `Field(primary_key=True)`. A JSON schema no longer carries any Ferro option.
 
-**A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused when the class is defined, naming the `db_type` to add:
+**A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused, naming the `db_type` to add: when the class is defined for a class target, as here, and at `connect()` for a target named by string:
 
 === "Assignment"
 

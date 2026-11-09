@@ -83,7 +83,7 @@ Each relation names a foreign-key column. `Forward("team_id")` names a column on
 
 A foreign-key column is a field you declare, holding the related row's primary key. `Player.team_id` is one: `Field(foreign_key=Team)` makes it reference the `team` table, and `Forward("team_id")` reads the team through it. The name is yours to choose; `team_id` is a convention.
 
-`foreign_key=` takes the class, or its name as a string when the class comes later in the file or is the model itself (`foreign_key="Player"`). The column's type must equal the target's primary-key type, `int` here, and a mismatch is refused when the class is defined, printing the line to write. Like any column, it takes `index`, `unique`, `on_delete`, `renamed_from` and `retired`.
+`foreign_key=` takes the class, or its name as a string when the class comes later in the file or is the model itself (`foreign_key="Player"`). The column's type must equal the target's primary-key type, `int` here. A mismatch is refused, printing the line to write: when the class is defined for a class target, and at `connect()`, when Ferro resolves the name, for a target named by string. Like any column, it takes `index`, `unique`, `on_delete`, `renamed_from` and `retired`.
 
 Read the column or filter on it without loading the team:
 
