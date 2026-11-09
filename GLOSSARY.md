@@ -54,7 +54,7 @@ _Avoid_: `ferro_field`, raw path, column option
 
 **Foreign-key column**:
 A column the model declares with `Field(foreign_key=Target)`, holding the target's primary-key value. Its constraint, `fk_<table>_<column>_<target table>`, and its index are derived from the declaration; a *forward relation* names it. Nullability, rename and retirement are the column's own options.
-_Avoid_: `*_id` column, injected column, reference column
+_Avoid_: shadow column, shadow FK, `*_id` column, injected column, reference column
 
 **Forward relation**:
 A typed view over one foreign-key column of its own model, declared `team: Relation[Team] = Forward("team_id")`. It reads as the related instance: complete when an include or `.load()` filled it, otherwise holding only its key (see *Complete-instance invariant*).
