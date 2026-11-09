@@ -187,9 +187,12 @@ def test_empty_ferro_checks_is_a_no_op():
 @pytest.mark.parametrize(
     "predicate, expected",
     [
-        (lambda t: t.owner.label == None, "traversal"),  # noqa: E711
-        (lambda t: t.notes.exists(), "existence test"),
-        (lambda t: t.amount.sum(), "aggregate"),
+        (
+            lambda rejecting: rejecting.owner.label == None,  # noqa: E711
+            r"traversal.*its foreign-key column \(t\.owner_id\)",
+        ),
+        (lambda rejecting: rejecting.notes.exists(), "existence test"),
+        (lambda rejecting: rejecting.amount.sum(), "aggregate"),
     ],
 )
 def test_unsupported_check_predicates_fail_at_class_definition(predicate, expected):
@@ -227,7 +230,7 @@ def _build_transfer_models():
     """The Transfer-shaped fixture: four checks over two exclusive-or sides.
 
     Both FK-null spellings appear (the relation on the outflow checks, the
-    shadow ``*_id`` column on the inflow ones), as do every combinator this
+    foreign-key column on the inflow ones), as do every combinator this
     release supports.
     """
 
@@ -329,7 +332,7 @@ def test_compiler_emits_named_structured_table_checks():
 
 def test_both_fk_null_spellings_compile_to_the_same_predicate():
     """``t.outflow_transaction == None`` and ``t.outflow_transaction_id == None``
-    are the same shadow-column IS NULL leaf (ADR-0016)."""
+    are the same foreign-key column IS NULL leaf (ADR-0016)."""
 
     class SpellTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -338,7 +341,7 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
     class Spelling(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check("via_relation", lambda spelling: spelling.target == None),  # noqa: E711
-            Check("via_shadow", lambda spelling: spelling.target_id == None),  # noqa: E711
+            Check("via_fk_column", lambda spelling: spelling.target_id == None),  # noqa: E711
         )
 
         id: int | None = Field(default=None, primary_key=True)
@@ -352,7 +355,7 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
 
 def test_forward_referenced_relation_spelling_compiles():
     """A relation whose target resolves only at ``resolve_relationships`` still
-    compiles: the shadow column name never needs the target class."""
+    compiles: the foreign-key column name never needs the target class."""
 
     class Forward(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (

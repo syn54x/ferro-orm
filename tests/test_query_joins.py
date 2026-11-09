@@ -614,7 +614,7 @@ class TestRelationProxySugar:
     def _proxy(self) -> QueryProxy:
         return QueryProxy(QJTransaction)
 
-    def test_instance_equality_desugars_to_shadow_fk_join_free(self):
+    def test_instance_equality_desugars_to_fk_column_join_free(self):
         node = self._proxy().account == _persisted_account(7)
         assert isinstance(node, QueryNode)
         assert node.column == "account_id"
@@ -629,10 +629,10 @@ class TestRelationProxySugar:
         assert node.value == 7
         assert node.path == ()
 
-    def test_deep_instance_equality_uses_last_hop_shadow_and_prefix_path(self):
+    def test_deep_instance_equality_uses_last_hop_fk_column_and_prefix_path(self):
         owner = QJOwner(id=3, email="o@ferro.dev")
         node = self._proxy().account.owner == owner
-        # Shadow column of the LAST hop (owner_id, on the account table), with
+        # Foreign-key column of the LAST hop (owner_id, on the account table), with
         # the proxy path MINUS that hop -> the ("account",) prefix join only.
         assert node.column == "owner_id"
         assert node.value == 3
@@ -1015,13 +1015,13 @@ async def test_explicit_left_plus_implicit_traversal_renders_left(db_url):
 
 # ---------------------------------------------------------------------------
 # Relation-proxy equality sugar — behavioral (#273): instance-eq filters by the
-# shadow FK join-free; == None / != None lower to IS NULL / IS NOT NULL; the
+# foreign-key column join-free; == None / != None lower to IS NULL / IS NOT NULL; the
 # M2M association context composes with forward-FK traversal on the target.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_instance_equality_filters_by_shadow_fk(db_url):
+async def test_instance_equality_filters_by_fk_column(db_url):
     """`t.account == a1` filters by `account_id` join-free; `!=` complements."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -1039,7 +1039,7 @@ async def test_instance_equality_filters_by_shadow_fk(db_url):
 @pytest.mark.asyncio
 async def test_deep_instance_equality_traverses_prefix_join(db_url):
     """`t.account.owner == o2` compares `owner_id` under the account prefix join
-    (the shadow column lives one hop up, not the final target's PK column)."""
+    (the foreign-key column lives one hop up, not the final target's PK column)."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
@@ -1053,7 +1053,7 @@ async def test_deep_instance_equality_traverses_prefix_join(db_url):
 @pytest.mark.asyncio
 async def test_relation_equals_none_renders_is_null(db_url):
     """`n.account == None` / `!= None` lower to IS NULL / IS NOT NULL on the
-    shadow FK, join-free."""
+    foreign-key column, join-free."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()

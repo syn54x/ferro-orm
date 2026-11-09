@@ -1,7 +1,7 @@
 """The PK fact is derived once at class-body compile and cached on the class.
 
 ``__ferro_pk__`` is set at the compile choke point (the same site that attaches
-``__ferro_columns__``), so every consumer — save, descriptors, shadow-FK typing,
+``__ferro_columns__``), so every consumer — save, descriptors, foreign-key column typing,
 traversal — reads one cached fact instead of re-looping the column specs.
 At most one ``primary_key=True`` column is legal; the violation raises at class
 definition time (ADR-0002's flagged follow-up). Zero PKs stays a legal

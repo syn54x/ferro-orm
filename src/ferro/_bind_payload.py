@@ -229,9 +229,9 @@ def normalize_save_only(only: object) -> set[str]:
     return normalize_save_columns(only, param="only")
 
 
-def _relation_shadows(model_cls: type) -> dict[str, str | None]:
-    """Relation field name → shadow column, if this table stores one."""
-    shadows: dict[str, str | None] = {}
+def _relation_fk_columns(model_cls: type) -> dict[str, str | None]:
+    """Relation field name → foreign-key column, if this table stores one."""
+    fk_columns: dict[str, str | None] = {}
     for source in (
         getattr(model_cls, "__ferro_relations__", None),
         getattr(model_cls, "__ferro_relation_specs__", None),
@@ -240,14 +240,14 @@ def _relation_shadows(model_cls: type) -> dict[str, str | None]:
         if not source:
             continue
         for name, meta in source.items():
-            if name in shadows and shadows[name] is not None:
+            if name in fk_columns and fk_columns[name] is not None:
                 continue
-            shadow = getattr(meta, "fk_column", None)
-            if isinstance(shadow, str):
-                shadows[name] = shadow
+            fk_column = getattr(meta, "fk_column", None)
+            if isinstance(fk_column, str):
+                fk_columns[name] = fk_column
             else:
-                shadows.setdefault(name, None)
-    return shadows
+                fk_columns.setdefault(name, None)
+    return fk_columns
 
 
 def _validate_save_column_names(
@@ -256,11 +256,11 @@ def _validate_save_column_names(
     """Reject relation / unknown names. Returns ``__ferro_columns__``."""
     columns = getattr(model_cls, "__ferro_columns__", {}) or {}
     legal = ", ".join(sorted(columns))
-    relations = _relation_shadows(model_cls)
+    relations = _relation_fk_columns(model_cls)
     for name in sorted(names):
         if name in relations:
-            shadow = relations[name]
-            extra = f" Use the shadow column {shadow!r}." if shadow else ""
+            fk_column = relations[name]
+            extra = f" Use the foreign-key column {fk_column!r}." if fk_column else ""
             raise ValueError(
                 f"{name!r} is a relation, not a persisted column.{extra} "
                 f"Legal persisted columns: {legal}."

@@ -261,7 +261,7 @@ class TestAddColumn:
                 'CREATE INDEX IF NOT EXISTS "idx_invoice_kind" ON "invoice" ("kind")',
             ]
 
-    def test_fk_shadow_column_is_capability_relative(self):
+    def test_fk_column_is_capability_relative(self):
         schema = schema_with(
             {
                 "client_id": {

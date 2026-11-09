@@ -109,6 +109,14 @@ def is_valid_db_type_token(token: str) -> bool:
     return int(match.group(1)) > 0
 
 
+def _scalar_part_of_annotation(ann: Any) -> Any:
+    """Strip ``Annotated[T, ...]`` to ``T``, keeping any union inside it."""
+    origin = get_origin(ann)
+    if origin is Annotated:
+        return get_args(ann)[0]
+    return ann
+
+
 def _strip_optional_and_annotated(annotation: Any) -> Any:
     """Unwrap ``Annotated[...]`` and ``T | None`` down to the inner Python type."""
     hint: Any = annotation

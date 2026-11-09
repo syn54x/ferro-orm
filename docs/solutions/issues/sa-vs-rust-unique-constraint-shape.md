@@ -26,7 +26,7 @@ resolved: 2026-07-02
 
 ## Problem
 
-For a single-column `FerroField(unique=True)` (or `ForeignKey(unique=True)`)
+For a single-column `FerroField(unique=True)` (or `Field(foreign_key=Target, unique=True)`)
 the two emitters produce equivalent SQL but structurally different schemas:
 
 - **Alembic / SA:** `_build_sa_table` calls `sa.Column(name, type,

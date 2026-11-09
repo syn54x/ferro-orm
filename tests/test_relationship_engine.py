@@ -120,7 +120,9 @@ def test_metadata_discovery():
     """Verify that the Metaclass finds the forward and reverse relations."""
     # Before resolution
     assert "author" in Post.__ferro_relations__
-    assert "author_id" in Post.__ferro_query_columns__  # shadow FK column
+    assert (
+        "author_id" in Post.__ferro_query_columns__
+    )  # the declared foreign-key column
 
     # After resolution
     from ferro.relations import resolve_relationships
@@ -130,7 +132,7 @@ def test_metadata_discovery():
     assert isinstance(Post.__ferro_relations__["author"], ForwardRelation)
     assert Post.__ferro_relations__["author"].fk_column == "author_id"
 
-    # Verify shadow field generation
+    # The foreign-key column is a declared model field
     assert "author_id" in Post.model_fields
 
     # Verify discovery on User

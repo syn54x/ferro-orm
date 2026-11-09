@@ -439,7 +439,7 @@ def _resolve_projection_strings(
     """Resolve ``select("id", "amount")`` string selectors (#280).
 
     Exactly ``order_by``'s string contract: root columns only (declared fields
-    plus shadow ``{fk}_id`` columns), validated at build time with
+    plus foreign-key columns), validated at build time with
     did-you-mean. Strings never traverse — a dotted path is rejected
     pointedly, permanently (PRD #277); traversed projection is lambda-only
     (#293).

@@ -819,13 +819,13 @@ LIMIT ?;
 Each foreign key adds a `<relation>_id` column, and filtering on it needs no join:
 
 ```python
---8<-- "docs/examples/traversal.py:shadow-column"
+--8<-- "docs/examples/traversal.py:foreign-key-column"
 ```
 
 From checking is the one transaction whose `account_id` is Savings' `id`. Fetching Savings and the query send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
--- traversal.py:shadow-column (sqlite)
+-- traversal.py:foreign-key-column (sqlite)
 SELECT "account"."id", "account"."label", "account"."owner_id"
 FROM "account"
 WHERE "account"."id" = ?

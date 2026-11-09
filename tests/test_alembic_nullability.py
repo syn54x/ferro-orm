@@ -141,7 +141,7 @@ def test_infer_enum_default_not_nullable():
     assert t.c.status.nullable is False
 
 
-def test_infer_fk_shadow_required():
+def test_infer_fk_column_required():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
@@ -155,7 +155,7 @@ def test_infer_fk_shadow_required():
     assert t.c.parent_id.nullable is False
 
 
-def test_required_fk_shadow_rejects_missing_value():
+def test_required_fk_column_rejects_missing_value():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
@@ -174,7 +174,7 @@ def test_required_fk_shadow_rejects_missing_value():
         ChildReqValidation(id=1, parent_id=None)
 
 
-def test_infer_fk_shadow_optional():
+def test_infer_fk_column_optional():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str

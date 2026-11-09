@@ -140,13 +140,13 @@ async def main() -> None:
         ]
         # --8<-- [end:composed]
 
-        # --8<-- [start:shadow-column]
+        # --8<-- [start:foreign-key-column]
         savings = await Account.get(2)
         on_savings = await Transaction.where(
             lambda transaction: transaction.account_id == savings.id
         ).all()
         assert [transaction.memo for transaction in on_savings] == ["From checking"]
-        # --8<-- [end:shadow-column]
+        # --8<-- [end:foreign-key-column]
 
         # --8<-- [start:instance-eq]
         on_savings = await Transaction.where(

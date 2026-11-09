@@ -67,7 +67,7 @@ def test_metadata_translation():
     assert fk.ondelete == "CASCADE"
 
 
-def test_foreign_key_unique_true_propagates_to_shadow_column():
+def test_foreign_key_unique_true_propagates_to_fk_column():
     """A 1:1 relation's key column has unique=True; Alembic metadata must expose
     UNIQUE."""
 
@@ -135,7 +135,7 @@ def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
         assert col.nullable is False
 
 
-def test_uuid_foreign_key_shadow_column_type():
+def test_uuid_foreign_key_fk_column_type():
     """Alembic bridge: UUID PK targets produce a UUID-capable SQLAlchemy type on *_id columns."""
 
     class UuidAlembicOrg(Model):

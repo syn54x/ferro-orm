@@ -274,9 +274,12 @@ do not see a default there (`ty` reports `User(email="ada@example.com")` as
 missing `id`); the
 assigned default is the one both read, and it keeps the two tabs line for
 line. Use `Field`, the name the Assignment tab imports;
-`FerroField` stays out of twins. Forward foreign keys
-(`Annotated[Target, ForeignKey(...)]`) and `BackRef()` / `ManyToMany()`
-assignments have one form and appear the same in both tabs.
+`FerroField` stays out of twins. Constructs with only one valid form appear
+identically in both tabs and are not tabbed on their own: a relation
+(`Forward()`, `Reverse()`, `ManyToMany()`) is always an assignment. A
+foreign-key column is a field like any other and is tabbed:
+`team_id: int = Field(foreign_key=Team)` against
+`team_id: Annotated[int, Field(foreign_key=Team)]`.
 
 A `default_factory` is a default too, and type checkers do not see it
 inside `Annotated` either (`ty` reports `missing-argument` for

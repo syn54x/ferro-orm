@@ -264,8 +264,8 @@ async def test_string_selectors_behave_identically_to_the_lambda_form(db_url):
 
 
 @pytest.mark.asyncio
-async def test_string_selector_projects_shadow_fk_column(db_url):
-    """Shadow ``{fk}_id`` columns are queryable columns, so they project."""
+async def test_string_selector_projects_fk_column(db_url):
+    """Foreign-key columns are queryable columns, so they project."""
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await _seed_transactions()

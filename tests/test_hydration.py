@@ -311,7 +311,7 @@ async def test_identity_refresh_keeps_field_order(db_url):
 
 
 @pytest.mark.asyncio
-async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
+async def test_hydration_order_with_fk_column_and_retired_field(db_url):
     """Dump keys follow model_fields with a foreign-key column and a retired field."""
     from ferro import Field as FerroFieldOption
 

@@ -584,7 +584,7 @@ def _where_node_traverses(node: QueryNode) -> bool:
     """True if any leaf under ``node`` carries a non-empty relation path (#273).
 
     Used by the mutate guardrails to reject relation traversal on
-    ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
+    ``update()``/``delete()``. A join-free foreign-key column leaf (``t.account ==
     instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
     A negation traverses iff its child does (``~`` never adds a path). An
     existence test always counts as traversal: it correlates a subquery to
@@ -1045,7 +1045,7 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         ValueError: If ``limit()``/``offset()``/``after()``/``before()`` was set, the query
             traverses a relation (a joined/explicit-edge path, or a where-clause
             leaf carrying a non-empty path — portable SQL has no
-            ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter stays
+            ``UPDATE/DELETE ... JOIN``; a join-free foreign-key column filter stays
             allowed), or the query carries ``include()``. Rejected here, before
             any DB round-trip (the Rust guard from #270 stays as boundary
             defense).

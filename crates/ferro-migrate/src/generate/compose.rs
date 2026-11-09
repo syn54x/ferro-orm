@@ -68,7 +68,7 @@ pub struct DeadName {
 pub enum DeadKind {
     /// A table.
     Table,
-    /// A column, shadow `*_id` columns included.
+    /// A column, foreign-key columns included.
     Column,
     /// A label of an enum column.
     EnumLabel,
@@ -899,15 +899,15 @@ mod tests {
     /// `Some(old)` renames it from `<old>_id`, and its foreign key carries
     /// `old` the way a snapshot from before the explicit key column did.
     fn post(field: &str, renamed_from: Option<&str>) -> SchemaModel {
-        let shadow = format!("{field}_id");
+        let fk_column = format!("{field}_id");
         SchemaModel {
             foreign_keys: vec![SchemaForeignKey {
                 renamed_from: renamed_from.map(Into::into),
-                column: shadow.clone(),
+                column: fk_column.clone(),
                 to_table: "author".into(),
                 to_column: "id".into(),
                 on_delete: Some("CASCADE".into()),
-                name: Some(format!("fk_post_{shadow}_author")),
+                name: Some(format!("fk_post_{fk_column}_author")),
             }],
             ..model(
                 "Post",
@@ -915,7 +915,7 @@ mod tests {
                     pk(),
                     SchemaColumn {
                         renamed_from: renamed_from.map(|old| format!("{old}_id")),
-                        ..column(&shadow, "integer")
+                        ..column(&fk_column, "integer")
                     },
                 ],
             )

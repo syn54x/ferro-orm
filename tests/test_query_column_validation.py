@@ -33,7 +33,7 @@ class TestWhereColumnValidation:
         q = ValUser2.where(lambda u: u.name == "x")
         assert q.where_clause[0].column == "name"
 
-    def test_shadow_fk_column_is_valid(self):
+    def test_fk_column_is_valid(self):
         class ValAuthor(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
@@ -45,7 +45,7 @@ class TestWhereColumnValidation:
         q = Query(ValPost).where(lambda p: p.author_id == 1)
         assert q.where_clause[0].column == "author_id"
 
-    def test_error_lists_shadow_fk_in_valid_columns(self):
+    def test_error_lists_fk_column_in_valid_columns(self):
         class ValAuthor2(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 

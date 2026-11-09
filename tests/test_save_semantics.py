@@ -467,7 +467,7 @@ async def test_save_only_rejects_relation_name(db_url):
         post.title = "second"
         with pytest.raises(ValueError, match="author_id") as excinfo:
             await post.save(only={"author"})
-        assert "author" in str(excinfo.value)
+        assert "Use the foreign-key column 'author_id'." in str(excinfo.value)
 
         with pytest.raises(ValueError, match="posts"):
             await author.save(only={"posts"})

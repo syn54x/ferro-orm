@@ -270,8 +270,8 @@ def _fk_target_column(
 ) -> str:
     """The primary-key column a foreign key into ``to_table`` references.
 
-    Read from the registered model that owns the table, the source the shadow
-    column's type comes from. A target not yet defined, or not yet compiled
+    Read from the registered model that owns the table, the key a foreign-key
+    column points at. A target not yet defined, or not yet compiled
     (its columns not yet published), gets ``id`` until the resolved second pass
     recompiles the envelope.
 
@@ -340,7 +340,7 @@ def compile_schema_ir_payload(
     # Collapse same-named specs, last one wins — mirrors the historical
     # ``properties`` dict-literal merge (a self-referential M2M join table
     # derives an identical ``{table}_id`` name for both its source and target
-    # shadow-FK columns; the dict pipeline silently collapsed that duplicate
+    # foreign-key columns; the dict pipeline silently collapsed that duplicate
     # key, so specs must too, or the compiled table gains a duplicate column).
     deduped: dict[str, ColumnSpec] = {}
     for spec in columns:
@@ -596,7 +596,7 @@ def compile_model_schema_ir(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
     # Table checks compile against THIS pass's specs (never the class's
-    # published ones), so a predicate can reference a shadow FK column at class
+    # published ones), so a predicate can reference a foreign-key column at class
     # definition and the resolved second pass re-lowers against fresh specs.
     table_checks = compile_table_checks(model_cls, model_name, schema_specs)
     # Generated expressions lower beside them, against the same fresh specs.
