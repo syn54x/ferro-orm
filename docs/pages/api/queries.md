@@ -17,8 +17,8 @@ The [Queries guide](../guide/queries.md) covers each feature with worked example
 
 - `~` negates any predicate, rendering SQL `NOT (...)`: [Negation and NULL values](../guide/queries.md#negation-and-null-values).
 - A lambda that follows a foreign key adds one `INNER JOIN` per relation path; `left_join()` keeps rows without the relation: [Querying across relationships](../guide/queries.md#querying-across-relationships).
-- A `BackRef` or many-to-many relation in a predicate takes one verb, `.exists()`, rendered as a correlated `EXISTS`: [Existence tests](../guide/queries.md#existence-tests-on-reverse-many-to-many-relations).
-- `include()` returns each result with a forward relation loaded, so reading it needs no `await`: [Loading relations with `include()`](../guide/queries.md#loading-relations-with-include).
+- A reverse (`Reverse`) or many-to-many (`ManyToMany`) relation in a predicate takes one verb, `.exists()`, rendered as a correlated `EXISTS`: [Existence tests](../guide/queries.md#existence-tests-on-reverse-many-to-many-relations).
+- `include()` returns each result with a forward relation loaded, so reading its columns runs no query; without it the relation is an unloaded instance that `.load()` fills: [Loading relations with `include()`](../guide/queries.md#loading-relations-with-include).
 - `nulls=` on `order_by()` defaults to `NULLS LAST` on every backend: [Ordering, limit and offset](../guide/queries.md#ordering-limit-offset).
 
 ## `select()` overloads

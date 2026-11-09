@@ -126,7 +126,7 @@ The [identity map](identity-map.md) holds weak references and lasts as long as t
 
 ### Relations in one query with `include()`
 
-Reading `post.author` on each post of a list runs one query per post. `Post.where(...).include(lambda post: post.author)` loads every author in the same statement as the posts; [Queries › Loading relations](../guide/queries.md#loading-relations-with-include) shows it. `BackRef` and many-to-many collections are not loaded by `include()` yet ([roadmap](../roadmap.md#reverse-and-many-to-many-loading)); batch them by id with `in_()`.
+A post's `author` that nothing loaded is an unloaded instance holding only its key, and loading it on each post of a list with `await post.author.load()` runs one query per post. `Post.where(...).include(lambda post: post.author)` loads every author in the same statement as the posts; [Queries › Loading relations](../guide/queries.md#loading-relations-with-include) shows it. `Reverse` and `ManyToMany` collections are not loaded by `include()` yet ([roadmap](../roadmap.md#reverse-and-many-to-many-loading)); batch them by id with `in_()`.
 
 ## Benchmarking
 

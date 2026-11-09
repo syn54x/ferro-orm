@@ -45,7 +45,7 @@ A projected `Row` types its fields as `Any` on access, so `row.total` above does
 
 ### Reverse and many-to-many loading
 
-[`include()`](guide/queries.md#loading-relations-with-include) loads forward foreign keys in one statement. Loading `BackRef` collections and many-to-many sets is not built: it needs a separate mechanism, a batched second query stitched onto the results. Until then, each awaited collection is its own query:
+[`include()`](guide/queries.md#loading-relations-with-include) loads forward relations in one statement. Loading `Reverse` collections and `ManyToMany` sets is not built: it needs a separate mechanism, a batched second query stitched onto the results. Until then, each awaited collection is its own query:
 
 ```python {test=run prelude=reference}
 authors = await Author.all()

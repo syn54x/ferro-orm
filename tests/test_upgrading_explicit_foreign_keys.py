@@ -94,7 +94,7 @@ def test_each_old_form_is_in_the_table_and_the_prompt(old: str) -> None:
 
 def test_the_table_has_a_row_per_old_form_with_its_new_form() -> None:
     rows = _table(_section()).splitlines()[2:]
-    assert len(rows) == 10
+    assert len(rows) == 14
     for row in rows:
         old, new = (cell.strip() for cell in row.strip("|").split(" | ", 1))
         assert old and new, row
@@ -398,3 +398,103 @@ def test_a_ferro_field_class_converts_and_migrate_new_plans_nothing(
 
     assert "no schema change: nothing written" in capsys.readouterr().out
     assert sorted(path.name for path in (project / "migrations").iterdir()) == recorded
+
+
+# -- the conversions the first prompt was silent on --------------------------------
+
+# Each rule's words in the conversion table and in the prompt.
+RULES = {
+    "unique beside index": ("with `index=True` dropped", "dropping index=True"),
+    "explicit key field": (
+        "That field is the key column",
+        "that field is the key column",
+    ),
+    "self-referential many-to-many": (
+        "becomes a model of its own",
+        "make the join table a model of its own",
+    ),
+    "renamed model": (
+        "The join table keeps its `through=` name",
+        "keeps its join table's through= name",
+    ),
+}
+
+
+@pytest.mark.parametrize("rule", RULES)
+def test_the_prompt_and_the_table_state_each_rule(rule: str) -> None:
+    in_table, in_prompt = RULES[rule]
+    section = _section()
+    assert in_table in _table(section)
+    assert in_prompt in " ".join(_prompt(section).split())
+
+
+def test_field_refuses_reverse_index_in_both_lists() -> None:
+    section = _section()
+    [paragraph] = [
+        line
+        for line in section.splitlines()
+        if line.startswith("The old relation keywords")
+    ]
+    assert "`reverse_index`" in paragraph
+    assert "through and reverse_index" in " ".join(_prompt(section).split())
+
+
+def test_the_constructor_paragraph_names_the_narrowing() -> None:
+    section = _section()
+    start = section.index("**A relation keyword in a constructor.**")
+    end = section.index("**Assigning a relation.**")
+    assert "assert ada is not None and ada.id is not None" in section[start:end]
+    assert "narrow" in " ".join(_prompt(section).split())
+
+
+# Before the old form was removed,
+#     items: Relation[list["Item"]] = BackRef()
+#     account: Annotated[Account, ForeignKey(related_name="items", unique=True, index=True)]
+# dropped the index the unique one made redundant and sent SQLite this:
+_UNIQUE_KEY_OLD_FORM_DDL = [
+    *_ACCOUNT_DDL,
+    'CREATE TABLE IF NOT EXISTS "item" ( "account_id" integer NOT NULL, "id" '
+    "integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT "
+    '"fk_item_account_id_account" FOREIGN KEY ("account_id") REFERENCES '
+    '"account" ("id") ON DELETE CASCADE )',
+    'CREATE UNIQUE INDEX IF NOT EXISTS "uq_item_account_id" ON "item" ("account_id")',
+]
+
+_UNIQUE_KEY_MODELS = """
+from ferro import Field, Forward, Reverse
+
+
+class Account(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    items: Relation[list["Item"]] = Reverse("account_id")
+
+
+class Item(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    account_id: int = Field(foreign_key=Account, {options})
+    account: Relation[Account] = Forward("account_id")
+"""
+
+
+@pytest.mark.usefixtures("isolated_imports", "clean_registry", "importable")
+def test_a_unique_indexed_key_converts_with_index_dropped(
+    project: Path, pkg: str
+) -> None:
+    by_the_rule = _ddl(project, pkg, _UNIQUE_KEY_MODELS.format(options="unique=True"))
+
+    assert by_the_rule == _UNIQUE_KEY_OLD_FORM_DDL
+    assert not any('"idx_item_account_id"' in sql for sql in by_the_rule)
+
+
+@pytest.mark.usefixtures("isolated_imports", "clean_registry", "importable")
+def test_a_literal_conversion_adds_an_index_the_old_schema_lacked(
+    project: Path, pkg: str
+) -> None:
+    literal = _ddl(
+        project, pkg, _UNIQUE_KEY_MODELS.format(options="unique=True, index=True")
+    )
+
+    assert [sql for sql in literal if sql not in _UNIQUE_KEY_OLD_FORM_DDL] == [
+        'CREATE INDEX IF NOT EXISTS "idx_item_account_id" ON "item" ("account_id")'
+    ]

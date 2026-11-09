@@ -1,14 +1,18 @@
-"""Checks over docs examples: query lambdas and error checks.
+"""Checks over docs examples: query lambdas, error checks and retired terms.
 
-Two mistakes compile and run but teach the wrong thing:
+Three mistakes compile and run but teach the wrong thing:
 
 - ``Post.where(lambda p: p.published)``: a query lambda with a one-letter
   parameter. The docs name it after the model, ``lambda post: post.published``.
 - A ``try`` whose ``except`` asserts on the error but has no ``else`` that
   raises. When the error stops happening, the block still passes.
+- A retired relation term, one of the five in ``_RETIRED_TERMS``, such as
+  ``BackRef(``. The upgrading guide and the changelog keep them as dated
+  records.
 
-Both checks read Python files (with the fences in their docstrings) and the
-Python fences of Markdown pages. Run them from the command line:
+The checks read Python files (with the fences in their docstrings) and the
+Python fences of Markdown pages; the retired-terms check also reads Markdown
+prose, docstring prose and comments. Run them from the command line:
 
     python -m tests._docs_checks docs/examples docs/pages src/ferro
 
@@ -19,7 +23,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
+import re
 import sys
+import tokenize
 import typing
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -207,6 +214,139 @@ def unfailing_error_checks(path: Path) -> list[Violation]:
     return sorted(violations, key=lambda violation: violation.line)
 
 
+# Each retired term and what to write instead. A pattern is matched in prose;
+# the three code forms are also found as calls in Python (`_retired_calls`).
+_RETIRED_TERMS = (
+    (
+        "ForeignKey(",
+        re.compile(r"ForeignKey\("),
+        'Field(foreign_key=...) and Forward("<column>")',
+    ),
+    ("BackRef(", re.compile(r"BackRef\("), 'Reverse("<column>")'),
+    (
+        "related_name=",
+        re.compile(r"related_name="),
+        "the column name in Forward, Reverse or ManyToMany(through=...)",
+    ),
+    (
+        "shadow column",
+        re.compile(r"shadow column", re.IGNORECASE),
+        "foreign-key column",
+    ),
+    (
+        "populated relation",
+        re.compile(r"populated relation", re.IGNORECASE),
+        "loaded relation",
+    ),
+)
+_REPLACEMENTS = {term: replacement for term, _, replacement in _RETIRED_TERMS}
+# Dated records keep the old words.
+_RETIRED_VOCABULARY_EXEMPT = frozenset({"upgrading.md", "changelog.md"})
+
+
+def _retired(path: Path, line: int, term: str) -> Violation:
+    return Violation(path, line, f'"{term}" is retired; write "{_REPLACEMENTS[term]}"')
+
+
+def _retired_in_prose(path: Path, lines: dict[int, str]) -> list[Violation]:
+    return [
+        _retired(path, number, term)
+        for number, text in lines.items()
+        for term, pattern, _ in _RETIRED_TERMS
+        for _ in pattern.finditer(text)
+    ]
+
+
+def _imported_elsewhere(tree: ast.AST) -> set[str]:
+    """The names a source imports from a module other than ``ferro``."""
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").split(".")[0] != "ferro"
+        for alias in node.names
+    }
+
+
+def _called_name(call: ast.Call) -> str | None:
+    """``ForeignKey`` for ``ForeignKey(...)`` or ``ferro.ForeignKey(...)``."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "ferro"
+    ):
+        return call.func.attr
+    return None
+
+
+def _retired_calls(path: Path, tree: ast.AST) -> list[Violation]:
+    foreign = _imported_elsewhere(tree)
+    violations = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        name = _called_name(call)
+        if name in ("ForeignKey", "BackRef") and name not in foreign:
+            violations.append(_retired(path, call.lineno, f"{name}("))
+        violations += [
+            _retired(path, keyword.value.lineno, "related_name=")
+            for keyword in call.keywords
+            if keyword.arg == "related_name"
+        ]
+    return violations
+
+
+def _comments(source: str, first_line: int) -> dict[int, str]:
+    """Each comment in ``source``, keyed by the file line it is on."""
+    return {
+        first_line + token.start[0] - 1: token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT
+    }
+
+
+def retired_vocabulary(path: Path) -> list[Violation]:
+    """Report each use of a retired relation term in ``path``.
+
+    Prose (Markdown outside Python fences, a docstring outside its Python
+    fences, and every comment in Python code) is matched for every term.
+    Python is otherwise read as code: a call to
+    ``ForeignKey`` or ``BackRef`` that the source did not import from another
+    library, and any call with a ``related_name=`` keyword. A string literal
+    in code, such as a refusal message, is never matched. ``upgrading.md``
+    and ``changelog.md`` are dated records and exempt.
+    """
+    if path.name in _RETIRED_VOCABULARY_EXEMPT:
+        return []
+    text = path.read_text(encoding="utf-8")
+    lines = dict(enumerate(text.splitlines(), start=1))
+    if path.suffix == ".md":
+        prose = lines
+        fences = fenced_examples(path, text)
+    else:
+        prose, fences = {}, []
+        for node in ast.walk(_parse(text, path, 1)):
+            if (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                span = range(node.lineno, (node.end_lineno or node.lineno) + 1)
+                prose |= {number: lines[number] for number in span}
+                docstring = "\n".join(lines[number] for number in span)
+                fences += fenced_examples(path, docstring, line_offset=node.lineno - 1)
+    for fence in fences:
+        for number in range(fence.start_line, fence.end_line + 1):
+            prose.pop(number, None)
+    violations = _retired_in_prose(path, prose)
+    for source, first_line in _sources(path):
+        violations += _retired_calls(path, _parse(source, path, first_line))
+        violations += _retired_in_prose(path, _comments(source, first_line))
+    return sorted(violations, key=lambda violation: violation.line)
+
+
 def _files(paths: list[str]) -> Iterator[Path]:
     for name in paths:
         path = Path(name)
@@ -231,6 +371,7 @@ def main(argv: list[str]) -> int:
         try:
             violations += lambda_param_violations(path)
             violations += unfailing_error_checks(path)
+            violations += retired_vocabulary(path)
         except SyntaxError as error:
             violations.append(
                 Violation(path, error.lineno or 0, f"does not parse: {error.msg}")

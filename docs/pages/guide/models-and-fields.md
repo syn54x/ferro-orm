@@ -35,7 +35,7 @@ Every Ferro model is also a [Pydantic](https://docs.pydantic.dev/latest/) `BaseM
 - **Assignment** puts `Field(...)` on the right of `=`, the classic Pydantic style.
 - **Annotated** puts it inside `typing.Annotated[...]` and keeps the default as the assigned value, so a type checker sees the default.
 
-Pick one style per project. Every example in these docs shows both, in tabs. A forward foreign key is always written `Annotated[Author, ForeignKey(...)]`, in either style; see [Relationships](relationships.md).
+Pick one style per project. Every example in these docs shows both, in tabs. A foreign-key column is a field like any other, `author_id: int = Field(foreign_key=Author)` or `author_id: Annotated[int, Field(foreign_key=Author)]`, and a relation such as `author: Relation[Author] = Forward("author_id")` is always an assignment, the same in both tabs; see [Relationships](relationships.md).
 
 ## Field types
 
@@ -239,7 +239,7 @@ A second desk lamp in the lighting category fails on that index:
 
 The error is a `UniqueViolationError`; SQLite's message names the two columns.
 
-- Each inner tuple lists column names. For a `ForeignKey` field named `author`, use its column, `author_id`.
+- Each inner tuple lists column names. A foreign-key column is listed by the name you declared, such as `author_id`; a relation name is not a column.
 - Declare several tuples for several independent composite uniques.
 - An unknown column name raises when the class is defined.
 
@@ -526,7 +526,7 @@ Every statement Ferro writes for the model uses the name you set:
 --8<-- "docs/examples/models_and_fields.py:category-ddl"
 ```
 
-A `ForeignKey` to `Category` renders `REFERENCES "categories" ("code")`. A default many-to-many join table is named from the source model's table and the relation's field: a `tags` relation on a model stored in `wiki_pages` gets the join table `wiki_pages_tags`.
+A foreign-key column declared with `Field(foreign_key=Category)` renders `REFERENCES "categories" ("code")`. A many-to-many join table is named by its `through=` alone, so `__ferro_table__` never renames one.
 
 - `__ferro_table__` applies only to the class that declares it; a subclass gets the default name unless it sets its own.
 - The name is an identifier of 1 to 63 characters matching `[A-Za-z_][A-Za-z0-9_]*`.

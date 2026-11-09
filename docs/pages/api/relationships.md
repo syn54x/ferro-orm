@@ -1,10 +1,10 @@
 ---
-description: "API reference for ForeignKey, BackRef, ManyToMany and Relation."
+description: "API reference for Field, Forward, Reverse, ManyToMany and Relation."
 ---
 
-# ForeignKey, BackRef, ManyToMany and Relation
+# Field, Forward, Reverse, ManyToMany and Relation
 
-Relationships are declared with annotations: `Annotated[Other, ForeignKey(...)]` for the owning side, `BackRef()` for the reverse side, and `ManyToMany(...)` for join-table relations. At runtime you reach related rows through `Relation`, an awaitable, chainable query bound to the instance. See the [Relationships guide](../guide/relationships.md) for usage patterns.
+A relationship starts from a foreign-key column, declared as `team_id: int = Field(foreign_key=Team)`; [`Field`][ferro.Field] is documented with the other field options. `Forward("team_id")` reads the related instance through that column, `Reverse("team_id")` queries the rows of another model whose column points back, and `ManyToMany(through=...)` links two models through a join table Ferro creates. Every relation is annotated [`Relation`][ferro.Relation]. See the [Relationships guide](../guide/relationships.md) for usage patterns.
 
 ::: ferro.ManyToMany
 
