@@ -785,23 +785,23 @@ class BackRef:
 
 def ManyToMany(
     *,
-    related_name: str,
     through: str | None = None,
+    related_name: str | None = None,
     reverse_index: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Declare a many-to-many relation, assigned as the field's default.
 
-    Ferro creates the join table. Annotate the field
-    `Relation[list[Target]]`, and give the target a
-    [`BackRef`][ferro.BackRef] named by `related_name`. See
-    [Many-to-many](../guide/relationships.md#many-to-many).
+    Annotate the field `Relation[list[Target]]` and name its join table.
+    Ferro creates that table, with one `<table>_id` column per model, a
+    unique index over the pair and an index for reads from the other side.
+    The target reads the relation back through a
+    [`Reverse`][ferro.Reverse] naming this field, which it may leave out.
+    See [Many-to-many](../guide/relationships.md#many-to-many).
 
     Args:
-        related_name: The name of the relation on the target model that reads
-            this one back.
-        through: The join table's name. Defaults to `None`, a name Ferro
-            derives from the two models.
+        through: The join table's name. Required: a model with no `through=`
+            is refused when its class is defined, naming the table to write.
         reverse_index: Add an index on the join table's `(target, source)`
             columns for queries from the other side. Defaults to `True`; turn
             it off for a write-heavy join table.
@@ -812,19 +812,19 @@ def ManyToMany(
 
     Examples:
         ```python {test=run prelude=reference}
-        from ferro import BackRef, Field, ManyToMany, Model, Relation, create_tables
+        from ferro import Field, ManyToMany, Model, Relation, Reverse, create_tables
 
 
         class Tag(Model):
             id: int | None = Field(default=None, primary_key=True)
             label: str
-            posts: Relation[list["Article"]] = BackRef()
+            articles: Relation[list["Article"]] = Reverse("tags")
 
 
         class Article(Model):
             id: int | None = Field(default=None, primary_key=True)
             title: str
-            tags: Relation[list[Tag]] = ManyToMany(related_name="posts")
+            tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
 
 
         await create_tables()
@@ -832,14 +832,17 @@ def ManyToMany(
         article = await Article.create(title="Babbage's engines")
         await article.tags.add(history)
         assert [tag.label for tag in await article.tags.all()] == ["history"]
+        assert [found.title for found in await history.articles.all()] == [
+            "Babbage's engines"
+        ]
         ```
     """
-
+    options = {} if related_name is None else {"related_name": related_name}
     return Field(
         many_to_many=True,
-        related_name=related_name,
         through=through,
         reverse_index=reverse_index,
+        **options,
         **kwargs,
     )
 
@@ -900,8 +903,12 @@ def Reverse(attribute: str) -> Any:
     [`Forward`][ferro.Forward] needs no `Reverse`. See
     [Relationships](../guide/relationships.md).
 
+    `attribute` may also name a [`ManyToMany`][ferro.ManyToMany] on the
+    other model, and the relation reads the rows its join table links.
+
     Args:
-        attribute: The name of the foreign-key column on the other model.
+        attribute: The name of the foreign-key column, or of the
+            many-to-many, on the other model.
 
     Returns:
         The field's metadata, as [`Field`][ferro.Field] returns it.

@@ -489,26 +489,41 @@ class ManyToManyRelation:
 
     def __init__(
         self,
-        related_name: str,
+        related_name: str | None = None,
         through: str | None = None,
         reverse_index: bool = True,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
     ):
         """Store the options of a many-to-many relation.
 
         Args:
-            related_name: The name of the relation on the target model that
-                reads this one back.
+            related_name: The `BackRef` on the target model that reads this
+                one back, or `None` when a `Reverse` on the target names
+                this field instead. Defaults to `None`.
             through: The join table's name. Defaults to `None`, a name Ferro
-                derives from the two models.
+                derives from the two models, which only a relation with a
+                `related_name` may leave out.
             reverse_index: Add an index on the join table's
                 `(target, source)` columns for queries from the other side.
                 Defaults to `True`; turn it off for a write-heavy join table.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the target its fix writes; relation resolution
+                raises it with the target named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a target declared later; `None` under
+                postponed annotations, where no target needs quotes.
         """
         self.to = None  # Resolved later
         """The target model class, set once Ferro resolves the relation."""
         self.related_name = related_name
-        """The name of the reverse relation on the target model."""
+        """The `BackRef` on the target model, or `None` for one declared with
+        `through=` alone."""
         self.through = through
         """The join table's name, or `None` for the derived one."""
         self.reverse_index = reverse_index
         """Whether the join table has an index for reverse queries."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its target, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""

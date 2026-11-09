@@ -1,0 +1,116 @@
+{
+  "ir_kind": "schema",
+  "ir_version": 4,
+  "parent_checksum": null,
+  "payload": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "m2m_pre.models.Player",
+        "table_name": "player",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "m2m_pre.models.Tournament",
+        "table_name": "tournament",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "player_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "tournament_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "player_id",
+            "name": "fk_player_tournaments_player_id_player",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "player"
+          },
+          {
+            "column": "tournament_id",
+            "name": "fk_player_tournaments_tournament_id_tournament",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "tournament"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "tournament_id",
+              "player_id"
+            ],
+            "name": "idx_player_tournaments_tournament_id_player_id",
+            "unique": false
+          }
+        ],
+        "model_name": "player_tournaments",
+        "table_name": "player_tournaments",
+        "uniques": [
+          {
+            "columns": [
+              "player_id",
+              "tournament_id"
+            ],
+            "name": "uq_player_tournaments_player_id_tournament_id"
+          }
+        ]
+      }
+    ]
+  }
+}

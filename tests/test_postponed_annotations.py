@@ -628,7 +628,7 @@ class Team(Model):
     assert _refusal(tmp_path, body, future=False) == (
         "Team.players: a relation is annotated Relation[...], and no model "
         "declares a foreign-key column team_id pointing at Team. Declare "
-        "team_id: int = Field(foreign_key=Team) on the model the relation "
+        'team_id: int = Field(foreign_key="Team") on the model the relation '
         "reads, and annotate players as Relation[list[...]] of that model"
     )
 

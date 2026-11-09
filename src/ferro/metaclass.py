@@ -2,7 +2,6 @@
 
 import __future__
 import ast
-import re
 import sys
 import warnings
 from dataclasses import replace
@@ -53,10 +52,17 @@ from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
-from .relations import check_declared_foreign_keys, relation_line, relation_refusal
+from .relations import (
+    BAD_THROUGH,
+    check_declared_foreign_keys,
+    is_table_name,
+    key_column_line,
+    recipe,
+    relation_line,
+    relation_refusal,
+    written_type,
+)
 from .relations.descriptors import ForwardDescriptor
-
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _assert_weakref_support(cls: type) -> None:
@@ -332,6 +338,9 @@ def _is_bare_relation(core: Any) -> bool:
 
 
 def _foreign_key_name(foreign_key: Any) -> str:
+    """The class name a foreign key or relation target is written as."""
+    if isinstance(foreign_key, ForwardRef):
+        foreign_key = foreign_key.__forward_arg__
     if isinstance(foreign_key, type):
         return foreign_key.__name__
     return str(foreign_key).rsplit(".", 1)[-1]
@@ -359,14 +368,27 @@ def _declared_target(
 
 
 def _model_pointing_back(model: str, column: str) -> str | None:
-    """The one registered model whose ``column`` points at ``model``, by name."""
+    """The one registered model whose ``column``, a foreign-key column or a
+    many-to-many, points at ``model``, by name."""
     found = [
         other.__name__
         for other in REGISTRY.models().values()
-        if (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
-        is not None
-        and meta.foreign_key is not None
-        and _foreign_key_name(meta.foreign_key) == model
+        if (
+            (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
+            is not None
+            and meta.foreign_key is not None
+            and _foreign_key_name(meta.foreign_key) == model
+        )
+        or (
+            # A many-to-many never links its own model.
+            other.__name__ != model
+            and isinstance(
+                linked := (other.__dict__.get("__ferro_relations__") or {}).get(column),
+                ManyToManyRelation,
+            )
+            and linked.to is not None
+            and _foreign_key_name(linked.to) == model
+        )
     ]
     return found[0] if len(found) == 1 else None
 
@@ -471,62 +493,108 @@ def _declared_relation(
     return ReverseRelation(column, target, bound=bound)
 
 
-def _without_none(annotation: Any) -> str:
-    """``annotation`` as source text, with ``| None`` set aside."""
-    if get_origin(annotation) in (Union, UnionType):
-        members = [arg for arg in get_args(annotation) if arg is not type(None)]
-        return " | ".join(annotation_text(member) for member in members)
-    return annotation_text(annotation)
+_NOT_LIST = (
+    "a many-to-many reads a list of linked rows, so it is annotated Relation[list[...]]"
+)
+_NO_THROUGH = "a many-to-many needs through=, the name of its join table"
+
+
+def _declared_many_to_many(
+    model: str,
+    field_name: str,
+    annotation: Any,
+    options: dict[str, Any],
+    *,
+    in_metadata: bool,
+    table: str,
+    namespace: dict,
+    scope: frozenset[str] | None,
+) -> ManyToManyRelation:
+    """The record of a ``ManyToMany(through=...)`` declaration.
+
+    A declaration that is not ``Relation[list[...]]`` assigned the marker,
+    or names no join table, carries why as its refusal; a missing
+    ``through=`` is recorded as the name the old form derived,
+    ``<table>_<field>``, so a conversion keeps its table. The refusal is
+    raised once the class exists, by `many_to_many_refusal`, which also
+    refuses a target naming the model itself; a bare ``Relation`` names no
+    target, and relation resolution raises it.
+
+    Args:
+        model: The model's name.
+        field_name: The relation's field name.
+        annotation: The field's annotation, evaluated where it could be.
+        options: The relation keywords the marker carries.
+        in_metadata: Whether the marker sits in ``Annotated`` metadata.
+        table: The model's table name.
+        namespace: The class body.
+        scope: The names defined where the class statement runs, or ``None``
+            when the module postpones its annotations.
+
+    Returns:
+        The relation, its ``refusal`` set when the declaration is refused.
+    """
+    core, wrapped, _ = _layers(annotation)
+    view = _relation_view(core)
+    through = options.get("through")
+    reverse_index = options.get("reverse_index", True)
+    # The order of `_declared_relation`: a missing `Relation[...]` is named
+    # before the `| None` around it.
+    if in_metadata:
+        reason = _IN_METADATA
+    elif view is None:
+        reason = _NOT_RELATION
+    elif wrapped:
+        reason = _NONE_OUTSIDE
+    elif not view[0]:
+        reason = _NOT_LIST
+    elif not isinstance(through, str) or not through:
+        reason = _NO_THROUGH
+    elif not is_table_name(through):
+        reason = BAD_THROUGH
+    else:
+        reason = None
+    if not isinstance(through, str) or not is_table_name(through):
+        # The name the old form derived; the refusal checks it in turn.
+        through = f"{table}_{field_name}"
+    if view is not None:
+        target = view[1]
+    elif not _is_bare_relation(core):
+        target = _relation_argument(core)[1]
+    else:
+        target = None
+    relation = ManyToManyRelation(
+        through=through,
+        reverse_index=reverse_index,
+        refusal=reason,
+        bound=None if scope is None else scope | frozenset(namespace),
+    )
+    relation.to = target
+    return relation
 
 
 def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
-    """Refuse a foreign-key option the column cannot take, naming the fix.
+    """Refuse ``on_delete`` on a column with no ``foreign_key``, naming the fix.
+
+    A foreign-key column's own refusals (the primary key, generated,
+    ``on_delete="SET NULL"`` on a required column) are `check_key_column`'s,
+    which writes its fix from the target key.
 
     Raises:
-        TypeError: ``on_delete`` without ``foreign_key``; a foreign-key
-            column that is the primary key or generated; or
-            ``on_delete="SET NULL"`` on an annotation that does not allow
-            ``None``.
+        TypeError: ``on_delete`` without ``foreign_key``.
     """
-    model = cls.__name__
     for name, meta in declared_fields.items():
-        info = cls.model_fields[name]
-        written = annotation_text(info.annotation)
-        if meta.foreign_key is None:
-            if meta.on_delete is not None:
-                line = field_line(
-                    name, written, field_options(meta, on_delete=None), info.default
-                )
-                raise TypeError(
-                    f"{model}.{name}: on_delete is a foreign-key option and this "
-                    f"column has no foreign_key. Write: {line}"
-                )
-            continue
-        if meta.primary_key:
+        if meta.foreign_key is None and meta.on_delete is not None:
+            info = cls.model_fields[name]
             line = field_line(
                 name,
-                _without_none(info.annotation),
-                field_options(meta, primary_key=False, autoincrement=None, unique=True),
+                annotation_text(info.annotation),
+                field_options(meta, on_delete=None),
+                info.default,
             )
             raise TypeError(
-                f"{model}.{name}: a foreign-key column cannot be the primary key. "
-                "Write: id: int | None = Field(default=None, primary_key=True) "
-                f"and {line}"
-            )
-        if meta.generated is not None:
-            # `generated=` gave the field its `None` default; the fix drops both.
-            line = field_line(name, written, field_options(meta, generated=None))
-            raise TypeError(
-                f"{model}.{name}: a foreign-key column cannot be generated. "
-                f"Write: {line}"
-            )
-        if meta.on_delete == "SET NULL" and not annotation_allows_none(info.annotation):
-            line = field_line(
-                name, f"{written} | None", field_options(meta), default=None
-            )
-            raise TypeError(
-                f'{model}.{name}: on_delete="SET NULL" needs a nullable column. '
-                f"Write: {line}"
+                f"{cls.__name__}.{name}: on_delete is a foreign-key option and "
+                f"this column has no foreign_key. Write: {line}"
             )
 
 
@@ -728,19 +796,27 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
     declared = model_cls.__ferro_relations__[name]
     if isinstance(declared, ForwardRelation):
         info = model_cls.model_fields[spec.fk_column]
-        column = field_line(
+        column = key_column_line(
+            model_cls,
             spec.fk_column,
-            f"{_without_none(info.annotation)} | None",
-            # An explicit `nullable=False` would keep the column required.
-            field_options(model_cls.__ferro_fields__[spec.fk_column], nullable="infer"),
-            default=None,
+            spec.target,
+            nullable=True,
+            meta=model_cls.__ferro_fields__[spec.fk_column],
+            annotation=written_type(info.annotation),
         )
         relation = relation_line(
             name, "Forward", target, True, spec.fk_column, declared.bound
         )
-        fix = (
-            f"add | None to {spec.fk_column}'s annotation. Write: {column} "
-            f"and {relation}"
+        # Two declarations change, so the fix is a recipe, not a Write line.
+        return recipe(
+            model,
+            name,
+            f"{spec.fk_column} is not nullable, so the relation cannot be None. "
+            f"Assign {_a(target)}, or make both nullable",
+            [
+                f"add | None to {model}.{spec.fk_column}: {column}",
+                f"add | None to {model}.{name}: {relation}",
+            ],
         )
     else:
         # The old form has no key column to edit: the relation's own
@@ -982,7 +1058,7 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_table__ on model '{name}' must be a str, "
                 f"got {type(configured).__name__}"
             )
-        if len(configured) > 63 or not _TABLE_NAME_RE.match(configured):
+        if not is_table_name(configured):
             raise ValueError(
                 f"__ferro_table__ {configured!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "
@@ -1006,7 +1082,7 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_renamed_from__ on model '{name}' must be a str, "
                 f"got {type(declared).__name__}"
             )
-        if len(declared) > 63 or not _TABLE_NAME_RE.match(declared):
+        if not is_table_name(declared):
             raise ValueError(
                 f"__ferro_renamed_from__ {declared!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "
@@ -1255,6 +1331,22 @@ class ModelMetaclass(type(BaseModel)):
                         "Relation[list[T]] = BackRef() for collection back-references."
                     )
                 local_relations[field_name] = "BackRef"
+                fields_to_remove.append(field_name)
+                continue
+
+            if is_m2m_field and relationship_payload.get("related_name") is None:
+                relation = _declared_many_to_many(
+                    model_name,
+                    field_name,
+                    evaluated,
+                    relationship_payload,
+                    in_metadata=assigned.get("many_to_many") is not True,
+                    table=ModelMetaclass._resolve_table_name(model_name, namespace),
+                    namespace=namespace,
+                    scope=scope,
+                )
+                local_relations[field_name] = relation
+                pending_relations.append((field_name, relation))
                 fields_to_remove.append(field_name)
                 continue
 
