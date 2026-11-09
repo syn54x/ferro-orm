@@ -60,9 +60,10 @@ from .relations import (
     check_declared_foreign_keys,
     default_join_table,
     is_table_name,
+    forward_line,
     key_column_line,
-    relation_line,
     relation_refusal,
+    reverse_line,
     written_type,
 )
 from .relations.fixes import DeclarationRefusal, Edit
@@ -411,9 +412,13 @@ def _declared_relation(
         else:
             named = None
         if named is not None:
-            raise relation_refusal(
-                model, field_name, reason, spelling, column, named[0], named[1], bound
+            target_text, nullable = named
+            line = (
+                forward_line(field_name, target_text, column, bound, nullable=nullable)
+                if spelling == "Forward"
+                else reverse_line(field_name, target_text, column, bound)
             )
+            raise relation_refusal(model, field_name, reason, line)
         if spelling == "Forward":
             return ForwardRelation(column, None, False, refusal=reason, bound=bound)
         return ReverseRelation(column, None, refusal=reason, bound=bound)
@@ -425,11 +430,7 @@ def _declared_relation(
             field_name,
             "a forward relation reads one row, so it is annotated Relation[...] "
             "of its target",
-            "Forward",
-            column,
-            target_text,
-            nullable,
-            bound,
+            forward_line(field_name, target_text, column, bound, nullable=nullable),
         )
     if spelling == "Reverse" and not is_list:
         raise relation_refusal(
@@ -437,11 +438,7 @@ def _declared_relation(
             field_name,
             "a reverse relation reads every row pointing back, so it is "
             "annotated Relation[list[...]]",
-            "Reverse",
-            column,
-            annotation_text(target),
-            False,
-            bound,
+            reverse_line(field_name, annotation_text(target), column, bound),
         )
     if spelling == "Forward":
         return ForwardRelation(column, target, nullable, bound=bound)
@@ -750,9 +747,7 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> DeclarationRefusal:
         meta=model_cls.__ferro_fields__[spec.fk_column],
         annotation=written_type(info.annotation),
     )
-    relation = relation_line(
-        name, "Forward", target, True, spec.fk_column, declared.bound
-    )
+    relation = forward_line(name, target, spec.fk_column, declared.bound, nullable=True)
     return DeclarationRefusal(
         model,
         name,
