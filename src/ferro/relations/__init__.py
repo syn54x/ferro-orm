@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 from types import UnionType
 from typing import Any, ForwardRef, Union, get_args, get_origin
@@ -151,35 +152,52 @@ def _backs(key: ColumnSpec, column: ColumnSpec) -> bool:
     ) == _storage(column)
 
 
-def _primary_key_edits(model_cls: Any, needing: ColumnSpec | None) -> list[Edit]:
+Defining = tuple[Any, Mapping[str, ColumnSpec]]
+"""A model whose schema is compiling, and the column specs it has not
+published yet."""
+
+
+def _columns_now(model: Any, defining: Defining | None) -> Mapping[str, ColumnSpec]:
+    """``model``'s columns as they exist now: its published ones, or the specs
+    of the model whose schema is compiling, so a check sees that model at class
+    definition exactly as relation resolution sees it later."""
+    if defining is not None and model is defining[0]:
+        return defining[1]
+    return model.__dict__.get("__ferro_columns__") or {}
+
+
+def _primary_key_edits(
+    model_cls: Any, needing: ColumnSpec | None, defining: Defining | None = None
+) -> list[Edit]:
     """The edits giving ``model_cls`` a primary key of ``needing``'s type and storage.
 
     A plain ``id`` of that type and storage is marked the primary key;
-    otherwise one is added. Every foreign-key column of a known model that
-    points at ``model_cls`` and the new key would not back is rewritten to
-    it, so following the edits loads each of them.
+    otherwise one is added. Every foreign-key column of a model that exists
+    now, the one being defined included, that points at ``model_cls`` and
+    the new key would not back is rewritten to it, so following the edits
+    loads each of them.
 
     Args:
         model_cls: The model with no primary key.
         needing: The column the key is for, or `None` when there is none yet;
             then the first column already pointing at the model decides, and
             with none an `int` key is added.
+        defining: The model whose schema is compiling and its column specs,
+            when the check runs at its class definition. Defaults to `None`.
 
     Returns:
         The edits, the primary key's first.
     """
     model = model_cls.__name__
     models: list[Any] = list(REGISTRY.models().values())
-    # A model whose schema is compiling has no columns published yet.
     pointing = [
-        (other, name)
+        (other, name, _columns_now(other, defining)[name])
         for other in models
         for name in _key_columns_to(other, model_cls)
-        if name in (other.__dict__.get("__ferro_columns__") or {})
+        if name in _columns_now(other, defining)
     ]
     if needing is None and pointing:
-        other, name = pointing[0]
-        needing = other.__ferro_columns__[name]
+        needing = pointing[0][2]
     plain = model_cls.__ferro_columns__.get("id")
     if plain is not None and (needing is None or _backs(plain, needing)):
         info = model_cls.model_fields["id"]
@@ -202,8 +220,7 @@ def _primary_key_edits(model_cls: Any, needing: ColumnSpec | None) -> list[Edit]
         )
         edits = [Edit(model, name, "add", (line,))]
         key = needing
-    for other, name in pointing:
-        column = other.__ferro_columns__[name]
+    for other, name, column in pointing:
         if key is None or _backs(key, column):
             continue
         line = key_column_line(
@@ -263,30 +280,36 @@ def _repoint_edits(model_cls: Any, column: str, new: str) -> list[Edit]:
 
 
 def keyless_target_refusal(
-    model: str, column: str, target: Any, needing: ColumnSpec | None
+    model: str,
+    column: str,
+    target: Any,
+    columns: Mapping[str, ColumnSpec],
+    owner: Any = None,
 ) -> DeclarationRefusal:
     """The refusal of a foreign-key column whose target declares no primary key.
 
-    One refusal for both times the check runs: when the class is defined,
-    for a target written as a class (the schema compile meets it first), and
+    One refusal for both times the check runs, from the same input: when
+    the class is defined, for a target written as a class (the schema
+    compile meets it first, before the model publishes its columns), and
     when relations resolve, for one written as a name.
 
     Args:
-        model: The model declaring the column, by name.
+        model: The name of the model or join table declaring the column.
         column: The column's name.
         target: The model the column points at.
-        needing: The column's spec, whose type and storage the primary key
-            the fix adds takes; `None` when it has none yet.
+        columns: Every column spec of the declaring model, published or not.
+        owner: The declaring model, or `None` for a join table. Defaults to
+            `None`.
 
     Returns:
         The refusal, its fix the target's new primary key.
     """
+    defining = None if owner is None else (owner, columns)
     return DeclarationRefusal(
         model,
         column,
-        f"{target.__name__} declares no primary key for a foreign key to point "
-        f"at. Declare a primary_key=True field on {target.__name__}",
-        _primary_key_edits(target, needing),
+        f"{target.__name__} declares no primary key for a foreign key to point at",
+        _primary_key_edits(target, columns.get(column), defining),
     )
 
 
@@ -294,8 +317,13 @@ def _target_key(model_cls: Any, name: str, target: Any) -> tuple[str, Any]:
     """``target``'s primary-key column and its type, ``| None`` set aside."""
     pk = target.__ferro_pk__
     if pk is None:
-        needing = (model_cls.__dict__.get("__ferro_columns__") or {}).get(name)
-        raise keyless_target_refusal(model_cls.__name__, name, target, needing)
+        raise keyless_target_refusal(
+            model_cls.__name__,
+            name,
+            target,
+            _columns_now(model_cls, None),
+            model_cls,
+        )
     return pk, _without_none(target.__ferro_columns__[pk].python_type)
 
 

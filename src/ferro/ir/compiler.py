@@ -275,7 +275,12 @@ def _table_check_entries(
     return entries
 
 
-def _fk_target_column(model_name: str, spec: ColumnSpec, to_table: str) -> str:
+def _fk_target_column(
+    model_name: str,
+    spec: ColumnSpec,
+    to_table: str,
+    columns: Mapping[str, ColumnSpec],
+) -> str:
     """The primary-key column a foreign key into ``to_table`` references.
 
     Read from the registered model that owns the table, the source the shadow
@@ -285,7 +290,8 @@ def _fk_target_column(model_name: str, spec: ColumnSpec, to_table: str) -> str:
 
     Raises:
         DeclarationRefusal: The target is compiled and declares no primary
-            key; the refusal is the one relation resolution raises for it.
+            key; the refusal is the one relation resolution raises for it,
+            computed from ``columns``, every spec of the model compiling.
     """
     for model in REGISTRY.models().values():
         if getattr(model, "__ferro_table__", None) == to_table:
@@ -297,8 +303,9 @@ def _fk_target_column(model_name: str, spec: ColumnSpec, to_table: str) -> str:
                 # Imported here: the relations package imports this module.
                 from ..relations import keyless_target_refusal
 
+                owner = REGISTRY.models().get(model_name)
                 raise keyless_target_refusal(
-                    model_name.rsplit(".", 1)[-1], spec.name, model, spec
+                    model_name.rsplit(".", 1)[-1], spec.name, model, columns, owner
                 )
             return pk or "id"
     return "id"
@@ -388,7 +395,7 @@ def compile_schema_ir_payload(
                 "column": spec.name,
                 "to_table": spec.foreign_key.to_table,
                 "to_column": _fk_target_column(
-                    model_name, spec, spec.foreign_key.to_table
+                    model_name, spec, spec.foreign_key.to_table, deduped
                 ),
                 "on_delete": spec.foreign_key.on_delete,
                 "name": _fk_name(
