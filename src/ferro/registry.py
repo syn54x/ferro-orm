@@ -363,10 +363,30 @@ class Registry:
     def add_join_table(self, name: str, bundle: Any) -> None:
         """Record one generated join table's bundle.
 
+        A join table belongs to the one relation that declares it, named by
+        the bundle's ``declared_by`` (model identity, field). Relation
+        resolution refuses a second relation naming the table before it gets
+        here, so a bundle from another relation is an internal error, never
+        a silent overwrite that would let two relations share rows.
+
         Args:
             name: The join table's name.
             bundle: What the schema compiler needs to build its envelope.
+
+        Raises:
+            RuntimeError: Another relation already declares the table.
         """
+        held = self._join_tables.get(name)
+        if (
+            isinstance(held, dict)
+            and isinstance(bundle, dict)
+            and held.get("declared_by") != bundle.get("declared_by")
+        ):
+            raise RuntimeError(
+                f"ferro: join table {name!r} is declared by {held.get('declared_by')} "
+                f"and {bundle.get('declared_by')}; relation resolution should "
+                "have refused the second"
+            )
         self._join_tables[name] = bundle
 
     def join_tables(self) -> dict[str, Any]:

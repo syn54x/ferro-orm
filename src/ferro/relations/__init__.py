@@ -170,11 +170,12 @@ def _primary_key_edits(model_cls: Any, needing: ColumnSpec | None) -> list[Edit]
     """
     model = model_cls.__name__
     models: list[Any] = list(REGISTRY.models().values())
+    # A model whose schema is compiling has no columns published yet.
     pointing = [
         (other, name)
         for other in models
         for name in _key_columns_to(other, model_cls)
-        if name in other.model_fields
+        if name in (other.__dict__.get("__ferro_columns__") or {})
     ]
     if needing is None and pointing:
         other, name = pointing[0]
@@ -261,16 +262,40 @@ def _repoint_edits(model_cls: Any, column: str, new: str) -> list[Edit]:
     return edits
 
 
+def keyless_target_refusal(
+    model: str, column: str, target: Any, needing: ColumnSpec | None
+) -> DeclarationRefusal:
+    """The refusal of a foreign-key column whose target declares no primary key.
+
+    One refusal for both times the check runs: when the class is defined,
+    for a target written as a class (the schema compile meets it first), and
+    when relations resolve, for one written as a name.
+
+    Args:
+        model: The model declaring the column, by name.
+        column: The column's name.
+        target: The model the column points at.
+        needing: The column's spec, whose type and storage the primary key
+            the fix adds takes; `None` when it has none yet.
+
+    Returns:
+        The refusal, its fix the target's new primary key.
+    """
+    return DeclarationRefusal(
+        model,
+        column,
+        f"{target.__name__} declares no primary key for a foreign key to point "
+        f"at. Declare a primary_key=True field on {target.__name__}",
+        _primary_key_edits(target, needing),
+    )
+
+
 def _target_key(model_cls: Any, name: str, target: Any) -> tuple[str, Any]:
     """``target``'s primary-key column and its type, ``| None`` set aside."""
     pk = target.__ferro_pk__
     if pk is None:
-        raise DeclarationRefusal(
-            model_cls.__name__,
-            name,
-            f"{target.__name__} has no primary key for a foreign key to point at",
-            _primary_key_edits(target, model_cls.__ferro_columns__.get(name)),
-        )
+        needing = (model_cls.__dict__.get("__ferro_columns__") or {}).get(name)
+        raise keyless_target_refusal(model_cls.__name__, name, target, needing)
     return pk, _without_none(target.__ferro_columns__[pk].python_type)
 
 
@@ -565,28 +590,79 @@ BAD_THROUGH = (
 )
 
 
-def many_to_many_refusal(
-    owner: Any,
+def _tables_taken(owner: Any, field_name: str) -> set[str]:
+    """Every table name a declaration other than ``owner.field_name`` holds:
+    each model's table, each registered join table, and the join table every
+    other many-to-many names."""
+    taken = set(REGISTRY.join_tables())
+    for model in REGISTRY.models().values():
+        taken.add(getattr(model, "__ferro_table__", ""))
+        for name, relation in (model.__dict__.get("__ferro_relations__") or {}).items():
+            if (
+                isinstance(relation, ManyToManyRelation)
+                and relation.through
+                and (model, name) != (owner, field_name)
+            ):
+                taken.add(relation.through)
+    return taken
+
+
+def _free_table_name(name: str, taken: set[str]) -> str:
+    """``name`` as a table name ``taken`` does not hold, the way `_free_name`
+    picks a field name: cut to 63 characters, then ``_2``, ``_3`` and on
+    until it is free. ``name`` joins identifiers, so only its length can be
+    wrong."""
+    free, number = name[:63], 1
+    while free in taken:
+        number += 1
+        suffix = f"_{number}"
+        free = name[: 63 - len(suffix)] + suffix
+    return free
+
+
+def _many_to_many_line(
     field_name: str,
-    reason: str,
     target: str,
     through: str,
     reverse_index: bool,
     bound: frozenset[str] | None,
+    related_name: str | None = None,
+) -> str:
+    """Write a many-to-many: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``."""
+    options = f"through={json.dumps(through)}"
+    if related_name is not None:
+        options = f"related_name={json.dumps(related_name)}, {options}"
+    if not reverse_index:
+        options += ", reverse_index=False"
+    shown = f'"{target}"' if bound is not None and target not in bound else target
+    return f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
+
+
+def many_to_many_refusal(
+    owner: Any,
+    field_name: str,
+    reason: str,
+    targets: list[str],
+    through: str,
+    reverse_index: bool,
+    bound: frozenset[str] | None,
 ) -> DeclarationRefusal:
-    """The refusal whose fix is a many-to-many on ``owner`` linking ``target``.
+    """The refusal whose fix is a many-to-many on ``owner`` linking one of ``targets``.
 
     Every refusal that writes a many-to-many builds it here. A target that
     names ``owner`` itself is checked first, whatever else is wrong: both
     join-table columns would be ``<table>_id``, so the fix declares a join
-    model of its own. Anything else is the local line
-    ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
+    model of its own. Otherwise each target is a way to fix it, the local
+    line ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``;
+    a ``Reverse`` on another of ``targets`` that reads the relation then
+    declares a many-to-many of its own. The join table is named so that no
+    other declaration holds it.
 
     Args:
         owner: The model the many-to-many is declared on.
         field_name: The relation's field name.
         reason: What is wrong with the declaration as written.
-        target: The model the many-to-many links, by name.
+        targets: The models the many-to-many could link, by name.
         through: The join table's name: the declared one, or the name the
             old form derived, ``<table>_<field>``.
         reverse_index: Whether the join table keeps its reverse index.
@@ -595,12 +671,12 @@ def many_to_many_refusal(
             written by name.
 
     Returns:
-        The refusal, carrying its fix.
+        The refusal, carrying one way to fix it per target.
     """
     model = owner.__name__
-    # A derived name joins two identifiers, so only its length can be wrong.
-    through = through[:63]
-    if target == model:
+    taken = _tables_taken(owner, field_name)
+    through = _free_table_name(through, taken)
+    if model in targets:
         column = _join_column(owner.__ferro_table__)
         join_model = model + "".join(
             part.capitalize() for part in field_name.split("_")
@@ -640,14 +716,31 @@ def many_to_many_refusal(
                 *readers,
             ],
         )
-    options = f"through={json.dumps(through)}"
-    if not reverse_index:
-        options += ", reverse_index=False"
-    shown = f'"{target}"' if bound is not None and target not in bound else target
-    line = f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
-    return DeclarationRefusal(
-        model, field_name, reason, [Edit(model, field_name, "replace", (line,))]
-    )
+    ways = []
+    for target in targets:
+        line = _many_to_many_line(field_name, target, through, reverse_index, bound)
+        way = [Edit(model, field_name, "replace", (line,))]
+        claimed = taken | {through}
+        others: list[Any] = list(REGISTRY.models().values())
+        for other in others:
+            if other.__name__ == target or other.__name__ not in targets:
+                continue
+            for reader, relation in (
+                other.__dict__.get("__ferro_relations__") or {}
+            ).items():
+                if (
+                    isinstance(relation, ReverseRelation)
+                    and relation.attribute == field_name
+                    and _resolve_target(relation.to, final=False) is owner
+                ):
+                    own = _free_table_name(f"{other.__ferro_table__}_{reader}", claimed)
+                    claimed.add(own)
+                    line = _many_to_many_line(
+                        reader, model, own, True, ON_ANOTHER_MODEL
+                    )
+                    way.append(Edit(other.__name__, reader, "replace", (line,)))
+        ways.append(way)
+    return DeclarationRefusal(model, field_name, reason, alternatives=ways)
 
 
 def _many_to_many_to(model_cls: Any, target: Any) -> list[str]:
@@ -680,36 +773,24 @@ def _refuse_unnamed_many_to_many(
         and reverse.refusal is None
         and _resolve_target(reverse.to, final=False) is model_cls
     ]
-    if len(naming) == 1:
+    if naming:
         raise many_to_many_refusal(
             model_cls,
             name,
             relation.refusal or "",
-            naming[0],
+            naming,
             relation.through or "",
             relation.reverse_index,
             relation.bound,
         )
-    # No edit can be written: which model the relation links is the reader's
-    # choice, or nothing names it.
-    links = (
-        f"{_listed(naming)} each read it with a Reverse. Annotate {name} as "
-        "Relation[list[...]] of the one it links"
-        if naming
-        else f"nothing names the model it links. Annotate {name} as "
-        "Relation[list[...]] of that model"
-    )
+    # No edit can be written: nothing names the model the relation links.
     raise DeclarationRefusal(
         model,
         name,
-        f"{relation.refusal}, and {links}, keeping "
+        f"{relation.refusal}, and nothing names the model it links. Annotate "
+        f"{name} as Relation[list[...]] of that model, keeping "
         f'ManyToMany(through="{relation.through}")',
     )
-
-
-def _listed(names: list[str]) -> str:
-    """``A``, ``A and B``, ``A, B and C``."""
-    return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
 def relation_refusal(
@@ -796,33 +877,48 @@ def _refuse_unnamed_reverse(
         )
         or column in _many_to_many_to(other, model_cls)
     ]
-    if len(pointing_back) == 1:
-        raise relation_refusal(
+    if pointing_back:
+        # One way to fix it per model whose column points back.
+        names = [other.__name__ for other in pointing_back]
+        reason = relation.refusal or ""
+        if len(names) > 1:
+            reason += (
+                f", and {_listed(names)} each declare {column} pointing at {model}"
+            )
+        raise DeclarationRefusal(
             model,
             name,
-            relation.refusal or "",
-            "Reverse",
-            column,
-            pointing_back[0].__name__,
-            False,
-            relation.bound,
+            reason,
+            alternatives=[
+                [
+                    Edit(
+                        model,
+                        name,
+                        "replace",
+                        (
+                            relation_line(
+                                name, "Reverse", other, False, column, relation.bound
+                            ),
+                        ),
+                    )
+                ]
+                for other in names
+            ],
         )
-    # No edit can be written: which model the relation reads is the reader's
-    # choice, or no model is the one it reads.
-    if pointing_back:
-        reads = (
-            f"{_listed([other.__name__ for other in pointing_back])} each "
-            f"declare {column} pointing at {model}. Annotate {name} as "
-            "Relation[list[...]] of the one it reads"
-        )
-    else:
-        key = key_column_line(None, column, model_cls, nullable=False)
-        reads = (
-            f"no model declares a foreign-key column {column} pointing at "
-            f"{model}. Declare {key} on the model the relation reads, and "
-            f"annotate {name} as Relation[list[...]] of that model"
-        )
-    raise DeclarationRefusal(model, name, f"{relation.refusal}, and {reads}")
+    # No edit can be written: no model is the one the relation reads.
+    key = key_column_line(None, column, model_cls, nullable=False)
+    raise DeclarationRefusal(
+        model,
+        name,
+        f"{relation.refusal}, and no model declares a foreign-key column {column} "
+        f"pointing at {model}. Declare {key} on the model the relation reads, and "
+        f"annotate {name} as Relation[list[...]] of that model",
+    )
+
+
+def _listed(names: list[str]) -> str:
+    """``A``, ``A and B``, ``A, B and C``."""
+    return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
 def check_forward_relation(
@@ -1062,20 +1158,32 @@ def _check_reverse_many_to_many(
     )
     candidates = _key_columns_to(other, model_cls) + _many_to_many_to(other, model_cls)
     model = model_cls.__name__
-    if len(candidates) == 1:
-        line = relation_line(
-            name, "Reverse", other.__name__, False, candidates[0], relation.bound
-        )
-        raise DeclarationRefusal(
-            model, name, refused, [Edit(model, name, "replace", (line,))]
-        )
-    if other is model_cls and candidates:
-        # No edit can be written: which column it reads is the reader's choice.
+    if len(candidates) == 1 or (other is model_cls and candidates):
+        # One way to fix it per relation of the other model that links this one.
         raise DeclarationRefusal(
             model,
             name,
-            f"{refused}. Read one of the columns of {model} that point at "
-            f"{model} instead: {_listed(candidates)}",
+            refused,
+            alternatives=[
+                [
+                    Edit(
+                        model,
+                        name,
+                        "replace",
+                        (
+                            relation_line(
+                                name,
+                                "Reverse",
+                                other.__name__,
+                                False,
+                                key,
+                                relation.bound,
+                            ),
+                        ),
+                    )
+                ]
+                for key in candidates
+            ],
         )
     if other is model_cls:
         # No line on this model works: the relation moves to the linked model.
@@ -1096,7 +1204,7 @@ def _check_reverse_many_to_many(
         model_cls,
         name,
         refused,
-        other.__name__,
+        [other.__name__],
         f"{model_cls.__ferro_table__}_{name}",
         True,
         relation.bound,
@@ -1131,7 +1239,7 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
                     model_cls,
                     name,
                     relation.refusal or SELF_MANY_TO_MANY,
-                    target,
+                    [target],
                     relation.through or "",
                     relation.reverse_index,
                     relation.bound,
@@ -1189,6 +1297,47 @@ def _resolve_declared_foreign_key(
 _DECLARED_ORDER = {FerroField: 0, ForwardRelation: 1, ReverseRelation: 2}
 
 
+def _refuse_shared_join_table(
+    source_model: Any,
+    field_name: str,
+    relation: ManyToManyRelation,
+    target_model: Any,
+    join_table: str,
+) -> None:
+    """Refuse a many-to-many whose join table another many-to-many declares.
+
+    Two relations over one join table would read and write each other's
+    rows, so the second one is refused, its fix a join table no other
+    declaration holds.
+    """
+    held = REGISTRY.join_tables().get(join_table)
+    declared_by = (source_model.__ferro_identity__, field_name)
+    if not isinstance(held, dict) or held.get("declared_by") in (None, declared_by):
+        return
+    holder, holder_field = held["declared_by"]
+    holder_name = REGISTRY.models()[holder].__name__
+    through = _free_table_name(
+        _default_join_table(source_model.__ferro_table__, field_name),
+        _tables_taken(source_model, field_name) | {join_table},
+    )
+    line = _many_to_many_line(
+        field_name,
+        target_model.__name__,
+        through,
+        relation.reverse_index,
+        relation.bound,
+        relation.related_name,
+    )
+    model = source_model.__name__
+    raise DeclarationRefusal(
+        model,
+        field_name,
+        f"{holder_name}.{holder_field} already declares the join table "
+        f"{join_table}, and two relations over one join table share their rows",
+        [Edit(model, field_name, "replace", (line,))],
+    )
+
+
 def resolve_relationships():
     """Bind every declared relation to its target model and check the pair.
 
@@ -1235,16 +1384,11 @@ def resolve_relationships():
             and rel.related_name is None
             and target_model is REGISTRY.models()[model_name]
         ):
-            # A name only resolution could bind: the same check as at
-            # class definition, through the same builder.
-            raise many_to_many_refusal(
-                target_model,
-                field_name,
-                SELF_MANY_TO_MANY,
-                target_model.__name__,
-                rel.through or "",
-                rel.reverse_index,
-                rel.bound,
+            # The class body names a target by the name its model is
+            # registered under, so class definition already refused this.
+            raise RuntimeError(
+                f"ferro: {model_name}.{field_name} is a many-to-many linking its "
+                "own model, which class definition should have refused"
             )
         recompile_targets.add(target_model.__ferro_identity__)
         # A many-to-many declared with `through=` alone has no BackRef: a
@@ -1288,6 +1432,9 @@ def resolve_relationships():
                         f"model '{key}'. Set through= on the relation or "
                         "__ferro_table__ on the model to resolve the collision."
                     )
+            _refuse_shared_join_table(
+                source_model, field_name, rel, target_model, join_table
+            )
 
             source_col = _join_column(source_table)
             target_col = _join_column(target_table)
@@ -1350,6 +1497,7 @@ def resolve_relationships():
             REGISTRY.add_join_table(
                 join_table,
                 {
+                    "declared_by": (model_name, field_name),
                     "columns": join_columns,
                     "composite_uniques": composite_uniques,
                     "composite_indexes": composite_indexes,

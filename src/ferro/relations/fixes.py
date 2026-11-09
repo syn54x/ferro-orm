@@ -2,7 +2,8 @@
 
 A refusal computes its fix as a list of `Edit`s from the actual models, and
 `render_fix` prints the message from that list. The test that proves the fix
-applies the same list, so the text a user reads is the fix the test ran.
+applies the same list, so the text a user reads is the fix the test ran. A
+refusal the reader can fix in more than one way carries one list per way.
 """
 
 from collections.abc import Sequence
@@ -38,33 +39,60 @@ def _step(edit: Edit) -> str:
     return f"on {edit.model}, add {written}"
 
 
-def render_fix(model: str, field: str, reason: str, edits: Sequence[Edit]) -> str:
-    """Write a refusal's message, its fix printed from ``edits``.
+def _ways(
+    edits: Sequence[Edit], alternatives: Sequence[Sequence[Edit]]
+) -> tuple[tuple[Edit, ...], ...]:
+    """The ways to fix a refusal: ``alternatives``, or ``edits`` as the one way."""
+    if alternatives:
+        return tuple(tuple(way) for way in alternatives)
+    return (tuple(edits),) if edits else ()
+
+
+def render_fix(
+    model: str,
+    field: str,
+    reason: str,
+    edits: Sequence[Edit] = (),
+    *,
+    alternatives: Sequence[Sequence[Edit]] = (),
+) -> str:
+    """Write a refusal's message, its fix printed from its edits.
 
     A fix whose every edit replaces the refused declaration is local, and
-    prints as ``Write: <line>``. Any other fix prints as numbered steps, each
-    naming the model and field it changes. With no edits the message is the
-    reason alone, which then says what to do in words.
+    prints as ``Write: <line>``; several local ways print as
+    ``Write: <line> or <line>``. Any other fix prints as numbered steps, each
+    naming the model and field it changes, one list of steps per way. With
+    no edits the message is the reason alone, which then says what to do in
+    words.
 
     Args:
         model: The refused declaration's model.
         field: The refused declaration's field.
         reason: What is wrong, and for a refusal with no edits what to do.
-        edits: The fix, in the order to apply it.
+        edits: The fix, in the order to apply it, when there is one way.
+        alternatives: The ways to fix it, each in the order to apply it,
+            when there are several; ``edits`` is then left empty.
 
     Returns:
         The message: ``<model>.<field>: <reason>``, then the fix.
     """
     message = f"{model}.{field}: {reason}"
-    if not edits:
+    ways = _ways(edits, alternatives)
+    if not ways:
         return message
     if all(
         edit.action == "replace" and (edit.model, edit.field) == (model, field)
-        for edit in edits
+        for way in ways
+        for edit in way
     ):
-        lines = " and ".join(line for edit in edits for line in edit.lines)
+        lines = " or ".join(
+            " and ".join(line for edit in way for line in edit.lines) for way in ways
+        )
         return f"{message}. Write: {lines}"
-    steps = "; ".join(f"({index}) {_step(edit)}" for index, edit in enumerate(edits, 1))
+    steps = " Or: ".join(
+        "; ".join(f"({index}) {_step(edit)}" for index, edit in enumerate(way, 1))
+        for way in ways
+    )
     return f"{message}. Fix it by hand: {steps}"
 
 
@@ -76,7 +104,13 @@ class DeclarationRefusal(TypeError):
     """
 
     def __init__(
-        self, model: str, field: str, reason: str, edits: Sequence[Edit] = ()
+        self,
+        model: str,
+        field: str,
+        reason: str,
+        edits: Sequence[Edit] = (),
+        *,
+        alternatives: Sequence[Sequence[Edit]] = (),
     ) -> None:
         self.model = model
         """The refused declaration's model."""
@@ -84,9 +118,24 @@ class DeclarationRefusal(TypeError):
         """The refused declaration's field."""
         self.reason = reason
         """What is wrong."""
-        self.edits: tuple[Edit, ...] = tuple(edits)
-        """The fix, in the order to apply it; empty when none can be named."""
-        super().__init__(render_fix(model, field, reason, self.edits))
+        self.alternatives: tuple[tuple[Edit, ...], ...] = _ways(edits, alternatives)
+        """Each way to fix it, in the order to apply it; empty when none can
+        be named."""
+        super().__init__(
+            render_fix(model, field, reason, alternatives=self.alternatives)
+        )
+
+    @property
+    def edits(self) -> tuple[Edit, ...]:
+        """The fix when there is one way to fix it, else the first way."""
+        return self.alternatives[0] if self.alternatives else ()
 
     def __reduce__(self) -> tuple:
-        return type(self), (self.model, self.field, self.reason, self.edits)
+        return _rebuilt, (self.model, self.field, self.reason, self.alternatives)
+
+
+def _rebuilt(
+    model: str, field: str, reason: str, alternatives: tuple[tuple[Edit, ...], ...]
+) -> DeclarationRefusal:
+    """A refusal rebuilt from its fields, for pickling."""
+    return DeclarationRefusal(model, field, reason, alternatives=alternatives)

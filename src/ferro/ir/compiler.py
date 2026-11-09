@@ -275,7 +275,7 @@ def _table_check_entries(
     return entries
 
 
-def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
+def _fk_target_column(model_name: str, spec: ColumnSpec, to_table: str) -> str:
     """The primary-key column a foreign key into ``to_table`` references.
 
     Read from the registered model that owns the table, the source the shadow
@@ -284,7 +284,8 @@ def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
     recompiles the envelope.
 
     Raises:
-        TypeError: The target is compiled and declares no primary key.
+        DeclarationRefusal: The target is compiled and declares no primary
+            key; the refusal is the one relation resolution raises for it.
     """
     for model in REGISTRY.models().values():
         if getattr(model, "__ferro_table__", None) == to_table:
@@ -293,10 +294,11 @@ def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
             # (a self-reference compiles before them); only a published,
             # keyless target is an error.
             if pk is None and getattr(model, "__ferro_columns__", None):
-                raise TypeError(
-                    f"{model_name}.{column} references {model.__name__}, which "
-                    "declares no primary key. Declare a primary_key=True field "
-                    f"on {model.__name__}."
+                # Imported here: the relations package imports this module.
+                from ..relations import keyless_target_refusal
+
+                raise keyless_target_refusal(
+                    model_name.rsplit(".", 1)[-1], spec.name, model, spec
                 )
             return pk or "id"
     return "id"
@@ -386,7 +388,7 @@ def compile_schema_ir_payload(
                 "column": spec.name,
                 "to_table": spec.foreign_key.to_table,
                 "to_column": _fk_target_column(
-                    model_name, spec.name, spec.foreign_key.to_table
+                    model_name, spec, spec.foreign_key.to_table
                 ),
                 "on_delete": spec.foreign_key.on_delete,
                 "name": _fk_name(
