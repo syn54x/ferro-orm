@@ -229,11 +229,11 @@ def normalize_save_only(only: object) -> set[str]:
     return normalize_save_columns(only, param="only")
 
 
-def _relation_fk_columns(model_cls: type) -> dict[str, str | None]:
-    """Relation field name → foreign-key column, if this table stores one.
+def relation_key_columns(model_cls: type) -> dict[str, str | None]:
+    """Relation field name → the foreign-key column of this table it reads.
 
     Every relation is declared in ``__ferro_relations__``; only a forward
-    one reads a column of this table.
+    one reads a column of this table, and every other maps to ``None``.
     """
     return {
         name: getattr(relation, "fk_column", None)
@@ -249,7 +249,7 @@ def _validate_save_column_names(
     """Reject relation / unknown names. Returns ``__ferro_columns__``."""
     columns = getattr(model_cls, "__ferro_columns__", {}) or {}
     legal = ", ".join(sorted(columns))
-    relations = _relation_fk_columns(model_cls)
+    relations = relation_key_columns(model_cls)
     for name in sorted(names):
         if name in relations:
             fk_column = relations[name]
