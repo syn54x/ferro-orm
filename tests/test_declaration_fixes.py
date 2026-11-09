@@ -180,6 +180,15 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
             f'team_id: {key} = Field(foreign_key="{t}"{stored})',
             False,
         ),
+        "key declaring nullable=": (
+            f'team_id: {key} | None = Field(foreign_key="{t}", nullable=False{stored})',
+            True,
+        ),
+        "SET NULL key declaring nullable=False": (
+            f"team_id: {key} | None = Field("
+            f'foreign_key="{t}", on_delete="SET NULL", nullable=False{stored})',
+            True,
+        ),
     }
     if storage == "int":
         columns["generated key"] = (
@@ -206,7 +215,7 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
         cases[f"{name} to {t}, read by a forward relation"] = _case(
             "key",
             "team_id",
-            local=local and name != "required SET NULL key",
+            local=local and "SET NULL" not in name,
             no_pk=no_pk,
             **_merge(team, {"Player": [line, reader]}),
         )

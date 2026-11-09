@@ -433,6 +433,38 @@ def key_column_line(
     return field_line(column, written, options, None if nullable else PydanticUndefined)
 
 
+def _nullability_refusal(
+    model_cls: Any,
+    name: str,
+    meta: FerroField,
+    target: Any,
+    nullable: bool,
+    reason: str,
+) -> DeclarationRefusal:
+    """The refusal whose fix writes the key column ``name`` with ``nullable``
+    in its annotation, and every forward relation reading it to agree."""
+    model = model_cls.__name__
+    line = key_column_line(model_cls, name, target, nullable=nullable, meta=meta)
+    nullable = nullable or meta.on_delete == "SET NULL"
+    readers = [
+        Edit(
+            model,
+            field,
+            "replace",
+            (
+                relation_line(
+                    field, "Forward", target.__name__, nullable, name, relation.bound
+                ),
+            ),
+        )
+        for _, field, relation in _relations_over(model_cls, name)
+        if isinstance(relation, ForwardRelation) and relation.nullable != nullable
+    ]
+    return DeclarationRefusal(
+        model, name, reason, [Edit(model, name, "replace", (line,)), *readers]
+    )
+
+
 def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -> None:
     """Refuse a foreign-key column its target key does not back.
 
@@ -443,7 +475,8 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
         target: The model the column points at.
 
     Raises:
-        TypeError: The column is the primary key or generated; it takes
+        TypeError: The column is the primary key or generated; it declares
+            `nullable=`, which its annotation decides; it takes
             `on_delete="SET NULL"` without allowing `None`; its type, with
             `| None` set aside and a `NewType` read as its supertype, is not
             the target key's type; or it stores differently from the target
@@ -501,28 +534,24 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
             "a foreign-key column cannot be generated",
             [Edit(model, name, "replace", (line,))],
         )
-    if meta.on_delete == "SET NULL" and not nullable:
-        line = key_column_line(model_cls, name, target, nullable=True, meta=meta)
-        # A forward relation reading the column becomes nullable with it.
-        readers = [
-            Edit(
-                model,
-                field,
-                "replace",
-                (
-                    relation_line(
-                        field, "Forward", target.__name__, True, name, relation.bound
-                    ),
-                ),
-            )
-            for _, field, relation in _relations_over(model_cls, name)
-            if isinstance(relation, ForwardRelation) and not relation.nullable
-        ]
-        raise DeclarationRefusal(
-            model,
+    if isinstance(meta.nullable, bool):
+        raise _nullability_refusal(
+            model_cls,
             name,
+            meta,
+            target,
+            meta.nullable,
+            "a foreign-key column is nullable when its annotation allows None, "
+            "so it takes no nullable=",
+        )
+    if meta.on_delete == "SET NULL" and not nullable:
+        raise _nullability_refusal(
+            model_cls,
+            name,
+            meta,
+            target,
+            True,
             'on_delete="SET NULL" needs a nullable column',
-            [Edit(model, name, "replace", (line,)), *readers],
         )
     if _scalar(info.annotation) != _scalar(key_type):
         key_text = annotation_text(key_type)
@@ -1458,7 +1487,9 @@ def resolve_relationships():
     Ferro calls this on `connect()` and before creating tables. Each
     foreign-key column and relation is checked against its target, each
     many-to-many registers its join table, and the affected models are
-    compiled and registered again.
+    compiled and registered again. A refused resolution leaves the registry
+    as it was, every declaration still queued, so the next call checks each
+    one again.
 
     Raises:
         RuntimeError: A relation names a model that is not defined, a
@@ -1467,8 +1498,17 @@ def resolve_relationships():
         TypeError: A model's declaration is invalid once its relations are
             known.
     """
-    # Drain (copy-and-clear) so that we don't process the same relations
-    # multiple times if resolve_relationships is called again (e.g. in tests)
+    before = REGISTRY.snapshot()
+    try:
+        _resolve_pending()
+    except BaseException:
+        REGISTRY.restore(before)
+        raise
+
+
+def _resolve_pending() -> None:
+    """Resolve every queued declaration, then compile the models it touches."""
+    # Drained, so a later call resolves only what is declared since.
     to_process = REGISTRY.drain_pending_relations()
 
     recompile_targets: set[str] = set()
