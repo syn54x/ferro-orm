@@ -8,12 +8,18 @@ pinned here; its fences run in ``tests/test_docs_examples.py``.
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import re
 from pathlib import Path
 
 import pytest
 
+import ferro
+from ferro import reset_engine
 from tests._docs_sql import captured
+from tests.test_migrate_new import write_config, write_models
+from tests.test_migrate_up import new
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "docs" / "pages" / "upgrading.md"
@@ -174,3 +180,160 @@ def test_the_example_pair_runs_and_declares_one_schema() -> None:
     annotated = captured("upgrade_foreign_keys_annotated.py")
     assert assignment.schemas
     assert annotated.schemas == assignment.schemas
+
+
+# -- a class whose options are written as Annotated[..., FerroField(...)] ----------
+
+FERRO_FIELD_KEY = "account_id: Annotated[int, FerroField(foreign_key=Account)]"
+FERRO_FIELD_RULE = (
+    "In a class that writes its options as `Annotated[..., FerroField(...)]`"
+)
+
+
+def test_the_prompt_and_the_table_name_the_ferro_field_spelling() -> None:
+    section = _section()
+    prompt = " ".join(_prompt(section).split())
+    assert FERRO_FIELD_RULE in prompt
+    assert f"`{FERRO_FIELD_KEY}`" in prompt
+    assert "`on_delete=` inside the same `FerroField`" in prompt
+    [sentence] = [
+        line for line in section.splitlines() if line.startswith(FERRO_FIELD_RULE)
+    ]
+    assert f"`{FERRO_FIELD_KEY}`" in sentence
+    assert "`on_delete=` inside the same `FerroField`" in sentence
+    assert section.index("| `await note.account` |") < section.index(sentence)
+    assert section.index(sentence) < section.index("The `through=` name")
+
+
+_FERRO_FIELD_IMPORTS = "from ferro import Field, Forward, Reverse\n"
+
+# The old form and its conversion by the rule above, one pair per `on_delete`.
+_FERRO_FIELD_MODELS = {
+    "CASCADE": (
+        """
+class Account(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: Annotated[str, FerroField(unique=True)]
+    items: Relation[list["Item"]] = BackRef()
+
+
+class Item(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: Annotated[str, FerroField(index=True)]
+    account: Annotated[Account, ForeignKey(related_name="items")]
+""",
+        """
+class Account(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: Annotated[str, FerroField(unique=True)]
+    items: Relation[list["Item"]] = Reverse("account_id")
+
+
+class Item(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: Annotated[str, FerroField(index=True)]
+    account_id: Annotated[int, FerroField(foreign_key=Account)]
+    account: Relation[Account] = Forward("account_id")
+""",
+    ),
+    "SET NULL": (
+        """
+class Account(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: Annotated[str, FerroField(unique=True)]
+    items: Relation[list["Item"]] = BackRef()
+
+
+class Item(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: Annotated[str, FerroField(index=True)]
+    account: Annotated[
+        Account | None, ForeignKey(related_name="items", on_delete="SET NULL")
+    ] = None
+""",
+        """
+class Account(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: Annotated[str, FerroField(unique=True)]
+    items: Relation[list["Item"]] = Reverse("account_id")
+
+
+class Item(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: Annotated[str, FerroField(index=True)]
+    account_id: Annotated[
+        int | None, FerroField(foreign_key=Account, on_delete="SET NULL")
+    ] = None
+    account: Relation[Account | None] = Forward("account_id")
+""",
+    ),
+}
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.delenv("FERRO_CONFIG", raising=False)
+    root = tmp_path / "proj"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.syspath_prepend(str(root))
+    return root
+
+
+@pytest.fixture
+def pkg(tmp_path: Path) -> str:
+    return "ferro_u903_" + tmp_path.name.replace("-", "_").lower()
+
+
+def _ddl(project: Path, pkg: str, body: str) -> list[str]:
+    """What `create_tables()` sends SQLite for `body`, written as a models module."""
+    write_models(project, pkg, body)
+    importlib.import_module(f"{pkg}.models")
+
+    async def run() -> list[str]:
+        await ferro.connect(f"sqlite:{project / 'ddl.db'}?mode=rwc")
+        report = await ferro.create_tables()
+        return [statement.sql for statement in report.statements]
+
+    try:
+        return asyncio.run(run())
+    finally:
+        (project / "ddl.db").unlink(missing_ok=True)
+        reset_engine()
+
+
+@pytest.mark.usefixtures("isolated_imports", "clean_registry")
+@pytest.mark.parametrize("on_delete", ["CASCADE", "SET NULL"])
+def test_a_ferro_field_class_converts_to_the_same_ddl(
+    on_delete: str, project: Path, pkg: str
+) -> None:
+    old, converted = _FERRO_FIELD_MODELS[on_delete]
+
+    before = _ddl(project, pkg, old)
+    after = _ddl(project, pkg, _FERRO_FIELD_IMPORTS + converted)
+
+    assert after == before
+    [table] = [
+        sql for sql in after if sql.startswith('CREATE TABLE IF NOT EXISTS "item"')
+    ]
+    assert f"ON DELETE {on_delete}" in table
+    assert '"fk_item_account_id_account"' in table
+
+
+@pytest.mark.usefixtures("isolated_imports", "clean_registry")
+@pytest.mark.parametrize("on_delete", ["CASCADE", "SET NULL"])
+def test_a_ferro_field_class_converts_and_migrate_new_plans_nothing(
+    on_delete: str, project: Path, pkg: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old, converted = _FERRO_FIELD_MODELS[on_delete]
+    write_config(project, pkg)
+    write_models(project, pkg, old)
+    new("record")
+    recorded = sorted(path.name for path in (project / "migrations").iterdir())
+    capsys.readouterr()
+
+    write_models(project, pkg, _FERRO_FIELD_IMPORTS + converted)
+    new("convert")
+
+    assert "no schema change: nothing written" in capsys.readouterr().out
+    assert sorted(path.name for path in (project / "migrations").iterdir()) == recorded

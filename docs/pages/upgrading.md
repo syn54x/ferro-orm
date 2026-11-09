@@ -92,6 +92,8 @@ Each old declaration has one replacement. The rows use the models of this sectio
 | `Field(back_ref=True)`, `Field(many_to_many=True, ...)` | The `Reverse` or `ManyToMany` assignment; a `Field` is always a column |
 | `await note.account` | `note.account` after `include()`, or `await note.account.load()` |
 
+In a class that writes its options as `Annotated[..., FerroField(...)]`, write the key the same way, `account_id: Annotated[int, FerroField(foreign_key=Account)]`, with `on_delete=` inside the same `FerroField`; it declares the same column as `Field(foreign_key=Account)` does.
+
 The `through=` name is the one Ferro derived before, the owning table and the attribute joined by `_`, so the join table keeps its name and the conversion plans nothing for it. Ferro still creates and owns that table.
 
 ### The converted models
@@ -350,8 +352,11 @@ A key column that gained a `db_type` is the one change that plans a statement, i
     Rules for every file you touch:
     - Keep the file's declaration style for the new key column: assignment
       (`account_id: int = Field(foreign_key=Account)`) or Annotated
-      (`account_id: Annotated[int, Field(foreign_key=Account)]`). Relations
-      are always assignments.
+      (`account_id: Annotated[int, Field(foreign_key=Account)]`). In a class
+      that writes its options as `Annotated[..., FerroField(...)]`, write the
+      key the same way, `account_id: Annotated[int, FerroField(foreign_key=Account)]`,
+      with `on_delete=` inside the same `FerroField`; it declares the same
+      column. Relations are always assignments.
     - Give the key column the target's primary-key type. Add `| None` (and
       `default=None`) only when the old relation was optional.
     - Name each query lambda's parameter after its model in lowercase singular:
