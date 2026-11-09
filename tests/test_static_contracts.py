@@ -256,6 +256,85 @@ def test_relation_assignment_misuse_fails_the_type_checker():
         assert f"bad_relation_assignment.py:{line}:" in result.stdout
 
 
+def _diagnostics(stdout: str, rule: str, line: int) -> list[str]:
+    return [
+        diagnostic
+        for diagnostic in stdout.splitlines()
+        if f"error[{rule}]" in diagnostic
+        and f"bad_constructor_keys.py:{line}:" in diagnostic
+    ]
+
+
+def test_constructor_keys_fail_the_type_checker_as_the_runtime_refuses_them():
+    """A model's constructor parameters, to `ty`, are exactly the keywords
+    `Model.__init__` accepts: a required foreign-key column is a
+    `missing-argument` whatever a relation keyword carries, and a relation,
+    a many-to-many, a generated column and a retired field are each an
+    `unknown-argument` (#894)."""
+    result = _run_ty(FIXTURES / "bad_constructor_keys.py")
+    assert result.returncode != 0, "bad_constructor_keys.py must fail ty"
+    expected = {
+        # line: (rule, the name it reports)
+        49: [("missing-argument", "`team_id`"), ("unknown-argument", "`team`")],
+        53: [("missing-argument", "`team_id`")],
+        57: [("unknown-argument", "`players`")],
+        61: [("unknown-argument", "`tags`")],
+        65: [("unknown-argument", "`total`")],
+        69: [("unknown-argument", "`bio`")],
+    }
+    for line, diagnostics in expected.items():
+        for rule, name in diagnostics:
+            found = _diagnostics(result.stdout, rule, line)
+            assert len(found) == 1 and name in found[0], (
+                f"line {line}: expected one {rule} naming {name}:\n{result.stdout}"
+            )
+    total = sum(len(diagnostics) for diagnostics in expected.values())
+    assert f"Found {total} diagnostics" in result.stdout, result.stdout
+
+
+def test_constructions_the_runtime_accepts_pass_the_type_checker():
+    """Leaving out a generated column, a retired field, a relation, a
+    defaulted field and a `PrivateAttr` while passing every required
+    `Field(...)` column type-checks cleanly (#894)."""
+    result = _run_ty(FIXTURES / "good_constructor_keys.py")
+    assert result.returncode == 0, (
+        f"constructions must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("declare", ["Forward", "Reverse"])
+def test_a_relation_takes_no_init_keyword_at_runtime(declare):
+    """`init: Literal[False]` is in the relation's signature for the type
+    checker only; at runtime the keyword stays refused (#894)."""
+    import ferro
+
+    with pytest.raises(TypeError, match="init"):
+        getattr(ferro, declare)("team_id", init=False)
+
+
+def test_model_metaclass_names_ferro_field_specifiers():
+    """`ModelMetaclass` carries its own `dataclass_transform`, naming
+    Pydantic's three field specifiers and Ferro's four (#894)."""
+    from pydantic.fields import Field as PydanticField
+    from pydantic.fields import PrivateAttr
+    from pydantic._internal._model_construction import NoInitField
+
+    import ferro
+    from ferro.metaclass import ModelMetaclass
+
+    transform = ModelMetaclass.__dataclass_transform__
+    assert transform["kw_only_default"] is True
+    assert transform["field_specifiers"] == (
+        PydanticField,
+        PrivateAttr,
+        NoInitField,
+        ferro.Field,
+        ferro.Forward,
+        ferro.Reverse,
+        ferro.ManyToMany,
+    )
+
+
 def test_projected_chains_pass_the_type_checker():
     """Every selector form — tuple, single-field, dict-aliased, traversed at
     depth (#293) — yields Rows[Row] / Row | None and composes with the join
