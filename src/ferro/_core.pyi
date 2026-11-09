@@ -147,8 +147,10 @@ def _plan_revision(
     it and ``irreversible`` the reason a ``raise`` replaces it. ``reports``
     are the planner's one-off reports the upgrade writes as comments, in
     ``_plan_from_ir``'s report shape. When no revision is written, the lists
-    are empty and ``refusal`` is ``{"kind", "text"}``, ``text`` the sentence
-    after ``ferro: autogenerate refused: ``. A plan that cannot render
+    are empty and ``refusal`` is ``{"kind", "text", "op"}``, ``text`` the
+    sentence after ``ferro: autogenerate refused: `` and ``op`` the planner op
+    it refuses, in ``_plan_from_ir``'s op shape (``None`` for a refusal that
+    names none). A plan that cannot render
     raises ``ValueError``."""
     ...
 
