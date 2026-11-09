@@ -6,9 +6,9 @@ Three mistakes compile and run but teach the wrong thing:
   parameter. The docs name it after the model, ``lambda post: post.published``.
 - A ``try`` whose ``except`` asserts on the error but has no ``else`` that
   raises. When the error stops happening, the block still passes.
-- A retired relation term: ``ForeignKey(``, ``BackRef(``, ``related_name=``,
-  "shadow column" or "populated relation". The upgrading guide and the
-  changelog keep them as dated records.
+- A retired relation term, one of the five in ``_RETIRED_TERMS``, such as
+  ``BackRef(``. The upgrading guide and the changelog keep them as dated
+  records.
 
 The checks read Python files (with the fences in their docstrings) and the
 Python fences of Markdown pages; the retired-terms check also reads Markdown

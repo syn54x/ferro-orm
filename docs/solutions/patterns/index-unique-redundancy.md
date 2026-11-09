@@ -40,9 +40,9 @@ class Profile(Model):
 Ferro does not strip the redundant index for you on a single column. That
 rule belonged to the `ForeignKey` annotation alone, never to `Field` or
 `FerroField`, and it left with that annotation (#886). Converting an old
-`ForeignKey(unique=True, index=True)` therefore drops `index=True` by hand, or
-the converted schema gains an `idx_*` the old one did not have
-(`tests/test_upgrading_explicit_foreign_keys.py`). Whether `Field` should
+`ForeignKey` declared with `unique=True, index=True` therefore drops
+`index=True` by hand, or the converted schema gains an `idx_*` the old one did
+not have (`tests/test_upgrading_explicit_foreign_keys.py`). Whether `Field` should
 strip a redundant index on every column is a separate decision, not made yet.
 
 Composite indexes keep their own overlap rule: a `__ferro_composite_indexes__`
