@@ -15,9 +15,13 @@ TypeError: Player.team_id: on_delete="SET NULL" needs a nullable column. Fix it 
 
 When Ferro refuses a model declaration, at class definition or when relations resolve, it computes the fix as a value: a tuple of `Edit`s, each naming a model, a field, an action (`replace`, `add` or `remove`) and the lines to write. The refusal is a `DeclarationRefusal`, a `TypeError` that carries those edits, and its message is `render_fix` of them. The test that proves a fix applies the same edits to the refused source and loads the result. The text a user reads and the fix the test ran are one value, so they cannot drift apart.
 
-Whether a fix prints as a `Write:` line or as numbered steps follows from the edits, never from the refusal path: `Write:` only when every edit replaces the refused declaration. Without the `Forward`, the refusal above has one edit and prints `Write: team_id: int | None = ...`; with it, two declarations change and it prints steps. A refusal that cannot name a fix, because the reader must choose between models or nothing names the model at all, carries no edits and says what to do in words.
+Whether a fix prints as a `Write:` line or as numbered steps follows from the edits, never from the refusal path: `Write:` only when every edit replaces the refused declaration. Without the `Forward`, the refusal above has one edit and prints `Write: team_id: int | None = ...`; with it, two declarations change and it prints steps.
 
-Edits are computed from the models in the registry. A fix that adds or changes a primary key takes the type and storage of the column that needs it, and every known foreign-key column the new key would not back gets an edit of its own, so following the fix loads every model.
+Some refusals can be fixed more than one way: a bare `players: Relation = Reverse("team_id")` that both `Player` and `Coach` point back to reads either. Such a refusal carries `alternatives`, one tuple of edits per way, and prints `Write: <line> or <line>` when every way is local. Only a refusal that can name no fix at all, because nothing names the model it reads, carries none and says what to do in words.
+
+Edits are computed from the models in the registry. A fix that adds or changes a primary key takes the type and storage of the column that needs it, and every known foreign-key column the new key would not back gets an edit of its own, so following the fix loads every model. A fix that names a join table picks one no model, join table or other many-to-many holds, and resolution refuses a second many-to-many that declares a join table another one already does, since the two would share their rows.
+
+A check that runs at two times raises one refusal. A key column whose target declares no primary key is met by the schema compile when the target is written as a class, and by relation resolution when it is a name; both raise `keyless_target_refusal`.
 
 Decided in Epic #874 (2026-11-08, Taylor), built in #898.
 
@@ -31,4 +35,5 @@ Consequences:
 - `recipe()` and every hand-formatted `Write:` string are gone; `src/ferro/relations/fixes.py` holds the only renderer.
 - A fix that adds a column on its own model, such as the key a `Forward` over a missing column needs, now prints a numbered step instead of `Write:`, since it adds a declaration rather than replacing the refused one.
 - A refusal that offered alternatives (`Write: A or B`) names the choice in words and carries no edits.
-- `tests/test_declaration_fixes.py` holds the sweep. A new refusal path adds a case there; the solutions page `docs/solutions/patterns/refusal-fixes.md` has the recipe.
+- `tests/test_declaration_fixes.py` holds the sweep, which applies each way to fix each refusal and loads the models, with the target written as a class and as a name. `test_the_sweep_reaches_every_refusal` compares the raise sites the sweep meets with every `raise` of a `DeclarationRefusal` in `src/ferro`, so a new refusal without a sweep case fails the suite. The solutions page `docs/solutions/patterns/refusal-fixes.md` has the recipe.
+- A refusal raised when a class is defined cannot see models defined after it. Its fix is complete for the models that exist; a later model whose key no longer fits the new primary key is refused in turn, with its own fix.
