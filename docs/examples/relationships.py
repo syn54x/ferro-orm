@@ -80,22 +80,13 @@ async def main() -> None:
             ["Ferris"],
         )
 
-        # --8<-- [start:one-to-many]
-        corro = await Player.create(name="Corro", team_id=rustaceans.id)
-        gophers = await Team.create(name="Gophers")
-        gordon = await Player.create(name="Gordon", team_id=gophers.id)
-
-        roster = await rustaceans.players.order_by(lambda player: player.name).all()
-        assert [player.name for player in roster] == ["Corro", "Ferris"]
-        # --8<-- [end:one-to-many]
-
         # --8<-- [start:foreign-key-column]
         assert ferris.team_id == rustaceans.id  # read without a query
 
         on_rustaceans = await Player.where(
             lambda player: player.team_id == rustaceans.id
         ).count()
-        assert on_rustaceans == 2
+        assert on_rustaceans == 1
         # --8<-- [end:foreign-key-column]
 
         # --8<-- [start:player-ddl]
@@ -109,6 +100,15 @@ async def main() -> None:
         assert 'CONSTRAINT "fk_player_mentor_id_player"' in player_ddl
         assert 'CONSTRAINT "fk_player_team_id_team"' in player_ddl
         assert '"idx_player_team_id" ON "player" ("team_id")' in player_ddl
+
+        # --8<-- [start:one-to-many]
+        corro = await Player.create(name="Corro", team_id=rustaceans.id)
+        gophers = await Team.create(name="Gophers")
+        gordon = await Player.create(name="Gordon", team_id=gophers.id)
+
+        roster = await rustaceans.players.order_by(lambda player: player.name).all()
+        assert [player.name for player in roster] == ["Corro", "Ferris"]
+        # --8<-- [end:one-to-many]
 
         # --8<-- [start:loaded]
         players = (
@@ -232,8 +232,10 @@ async def main() -> None:
         for value in wrong:
             try:
                 ferris.team = value
-            except (TypeError, ValueError) as error:
-                print(f"{type(error).__name__}: {error}")
+            except TypeError as error:
+                print(f"TypeError: {error}")
+            except ValueError as error:
+                print(f"ValueError: {error}")
         # --8<-- [end:assign]
         assert ferris.team_id == rustaceans.id
 
