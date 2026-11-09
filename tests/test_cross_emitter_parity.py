@@ -903,14 +903,14 @@ class Finding:
 FINDINGS: dict[str, Finding] = {
     "C2-drop-a-foreign-key-column": Finding(
         reason=(
-            "pin (g): on SQLite the planner renders a plain DROP COLUMN for a "
+            "pins (f) and (g): on SQLite the planner renders a plain DROP COLUMN for a "
             "foreign-key column, which SQLite refuses at execution (the column "
             "is in the table's FOREIGN KEY definition); the pass fails naming "
             "`ferro migrate new` instead of the renderer refusing the op "
             "(SqliteInPlace) before anything runs"
         ),
         raises=OperationalError,
-        pins=frozenset({"g"}),
+        pins=frozenset({"f", "g"}),
         dialects=frozenset({"sqlite"}),
     ),
 }
@@ -2085,23 +2085,15 @@ def _the_pass_declines_the_rebuild(
     """The reconciliation pass, run for real on the second of ``databases``
     (the first stays as the refused revision left it), does with the op the
     bridge refused what the planner rendered for it: no statement (a decline,
-    reported by the plan's reports, ADR-0014), the statement SQLite refuses
-    (a refusal that leaves the database as the bridge did), or, for ADR-0034's
-    SQLite exception, the column added keeping its literal ``DEFAULT``. Every
-    other op it runs as the plan renders it."""
+    reported by the plan's reports, ADR-0014), or, for ADR-0034's SQLite
+    exception, the column added keeping its literal ``DEFAULT``. Every other
+    op it runs as the plan renders it."""
     plan = json.loads(
         _core._plan_from_ir(live, json.dumps(after), backend, DESTRUCTIVE, True, facts)
     )
     rendered = next(op for op in plan["operations"] if _bare_op(op) == refusal["op"])
-    untouched, run = databases
-    try:
-        report = asyncio.run(_run_the_pass(run.url))
-    except OperationalError:
-        # SQLite refused the op's statement, and the pass's unit rolled back:
-        # neither emitter changed the database.
-        assert rendered["statements"], rendered
-        assert live_schema(run.url, after) == live_schema(untouched.url, after)
-        return
+    run = databases[1]
+    report = asyncio.run(_run_the_pass(run.url))
     executed, planned = _ran_and_planned(report, plan["operations"], facts)
     assert executed == planned
     warned = Counter(
@@ -2167,10 +2159,9 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
       verdict is a rebuild. The pass, run for real, executes exactly the
       plan's statements and warns every report the plan carries (by kind
       and subject), so it runs nothing for an op that renders no statement;
-      an op that does render one is either ADR-0034's SQLite exception
+      an op that does render one is ADR-0034's SQLite exception
       (``KEPT_DEFAULTS``: the pass adds the column keeping its literal
-      ``DEFAULT``) or a statement SQLite refuses, after which the pass's
-      database is the bridge's;
+      ``DEFAULT``);
     - a ``sqlite_required_column`` refusal names an op that demands values
       of existing rows, and the pass refuses the same plan before it runs
       anything."""
