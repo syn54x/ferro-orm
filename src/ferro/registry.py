@@ -213,16 +213,33 @@ class Registry:
         derived from ``cls`` here rather than caller-supplied: the registry
         key is a pure function of the model, so every emitter (the Rust
         runtime registry, the raw operations) keys the same model by the same
-        name. Idempotent by construction.
+        name. Idempotent by construction. A new class under an identity
+        already registered (a model redefined in the same process) releases
+        the join tables the old one declared, which its relations declare
+        again when they resolve.
 
         Args:
             cls: The model class.
         """
-        self._models[cls.__ferro_identity__] = cls
+        identity = cls.__ferro_identity__
+        previous = self._models.get(identity)
+        if previous is not None and previous is not cls:
+            self._release_join_tables(identity)
+        self._models[identity] = cls
         self._registration_generation += 1
 
+    def _release_join_tables(self, identity: str) -> None:
+        """Drop the join tables the model ``identity`` declares, and their envelopes."""
+        for name, bundle in list(self._join_tables.items()):
+            declared_by = (
+                bundle.get("declared_by") if isinstance(bundle, dict) else None
+            )
+            if declared_by is not None and declared_by[0] == identity:
+                del self._join_tables[name]
+                self.evict_envelope(name)
+
     def deregister(self, name: str) -> None:
-        """Evict one model from every per-model store (registry + envelopes).
+        """Evict one model from every per-model store: registry, envelopes, join tables.
 
         Takes a ``name`` (the canonical identity) rather than a class, unlike
         `register` — teardown paths iterate registry keys and hold the
@@ -234,6 +251,7 @@ class Registry:
         removed = name in self._models
         self._models.pop(name, None)
         self.evict_envelope(name)
+        self._release_join_tables(name)
         if removed:
             self._registration_generation += 1
 
@@ -363,10 +381,30 @@ class Registry:
     def add_join_table(self, name: str, bundle: Any) -> None:
         """Record one generated join table's bundle.
 
+        A join table belongs to the one relation that declares it, named by
+        the bundle's ``declared_by`` (model identity, field). Relation
+        resolution refuses a second relation naming the table before it gets
+        here, so a bundle from another relation is an internal error, never
+        a silent overwrite that would let two relations share rows.
+
         Args:
             name: The join table's name.
             bundle: What the schema compiler needs to build its envelope.
+
+        Raises:
+            RuntimeError: Another relation already declares the table.
         """
+        held = self._join_tables.get(name)
+        if (
+            isinstance(held, dict)
+            and isinstance(bundle, dict)
+            and held.get("declared_by") != bundle.get("declared_by")
+        ):
+            raise RuntimeError(
+                f"ferro: join table {name!r} is declared by {held.get('declared_by')} "
+                f"and {bundle.get('declared_by')}; relation resolution should "
+                "have refused the second"
+            )
         self._join_tables[name] = bundle
 
     def join_tables(self) -> dict[str, Any]:

@@ -177,7 +177,10 @@ def test_a_resolved_target_without_a_primary_key_is_refused():
     class Ledger(Model):
         name: str
 
-    with pytest.raises(TypeError, match="primary_key=True field on Ledger"):
+    with pytest.raises(
+        TypeError,
+        match=r"Ledger declares no primary key .* on Ledger, add `id: int \| None",
+    ):
 
         class Line(Model):
             id: int | None = Field(default=None, primary_key=True)

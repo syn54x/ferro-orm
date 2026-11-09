@@ -63,11 +63,11 @@ from .relations import (
     check_declared_foreign_keys,
     is_table_name,
     key_column_line,
-    recipe,
     relation_line,
     relation_refusal,
     written_type,
 )
+from .relations.fixes import DeclarationRefusal, Edit
 from .relations.descriptors import ForwardDescriptor
 
 if TYPE_CHECKING:
@@ -489,17 +489,28 @@ def _declared_relation(
     is_list, target, nullable = view
     if spelling == "Forward" and is_list:
         target_text, nullable = declared or (annotation_text(target), False)
-        raise TypeError(
-            f"{model}.{field_name}: a forward relation reads one row, so it is "
-            "annotated Relation[...] of its target. Write: "
-            + relation_line(field_name, "Forward", target_text, nullable, column, bound)
+        raise relation_refusal(
+            model,
+            field_name,
+            "a forward relation reads one row, so it is annotated Relation[...] "
+            "of its target",
+            "Forward",
+            column,
+            target_text,
+            nullable,
+            bound,
         )
     if spelling == "Reverse" and not is_list:
-        target_text = annotation_text(target)
-        raise TypeError(
-            f"{model}.{field_name}: a reverse relation reads every row pointing "
-            f"back, so it is annotated Relation[list[...]]. Write: "
-            + relation_line(field_name, "Reverse", target_text, False, column, bound)
+        raise relation_refusal(
+            model,
+            field_name,
+            "a reverse relation reads every row pointing back, so it is "
+            "annotated Relation[list[...]]",
+            "Reverse",
+            column,
+            annotation_text(target),
+            False,
+            bound,
         )
     if spelling == "Forward":
         return ForwardRelation(column, target, nullable, bound=bound)
@@ -605,9 +616,11 @@ def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
                 field_options(meta, on_delete=None),
                 info.default,
             )
-            raise TypeError(
-                f"{cls.__name__}.{name}: on_delete is a foreign-key option and "
-                f"this column has no foreign_key. Write: {line}"
+            raise DeclarationRefusal(
+                cls.__name__,
+                name,
+                "on_delete is a foreign-key option and this column has no foreign_key",
+                [Edit(cls.__name__, name, "replace", (line,))],
             )
 
 
@@ -802,11 +815,15 @@ def _foreign_key_text(declared: ForeignKey) -> str:
     return f"ForeignKey({', '.join(options)})"
 
 
-def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
+def _none_refusal(model_cls: type, name: str, spec: Any) -> DeclarationRefusal:
     """The refusal of `None` on a relation over a required key column, with the lines to write."""
     model = model_cls.__name__
     target = spec.target.__name__
     declared = model_cls.__ferro_relations__[name]
+    reason = (
+        f"{spec.fk_column} is not nullable, so the relation cannot be None. "
+        f"Assign {_a(target)}, or "
+    )
     if isinstance(declared, ForwardRelation):
         info = model_cls.model_fields[spec.fk_column]
         column = key_column_line(
@@ -820,29 +837,25 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
         relation = relation_line(
             name, "Forward", target, True, spec.fk_column, declared.bound
         )
-        # Two declarations change, so the fix is a recipe, not a Write line.
-        return recipe(
+        return DeclarationRefusal(
             model,
             name,
-            f"{spec.fk_column} is not nullable, so the relation cannot be None. "
-            f"Assign {_a(target)}, or make both nullable",
+            reason + "make both nullable",
             [
-                f"add | None to {model}.{spec.fk_column}: {column}",
-                f"add | None to {model}.{name}: {relation}",
+                Edit(model, spec.fk_column, "replace", (column,)),
+                Edit(model, name, "replace", (relation,)),
             ],
         )
-    else:
-        # The old form has no key column to edit: the relation's own
-        # annotation decides whether the column allows NULL.
-        written = declared.relation_annotation
-        shown = f'"{target}"' if isinstance(written, (str, ForwardRef)) else target
-        fix = (
-            f"add | None to {name}'s annotation. Write: {name}: "
-            f"Annotated[{shown}, {_foreign_key_text(declared)}] | None = None"
-        )
-    return TypeError(
-        f"{model}.{name}: {spec.fk_column} is not nullable, so the relation "
-        f"cannot be None. Assign {_a(target)}, or {fix}"
+    # The old form has no key column to edit: the relation's own
+    # annotation decides whether the column allows NULL.
+    written = declared.relation_annotation
+    shown = f'"{target}"' if isinstance(written, (str, ForwardRef)) else target
+    line = f"{name}: Annotated[{shown}, {_foreign_key_text(declared)}] | None = None"
+    return DeclarationRefusal(
+        model,
+        name,
+        reason + f"add | None to {name}'s annotation",
+        [Edit(model, name, "replace", (line,))],
     )
 
 

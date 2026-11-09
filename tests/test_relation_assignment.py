@@ -35,6 +35,7 @@ from ferro import (
     reset_engine,
 )
 from ferro.registry import REGISTRY
+from ferro.relations.fixes import DeclarationRefusal
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -252,10 +253,10 @@ async def test_none_on_a_required_relation_is_refused(db_url):
         assert str(refused.value) == (
             "Player.team: team_id is not nullable, so the relation cannot be "
             "None. Assign a Team, or make both nullable. Fix it by hand: "
-            "(1) add | None to Player.team_id: "
-            "team_id: int | None = Field(default=None, foreign_key=Team); "
-            "(2) add | None to Player.team: "
-            'team: Relation[Team | None] = Forward("team_id")'
+            "(1) on Player, replace team_id with "
+            "`team_id: int | None = Field(default=None, foreign_key=Team)`; "
+            "(2) on Player, replace team with "
+            '`team: Relation[Team | None] = Forward("team_id")`'
         )
         assert player.team_id == 1
         assert player.team is loaded
@@ -291,9 +292,9 @@ def test_the_none_refusal_writes_lines_that_make_none_assignable():
         team: Relation[Team] = Forward("team_id")
 
     assert _refused_none(Player, "team", team_id=1).endswith(
-        "(1) add | None to Player.team_id: team_id: int | None = "
-        "Field(default=None, foreign_key=Team, index=True); (2) add | None to "
-        'Player.team: team: Relation[Team | None] = Forward("team_id")'
+        "(1) on Player, replace team_id with `team_id: int | None = "
+        "Field(default=None, foreign_key=Team, index=True)`; (2) on Player, "
+        'replace team with `team: Relation[Team | None] = Forward("team_id")`'
     )
 
     # The two lines, pasted in place of the two refused ones.
@@ -314,9 +315,9 @@ def test_the_none_refusal_writes_lines_for_an_annotated_key_column():
         team: Relation[Team] = Forward("team_id")
 
     assert _refused_none(Player, "team", team_id=1).endswith(
-        "(1) add | None to Player.team_id: team_id: int | None = "
-        "Field(default=None, foreign_key=Team, index=True); (2) add | None to "
-        'Player.team: team: Relation[Team | None] = Forward("team_id")'
+        "(1) on Player, replace team_id with `team_id: int | None = "
+        "Field(default=None, foreign_key=Team, index=True)`; (2) on Player, "
+        'replace team with `team: Relation[Team | None] = Forward("team_id")`'
     )
 
     class Player(Model):
@@ -334,10 +335,10 @@ def test_the_none_refusal_quotes_a_self_reference():
         mentor: Relation["Player"] = Forward("mentor_id")
 
     assert _refused_none(Player, "mentor", mentor_id=1).endswith(
-        "(1) add | None to Player.mentor_id: "
-        'mentor_id: int | None = Field(default=None, foreign_key="Player"); '
-        "(2) add | None to Player.mentor: "
-        'mentor: Relation["Player | None"] = Forward("mentor_id")'
+        "(1) on Player, replace mentor_id with "
+        '`mentor_id: int | None = Field(default=None, foreign_key="Player")`; '
+        "(2) on Player, replace mentor with "
+        '`mentor: Relation["Player | None"] = Forward("mentor_id")`'
     )
 
     class Player(Model):
@@ -541,9 +542,9 @@ class Player(Model):
 """,
         future=future,
     )
-    message = _refused_none(refused_models.Player, "team", team_id=1)
-    steps = message.split("Fix it by hand: (1) add | None to Player.team_id: ", 1)[1]
-    column, relation = steps.split("; (2) add | None to Player.team: ")
+    with pytest.raises(DeclarationRefusal) as refused:
+        refused_models.Player(team_id=1).team = None
+    (column,), (relation,) = (edit.lines for edit in refused.value.edits)
     assert column == "team_id: int | None = Field(default=None, foreign_key=Team)"
 
     clear_registry()
