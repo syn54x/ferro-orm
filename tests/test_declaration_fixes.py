@@ -15,13 +15,19 @@ class Player(Model):
 ```
 
 A `Write:` line is printed only when every edit replaces the refused
-declaration; any other fix is numbered steps.
+declaration; any other fix is numbered steps. A refusal the reader can fix in
+more than one way carries each way, and the sweep applies each one.
 """
+
+import ast
+from pathlib import Path
 
 import pytest
 
 import ferro
 from ferro import Model
+from ferro.base import ManyToManyRelation
+from ferro.registry import REGISTRY
 from ferro.relations.fixes import DeclarationRefusal, Edit, render_fix
 from tests.test_postponed_annotations import _import, _wipe
 
@@ -52,6 +58,31 @@ def test_a_fix_beyond_the_refused_declaration_is_numbered_steps():
     )
 
 
+def test_several_local_ways_are_one_write_line_joined_by_or():
+    ways = [
+        [Edit("Team", "players", "replace", ('players: Relation[list["Player"]]',))],
+        [Edit("Team", "players", "replace", ('players: Relation[list["Coach"]]',))],
+    ]
+
+    assert render_fix("Team", "players", "wrong", alternatives=ways) == (
+        'Team.players: wrong. Write: players: Relation[list["Player"]] or '
+        'players: Relation[list["Coach"]]'
+    )
+
+
+def test_several_ways_beyond_the_declaration_are_numbered_per_way():
+    ways = [
+        [Edit("Post", "tags", "replace", ("tags: A",)), Edit("Tag", "x", "remove")],
+        [Edit("Post", "tags", "replace", ("tags: B",)), Edit("Tag", "y", "remove")],
+    ]
+
+    assert render_fix("Post", "tags", "wrong", alternatives=ways) == (
+        "Post.tags: wrong. Fix it by hand: (1) on Post, replace tags with "
+        "`tags: A`; (2) on Tag, remove x Or: (1) on Post, replace tags with "
+        "`tags: B`; (2) on Tag, remove y"
+    )
+
+
 def test_a_refusal_with_no_edits_is_its_reason():
     assert render_fix("Post", "tags", "say what", []) == "Post.tags: say what"
 
@@ -60,11 +91,14 @@ def test_a_refusal_with_no_edits_is_its_reason():
 #
 # Each case is a refused modelset: the lines of each model, the refused
 # declaration (`owner`.`field`), what its fix must give (`kind`) and whether
-# the fix is local (a `Write:` line). It runs over the target key's storage,
-# both definition orders and both __future__ modes; most cases also run with
-# the linked model another model or the owner, and with a relation reading
-# the refused column or none. The carried edits are applied to the source
-# with one helper, and the result must load, every model with a primary key.
+# the fix is local (a `Write:` line), or `None` for a refusal that can name
+# no fix. It runs over the target key's storage, both definition orders,
+# both __future__ modes and, where a model names Team, Team written as a
+# class (checked when the class is defined) or as a name (checked when
+# relations resolve); most cases also run with the linked model another model
+# or the owner, and with a relation reading the refused column or none. Each
+# way to fix it is applied to the source with one helper, and the result
+# must load, every model with a primary key.
 
 _KEYS = {
     # storage: (primary-key line, key type)
@@ -89,14 +123,33 @@ _MODELS = ("Team", "Tag", "Tournament", "Card", "Player")
 _ORDERS = {"Player last": _MODELS, "Player first": tuple(reversed(_MODELS))}
 
 
-def _case(kind, field, *, local, owner="Player", no_pk=(), **models):
-    """One refused modelset; ``models`` are the lines of each model."""
+def _case(
+    kind,
+    field,
+    *,
+    local,
+    owner="Player",
+    no_pk=(),
+    after=(),
+    bases=None,
+    orders=tuple(_ORDERS),
+    forms=("name", "class"),
+    **models,
+):
+    """One refused modelset; ``models`` are the lines of each model, ``after``
+    the module lines run once they are defined, ``bases`` a model's base
+    model where it is not `Model`, and ``orders`` and ``forms`` the
+    definition orders and target forms the case runs in."""
     return {
         "kind": kind,
         "owner": owner,
         "field": field,
         "local": local,
         "no_pk": no_pk,
+        "after": after,
+        "bases": bases or {},
+        "orders": orders,
+        "forms": forms,
         "models": models,
     }
 
@@ -140,8 +193,15 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
         reader = f'team: Relation["{t}"] = Forward("team_id")'
         if name == "generated key":
             reader = f'team: Relation["{t} | None"] = Forward("team_id")'
+        # A keyless Team with a column of its own is one the schema compile
+        # of a model defined after it can read.
+        team = {"Team": ['name: str = ""']} if no_pk == ("Team",) else {}
         cases[f"{name} to {t}"] = _case(
-            "key", "team_id", local=local, no_pk=no_pk, Player=[line]
+            "key",
+            "team_id",
+            local=local,
+            no_pk=no_pk,
+            **_merge(team, {"Player": [line]}),
         )
         # A reader makes SET NULL reach the relation: two declarations change.
         cases[f"{name} to {t}, read by a forward relation"] = _case(
@@ -149,7 +209,7 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
             "team_id",
             local=local and name != "required SET NULL key",
             no_pk=no_pk,
-            Player=[line, reader],
+            **_merge(team, {"Player": [line, reader]}),
         )
 
 
@@ -170,6 +230,15 @@ def _cases(storage: str) -> dict[str, dict]:
             "team",
             local=False,
             Player=[f'team: Relation["{t}"] = Forward("team_id")'],
+        )
+        cases[f"forward over a missing column, one other key to {t}"] = _case(
+            "forward",
+            "team",
+            local=True,
+            Player=[
+                f"squad_id: {key} = {fk(t)}",
+                f'team: Relation["{t}"] = Forward("team_id")',
+            ],
         )
         cases[f"forward over a column with no foreign_key to {t}"] = _case(
             "forward",
@@ -248,6 +317,66 @@ def _cases(storage: str) -> dict[str, dict]:
                 {t: [reverse]},
             ),
         )
+    player_pk = _field_of(pk)
+    cases["reverse on Team naming Player's primary key"] = _case(
+        "reverse",
+        "players",
+        local=False,
+        owner="Team",
+        Team=[f'players: Relation[list["Player"]] = Reverse("{player_pk}")'],
+    )
+    cases["bare reverse on Team two models point back to"] = _case(
+        "reverse",
+        "players",
+        local=True,
+        owner="Team",
+        Player=[f"team_id: {key} = {fk('Team')}"],
+        Card=[f"team_id: {key} = {fk('Team')}"],
+        Team=['players: Relation = Reverse("team_id")'],
+    )
+    # Refusals that can name no fix, and say what to do in words.
+    cases["bare forward over a column with no foreign_key"] = _case(
+        "none",
+        "team",
+        local=None,
+        Player=[f"team_id: {key}", 'team: Relation = Forward("team_id")'],
+    )
+    cases["bare forward over a missing column"] = _case(
+        "none", "team", local=None, Player=['team: Relation = Forward("team_id")']
+    )
+    cases["bare reverse nothing points back to"] = _case(
+        "none",
+        "players",
+        local=None,
+        owner="Team",
+        Team=['players: Relation = Reverse("team_id")'],
+    )
+    cases["bare many-to-many nothing names"] = _case(
+        "none",
+        "links",
+        local=None,
+        Player=['links: Relation = ManyToMany(through="player_links")'],
+    )
+    # None assigned to a relation over a required key column.
+    assign_none = ("Player.model_construct().team = None",)
+    cases["None assigned to a forward relation over a required key"] = _case(
+        "plain",
+        "team",
+        local=False,
+        after=assign_none,
+        Player=[
+            f"team_id: {key} = {fk('Team')}",
+            'team: Relation["Team"] = Forward("team_id")',
+        ],
+    )
+    cases["None assigned to a required ForeignKey relation"] = _case(
+        "plain",
+        "team",
+        local=True,
+        after=assign_none,
+        Team=['players: Relation[list["Player"]] = BackRef()'],
+        Player=['team: Annotated["Team", ForeignKey(related_name="players")]'],
+    )
     cases["column with on_delete and no foreign_key"] = _case(
         "plain",
         "note",
@@ -323,6 +452,17 @@ def _cases(storage: str) -> dict[str, dict]:
             elsewhere,
         ],
     )
+    cases["reverse on Player over its own many-to-many, two self keys"] = _case(
+        "reverse",
+        "players",
+        local=True,
+        Player=[
+            tournaments,
+            f'mentor_id: {key} | None = Field(default=None, foreign_key="Player"{stored})',
+            f'coach_id: {key} | None = Field(default=None, foreign_key="Player"{stored})',
+            elsewhere,
+        ],
+    )
     cases["reverse on Player over its own many-to-many"] = _case(
         "reverse", "players", local=False, Player=[tournaments, elsewhere]
     )
@@ -359,6 +499,16 @@ def _cases(storage: str) -> dict[str, dict]:
         Player=['links: Relation = ManyToMany(through="player_links")'],
         Tag=['linked: Relation[list["Player"]] = Reverse("links")'],
     )
+    # Each way links one of the models; the other model's Reverse then
+    # declares a many-to-many of its own.
+    cases["bare many-to-many Reverses on Tag and Tournament name"] = _case(
+        "many-to-many",
+        "links",
+        local=False,
+        Player=['links: Relation = ManyToMany(through="player_links")'],
+        Tag=['linked: Relation[list["Player"]] = Reverse("links")'],
+        Tournament=['linked: Relation[list["Player"]] = Reverse("links")'],
+    )
     cases["bare many-to-many a Reverse on Player names"] = _case(
         "many-to-many",
         "links",
@@ -373,6 +523,27 @@ def _cases(storage: str) -> dict[str, dict]:
         _LONG_FIELD,
         local=True,
         Player=[f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany()'],
+    )
+    # The fix's join table is free of every other declaration: here the name
+    # the long field's derived one shortens to is taken already.
+    shortened = f"player_{_LONG_FIELD}"[:63]
+    cases["many-to-many whose shortened join table another one holds"] = _case(
+        "many-to-many",
+        f"{_LONG_FIELD}_b",
+        local=True,
+        Player=[
+            f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany(through="{shortened}")',
+            f'{_LONG_FIELD}_b: Relation[list["Tournament"]] = ManyToMany()',
+        ],
+    )
+    cases["two many-to-manys declaring one join table"] = _case(
+        "many-to-many",
+        "others",
+        local=True,
+        Player=[
+            'links: Relation[list["Tag"]] = ManyToMany(through="player_links")',
+            'others: Relation[list["Tournament"]] = ManyToMany(through="player_links")',
+        ],
     )
     # The key shared with the primary key, and every relation that names it.
     cases["key shared with the primary key"] = _case(
@@ -414,30 +585,62 @@ def _cases(storage: str) -> dict[str, dict]:
         )
     # Team has no primary key and two key columns of different types point at
     # it: the fix gives Team the refused one's type, and retypes the other.
+    # Both columns must exist when the refusal is raised, so Team is written
+    # by name and declares no column: the check then waits for resolution.
+    # Refused when Card is defined, the fix could not see Player's column.
     cases["keys of two types to a model with no primary key"] = _case(
         "key",
         "team_id",
         local=False,
         owner=("Player", "Card"),
         no_pk=("Team",),
+        forms=("name",),
         Player=[f'team_id: {key} = Field(foreign_key="Team"{stored})'],
         Card=[f'team_id: {wrong} = Field(foreign_key="Team")'],
+    )
+    # A bare forward over a key column Player inherits: the class body names
+    # no target, so relation resolution writes the line.
+    cases["bare forward over an inherited key column"] = _case(
+        "forward",
+        "team",
+        local=True,
+        bases={"Player": "Card"},
+        orders=("Player last",),
+        Card=[f"team_id: {key} = {fk('Team')}"],
+        Player=['team: Relation = Forward("team_id")'],
     )
     return cases
 
 
-def _source(models: dict, no_pk: tuple, storage: str, order: str) -> str:
+def _source(models: dict, case: dict, storage: str, order: str) -> str:
     pk = _KEYS[storage][0]
     classes = []
     # A model a fix adds is written after the others, with only its own lines.
     names = _ORDERS[order] + tuple(name for name in models if name not in _MODELS)
     for model in names:
-        body = [] if model in no_pk or model not in _MODELS else [pk]
-        body += models.get(model, []) or ["pass"]
+        # A subclass inherits its base's primary key.
+        own_pk = model in _MODELS and model not in (*case["no_pk"], *case["bases"])
+        body = ([pk] if own_pk else []) + models.get(model, []) or ["pass"]
+        base = case["bases"].get(model, "Model")
         classes.append(
-            f"class {model}(Model):\n" + "".join(f"    {line}\n" for line in body)
+            f"class {model}({base}):\n" + "".join(f"    {line}\n" for line in body)
         )
-    return "from ferro import Forward, Reverse\n\n" + "\n".join(classes)
+    return (
+        "from ferro import Forward, Reverse\n\n"
+        + "\n".join(classes)
+        + "".join(f"\n{line}\n" for line in case["after"])
+    )
+
+
+def _as_classes(models: dict) -> dict:
+    """``models`` with Team written as the class, not its name, by every model
+    defined after it (in "Player last" order, every other model)."""
+    return {
+        name: [line.replace('foreign_key="Team"', "foreign_key=Team") for line in lines]
+        if name != "Team"
+        else list(lines)
+        for name, lines in models.items()
+    }
 
 
 def _field_of(line: str) -> str:
@@ -481,8 +684,34 @@ def _refused(tmp_path, source: str, future: bool) -> DeclarationRefusal:
     return refusal.value
 
 
-def _works(mod, case: dict) -> None:
-    """Every model loads with a primary key, and the fix gives the case's kind."""
+async def _links_rows(join: type, owner: type) -> None:
+    """A join model a fix added links two rows of ``owner``, read back."""
+    columns = join.__ferro_columns__
+    assert {
+        name: column.foreign_key.to_table
+        for name, column in columns.items()
+        if column.foreign_key is not None
+    } == {"player_id": owner.__ferro_table__, "other_player_id": owner.__ferro_table__}
+    await ferro.connect("sqlite::memory:", auto_migrate=True)
+    async with ferro.engines.session():
+        pk = owner.__ferro_pk__
+        # Explicit keys: an insert naming no column is not valid SQLite.
+        keys = ({pk: 1}, {pk: 2}) if pk == "id" else ({pk: "a1"}, {pk: "b2"})
+        first = await owner.create(**keys[0])
+        second = await owner.create(**keys[1])
+        await join.create(
+            player_id=getattr(first, pk), other_player_id=getattr(second, pk)
+        )
+        (row,) = await join.all()
+        assert (row.player_id, row.other_player_id) == (
+            getattr(first, pk),
+            getattr(second, pk),
+        )
+
+
+async def _works(mod, case: dict) -> None:
+    """Every model loads with a primary key, every many-to-many has a join
+    table of its own, and the fix gives the case's kind."""
     ferro.ensure_resolved_modelset()
     models = [
         model
@@ -490,7 +719,19 @@ def _works(mod, case: dict) -> None:
         if isinstance(model, type) and issubclass(model, Model) and model is not Model
     ]
     assert all(model.__ferro_pk__ for model in models), models
+    many_to_manys = [
+        relation
+        for model in models
+        for relation in model.__ferro_relations__.values()
+        if isinstance(relation, ManyToManyRelation)
+    ]
+    assert len(REGISTRY.join_tables()) == len(many_to_manys), REGISTRY.join_tables()
     field = case["field"]
+    joins = [model for model in models if model.__name__ not in _MODELS]
+    if joins:
+        (join,) = joins
+        await _links_rows(join, mod.Player)
+        return
     if case["kind"] == "key":
         columns = [
             column
@@ -515,57 +756,141 @@ def _works(mod, case: dict) -> None:
             for model in models
             if field in model.__ferro_reverse_specs__
         ]
-        joins = [model for model in models if model.__name__ not in _MODELS]
-        assert found or joins, f"no relation {field}"
-        if case["kind"] == "many-to-many" and found:
+        assert found, f"no relation {field}"
+        if case["kind"] == "many-to-many":
             assert found[0].is_m2m
 
 
+def _sweep(storage: str) -> list[tuple[str, str, str]]:
+    """Each case's name, definition order and target form for ``storage``."""
+    runs = []
+    for name, case in _cases(storage).items():
+        for order in case["orders"]:
+            runs.append((name, order, "name"))
+            # A class is only written where it is already defined.
+            if (
+                "class" in case["forms"]
+                and order == "Player last"
+                and _as_classes(case["models"]) != case["models"]
+            ):
+                runs.append((name, order, "class"))
+    return runs
+
+
 _SWEEP_CASES = [
-    (storage, name, order, future)
+    (storage, name, order, form, future)
     for storage in _KEYS
-    for name in _cases(storage)
-    for order in _ORDERS
+    for name, order, form in _sweep(storage)
     for future in (False, True)
 ]
 
 
-@pytest.mark.parametrize(("storage", "name", "order", "future"), _SWEEP_CASES)
-def test_every_refusal_carries_a_fix_that_works(tmp_path, storage, name, order, future):
-    case = _cases(storage)[name]
-    refusal = _refused(
-        tmp_path, _source(case["models"], case["no_pk"], storage, order), future
+def _refused_case(tmp_path, storage, case, order, form, future) -> DeclarationRefusal:
+    models = _as_classes(case["models"]) if form == "class" else case["models"]
+    return _refused(
+        tmp_path,
+        _source(models, case, storage, order),
+        future,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("storage", "name", "order", "form", "future"), _SWEEP_CASES)
+async def test_every_refusal_carries_a_fix_that_works(
+    tmp_path, storage, name, order, form, future
+):
+    case = _cases(storage)[name]
+    refusal = _refused_case(tmp_path, storage, case, order, form, future)
     message = str(refusal)
 
     # Which of two refused models resolution meets first depends on the order.
     owners = case["owner"] if isinstance(case["owner"], tuple) else (case["owner"],)
     assert refusal.model in owners and refusal.field == case["field"], message
     assert message == render_fix(
-        refusal.model, refusal.field, refusal.reason, refusal.edits
+        refusal.model, refusal.field, refusal.reason, alternatives=refusal.alternatives
     )
-    assert refusal.edits, message
+    if case["local"] is None:
+        assert refusal.alternatives == (), message
+        assert "Write: " not in message and "Fix it by hand" not in message, message
+        return
+    assert refusal.alternatives, message
     if "Write: " in message:
         assert all(
             (edit.model, edit.field, edit.action)
             == (refusal.model, refusal.field, "replace")
-            for edit in refusal.edits
+            for way in refusal.alternatives
+            for edit in way
         ), message
     assert ("Write: " in message) is case["local"], message
     assert ("Fix it by hand: (1) " in message) is not case["local"], message
 
-    pk = _KEYS[storage][0]
-    fixed = _apply(case["models"], pk, case["no_pk"], refusal.edits)
-    source = _source(fixed, case["no_pk"], storage, order)
-    _wipe()
-    try:
-        _works(_import(tmp_path, source, future=future), case)
-    except Exception as error:
-        raise AssertionError(
-            f"the fix in\n{message}\ndoes not work:\n{source}\n{error!r}"
-        ) from error
-    finally:
+    models = _as_classes(case["models"]) if form == "class" else case["models"]
+    for way in refusal.alternatives:
+        fixed = _apply(models, _KEYS[storage][0], (*case["no_pk"], *case["bases"]), way)
+        source = _source(fixed, case, storage, order)
         _wipe()
+        try:
+            await _works(_import(tmp_path, source, future=future), case)
+        except Exception as error:
+            raise AssertionError(
+                f"the fix {way}\nfrom\n{message}\ndoes not work:\n{source}\n{error!r}"
+            ) from error
+        finally:
+            _wipe()
+
+
+# -- every refusal is swept --------------------------------------------------------
+#
+# Each place in src/ferro that raises a `DeclarationRefusal`, directly or
+# through a function that builds one, must be a place the sweep reaches, so a
+# new refusal without a sweep case fails here.
+
+
+def _raise_sites_in_source() -> set[tuple[str, int]]:
+    """Every ``raise`` of a `DeclarationRefusal` in src/ferro: (file, line)."""
+    root = Path(ferro.__file__).parent
+    trees = {path: ast.parse(path.read_text()) for path in root.rglob("*.py")}
+    builders = {"DeclarationRefusal"} | {
+        node.name
+        for tree in trees.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and isinstance(node.returns, ast.Name)
+        and node.returns.id == "DeclarationRefusal"
+    }
+    sites = set()
+    for path, tree in trees.items():
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Raise)
+                and isinstance(node.exc, ast.Call)
+                and isinstance(node.exc.func, ast.Name)
+                and node.exc.func.id in builders
+            ):
+                sites.add((str(path.relative_to(root)), node.lineno))
+    return sites
+
+
+def _raise_site(refusal: DeclarationRefusal) -> tuple[str, int]:
+    """Where ``refusal`` was raised: the innermost frame of its traceback."""
+    tb = refusal.__traceback__
+    assert tb is not None
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    root = Path(ferro.__file__).parent
+    return str(Path(tb.tb_frame.f_code.co_filename).relative_to(root)), tb.tb_lineno
+
+
+def test_the_sweep_reaches_every_refusal(tmp_path):
+    swept = {
+        _raise_site(
+            _refused_case(tmp_path, storage, _cases(storage)[name], order, form, False)
+        )
+        for storage in _KEYS
+        for name, order, form in _sweep(storage)
+    }
+
+    assert swept == _raise_sites_in_source()
 
 
 # -- the cases the sweep was widened for ----------------------------------------------
@@ -610,6 +935,22 @@ def test_a_set_null_key_nothing_reads_is_a_write_line(tmp_path):
     assert str(refusal) == (
         'Player.team_id: on_delete="SET NULL" needs a nullable column. Write: '
         'team_id: int | None = Field(default=None, foreign_key=Team, on_delete="SET NULL")'
+    )
+
+
+def test_a_str_key_to_a_keyless_class_is_refused_with_the_same_fix(tmp_path):
+    refusal = _refused(
+        tmp_path,
+        "class Team(Model):\n"
+        "    name: str = ''\n\n"
+        "class Player(Model):\n"
+        "    id: int | None = Field(default=None, primary_key=True)\n"
+        "    team_id: str = Field(foreign_key=Team)\n",
+        future=False,
+    )
+
+    assert refusal.edits == (
+        Edit("Team", "id", "add", ("id: str = Field(primary_key=True)",)),
     )
 
 

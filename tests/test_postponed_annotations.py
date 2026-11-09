@@ -613,8 +613,9 @@ class Coach(Model):
 """
     assert _refusal(tmp_path, body, future=False) == (
         "Team.players: a relation is annotated Relation[...], and Player and "
-        "Coach each declare team_id pointing at Team. Annotate players as "
-        "Relation[list[...]] of the one it reads"
+        "Coach each declare team_id pointing at Team. Write: players: "
+        'Relation[list["Player"]] = Reverse("team_id") or players: '
+        'Relation[list["Coach"]] = Reverse("team_id")'
     )
 
 
