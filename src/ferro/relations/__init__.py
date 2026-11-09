@@ -2,7 +2,7 @@
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from typing import Any, ForwardRef
 
@@ -198,7 +198,9 @@ def _primary_key_edits(
         edits = [Edit(model, "id", "replace", (line,))]
         key = plain
     else:
-        key_type = int if needing is None else _strip_optional_union(needing.python_type)
+        key_type = (
+            int if needing is None else _strip_optional_union(needing.python_type)
+        )
         db_type = needing.db_type if needing and needing.db_type_explicit else None
         # The database numbers an integer key, so it starts as None.
         numbered = key_type is int
@@ -227,26 +229,39 @@ def _primary_key_edits(
     return edits
 
 
-def _relations_over(model_cls: Any, column: str) -> list[tuple[Any, str, Any]]:
-    """Every relation reading ``model_cls``'s ``column``: model, field, record."""
-    found = [
-        (model_cls, field, relation)
-        for field, relation in (
-            model_cls.__dict__.get("__ferro_relations__") or {}
-        ).items()
-        if isinstance(relation, ForwardRelation) and relation.fk_column == column
-    ]
+def _declared_relations(model_cls: Any) -> dict[str, Any]:
+    """The relations ``model_cls``'s own class body declares, by field name."""
+    return model_cls.__dict__.get("__ferro_relations__") or {}
+
+
+def _reverse_relations_over(
+    model_cls: Any, column: str
+) -> Iterator[tuple[Any, str, ReverseRelation]]:
+    """Every ``Reverse`` reading ``model_cls``'s ``column``: model, field, record.
+
+    A ``Reverse`` refused for naming no model reads none.
+    """
     for other in REGISTRY.models().values():
-        for field, relation in (
-            other.__dict__.get("__ferro_relations__") or {}
-        ).items():
+        for field, relation in _declared_relations(other).items():
             if (
                 isinstance(relation, ReverseRelation)
+                and relation.refusal is None
                 and relation.attribute == column
                 and _resolve_target(relation.to, final=False) is model_cls
             ):
-                found.append((other, field, relation))
-    return found
+                yield other, field, relation
+
+
+def _relations_over(model_cls: Any, column: str) -> list[tuple[Any, str, Any]]:
+    """Every relation reading ``model_cls``'s ``column``: model, field, record."""
+    return [
+        *(
+            (model_cls, field, relation)
+            for field, relation in _declared_relations(model_cls).items()
+            if isinstance(relation, ForwardRelation) and relation.fk_column == column
+        ),
+        *_reverse_relations_over(model_cls, column),
+    ]
 
 
 def _repoint_edits(model_cls: Any, column: str, new: str) -> list[Edit]:
@@ -643,7 +658,7 @@ def _tables_taken(owner: Any, field_name: str) -> set[str]:
     taken = set(REGISTRY.join_tables())
     for model in REGISTRY.models().values():
         taken.add(getattr(model, "__ferro_table__", ""))
-        for name, relation in (model.__dict__.get("__ferro_relations__") or {}).items():
+        for name, relation in _declared_relations(model).items():
             if (
                 isinstance(relation, ManyToManyRelation)
                 and relation.through
@@ -789,9 +804,7 @@ def many_to_many_refusal(
                     ),
                 ),
             )
-            for reader, relation in (
-                owner.__dict__.get("__ferro_relations__") or {}
-            ).items()
+            for reader, relation in _declared_relations(owner).items()
             if isinstance(relation, ReverseRelation)
             and relation.attribute == field_name
         ]
@@ -825,24 +838,15 @@ def many_to_many_refusal(
         )
         way = [Edit(model, field_name, "replace", (line,))]
         claimed = taken | {through}
-        others: list[Any] = list(REGISTRY.models().values())
-        for other in others:
+        for other, reader, _ in _reverse_relations_over(owner, field_name):
             if other.__name__ == target or other.__name__ not in targets:
                 continue
-            for reader, relation in (
-                other.__dict__.get("__ferro_relations__") or {}
-            ).items():
-                if (
-                    isinstance(relation, ReverseRelation)
-                    and relation.attribute == field_name
-                    and _resolve_target(relation.to, final=False) is owner
-                ):
-                    own = _free_table_name(default_join_table(other.__ferro_table__, reader), claimed)
-                    claimed.add(own)
-                    line = _many_to_many_line(
-                        reader, model, own, True, ON_ANOTHER_MODEL
-                    )
-                    way.append(Edit(other.__name__, reader, "replace", (line,)))
+            own = _free_table_name(
+                default_join_table(other.__ferro_table__, reader), claimed
+            )
+            claimed.add(own)
+            line = _many_to_many_line(reader, model, own, True, ON_ANOTHER_MODEL)
+            way.append(Edit(other.__name__, reader, "replace", (line,)))
         ways.append(way)
     return DeclarationRefusal(model, field_name, reason, alternatives=ways)
 
@@ -854,9 +858,7 @@ def _many_to_many_to(model_cls: Any, target: Any) -> list[str]:
         return []
     return [
         name
-        for name, relation in (
-            model_cls.__dict__.get("__ferro_relations__") or {}
-        ).items()
+        for name, relation in _declared_relations(model_cls).items()
         if isinstance(relation, ManyToManyRelation)
         and relation.refusal is None
         and _resolve_target(relation.to, final=False) is target
@@ -869,13 +871,7 @@ def _refuse_unnamed_many_to_many(
     """Raise a bare ``Relation`` refusal, naming the model a ``Reverse`` reads it from."""
     model = model_cls.__name__
     naming = [
-        other.__name__
-        for other in REGISTRY.models().values()
-        for reverse in (other.__dict__.get("__ferro_relations__") or {}).values()
-        if isinstance(reverse, ReverseRelation)
-        and reverse.attribute == name
-        and reverse.refusal is None
-        and _resolve_target(reverse.to, final=False) is model_cls
+        other.__name__ for other, _, _ in _reverse_relations_over(model_cls, name)
     ]
     if naming:
         raise many_to_many_refusal(
@@ -1179,7 +1175,7 @@ def check_reverse_relation(
     relation.to = other
     model = model_cls.__name__
     column = relation.attribute
-    linked = (other.__dict__.get("__ferro_relations__") or {}).get(column)
+    linked = _declared_relations(other).get(column)
     if isinstance(linked, ManyToManyRelation):
         _check_reverse_many_to_many(model_cls, name, relation, linked, final=final)
         return
