@@ -206,6 +206,10 @@ def test_a_converted_key_plans_nothing_against_the_old_forms_snapshot(
     assert migration is None
 
 
+BIGINT_TARGET = (
+    Path(__file__).parent / "fixtures" / "pre_explicit_fk_bigint_target.json"
+)
+
 _BIGINT = """
 from ferro import Field
 
@@ -215,31 +219,32 @@ class Team(Model):
 
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
-    team_id: int = Field(foreign_key=Team{db_type})
+    team_id: int = Field(foreign_key=Team, db_type="bigint")
 """
 
 
 def test_adding_db_type_to_a_converted_key_plans_only_its_widening(tmp_path):
-    """The old form stored a key `integer` beside a `bigint` target. Converting
-    it with `db_type="bigint"` widens the column and changes nothing else."""
-    envelope = recorded_envelope(_BIGINT.format(db_type=', db_type="bigint"'), tmp_path)
-    [team_id] = [
-        column
-        for model in envelope["payload"]["models"]
-        if model["table_name"] == "player"
-        for column in model["columns"]
-        if column["name"] == "team_id"
-    ]
-    del team_id["db_type"], team_id["db_type_explicit"]
+    """The old form stored a key `integer` beside a `bigint` target, as
+    `pre_explicit_fk_bigint_target.json` recorded it from `main`:
+
+    ```python
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True, db_type="bigint")
+        players: Relation[list["Player"]] = BackRef()
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team: Annotated[Team, ForeignKey(related_name="players")]
+    ```
+
+    Converting it with `db_type="bigint"` widens the column and changes
+    nothing else.
+    """
     project = tmp_path / "widen"
     project.mkdir()
-    with _project(project, "ferro_p876_widen"):
+    with _project(project, "rec_pkg"):
         migration = _plan_from(
-            project,
-            "ferro_p876_widen",
-            envelope,
-            _BIGINT.format(db_type=', db_type="bigint"'),
-            "widen",
+            project, "rec_pkg", json.loads(BIGINT_TARGET.read_text()), _BIGINT, "widen"
         )
 
     assert migration is not None
@@ -254,13 +259,21 @@ def test_adding_db_type_to_a_converted_key_plans_only_its_widening(tmp_path):
     assert statements("postgres") == [
         'ALTER TABLE "player" ALTER COLUMN "team_id" TYPE bigint USING "team_id"::bigint'
     ]
-    rebuild = statements("sqlite")
-    # the rebuild of `player` alone: the key widens, its constraint is kept
-    assert [sql for sql in rebuild if sql.startswith("CREATE TABLE")] == [
+    assert statements("sqlite") == [
         'CREATE TABLE IF NOT EXISTS "_ferro_new_player" ( "id" integer NOT NULL '
         'PRIMARY KEY AUTOINCREMENT, "team_id" bigint NOT NULL, CONSTRAINT '
         '"fk_player_team_id_team" FOREIGN KEY ("team_id") REFERENCES "team" ("id") '
-        "ON DELETE CASCADE )"
+        "ON DELETE CASCADE )",
+        'INSERT INTO "_ferro_new_player" ("id", "team_id") SELECT "id", "team_id" '
+        'FROM "player"',
+        'CREATE TEMP TABLE "_ferro_rebuild_guard" ("value", CONSTRAINT "ferro: '
+        'player.team_id has a value that cannot become bigint" CHECK (0))',
+        'INSERT INTO "_ferro_rebuild_guard" ("value") SELECT "team_id" FROM '
+        "\"_ferro_new_player\" WHERE typeof(\"team_id\") NOT IN ('integer', 'null')",
+        'DROP TABLE "_ferro_rebuild_guard"',
+        "DELETE FROM sqlite_sequence WHERE name = '_ferro_new_player'",
+        "INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_player', seq "
+        "FROM sqlite_sequence WHERE name = 'player'",
+        'DROP TABLE "player"',
+        'ALTER TABLE "_ferro_new_player" RENAME TO "player"',
     ]
-    assert all("player" in sql or "rebuild_guard" in sql for sql in rebuild)
-    assert not any("team" in sql.replace("team_id", "") for sql in rebuild[1:])

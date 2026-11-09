@@ -184,6 +184,8 @@ def test_field_options_leave_the_json_schema_and_land_in_ferro_fields():
     assert fields["score"].renamed_from == "points"
     assert "legacy" in OptionedPlayer.__ferro_retired_fields__
     assert fields["doubled"].generated is not None
+    assert fields["team_id"].foreign_key is OptionedTeam
+    assert fields["team_id"].on_delete == "SET NULL"
 
 
 def _option_tuple(options: FerroField) -> tuple:
@@ -198,6 +200,8 @@ def _option_tuple(options: FerroField) -> tuple:
         options.renamed_from,
         options.retired,
         options.generated is not None,
+        options.foreign_key,
+        options.on_delete,
     )
 
 
@@ -253,6 +257,9 @@ def test_annotated_field_options_equal_the_assignment_ones():
     )
     for name in assigned:
         assert _option_tuple(assigned[name]) == _option_tuple(annotated[name]), name
+    for fields in (assigned, annotated):
+        assert fields["team_id"].foreign_key is RosterTeam
+        assert fields["team_id"].on_delete == "SET NULL"
     assert set(AssignedRoster.__ferro_retired_fields__) == {"legacy"}
     assert set(AnnotatedRoster.__ferro_retired_fields__) == {"legacy"}
     assert _schema_option_names(AnnotatedRoster) == set()
