@@ -1,0 +1,1 @@
+verified 2026-11-09 (no Verify block on #912; ran the brief's gate: cargo workspace tests, parity + alembic on sqlite+postgres 18, ty, ruff, full SQLite suite)
