@@ -226,19 +226,19 @@ def test_docstring_example_can_declare_related_models(tmp_path: Path) -> None:
             ```python {test=run prelude=reference}
             from typing import Annotated
 
-            from ferro import BackRef, FerroField, ForeignKey, Model, Relation, create_tables
+            from ferro import FerroField, Model, Relation, Reverse, create_tables
 
 
             class Shelf(Model):
                 id: Annotated[int | None, FerroField(primary_key=True)] = None
                 label: str
-                books: Relation[list["Book"]] = BackRef()
+                books: Relation[list["Book"]] = Reverse("shelf_id")
 
 
             class Book(Model):
                 id: Annotated[int | None, FerroField(primary_key=True)] = None
                 title: str
-                shelf: Annotated[Shelf, ForeignKey(related_name="books")]
+                shelf_id: Annotated[int, FerroField(foreign_key=Shelf)]
 
 
             await create_tables()

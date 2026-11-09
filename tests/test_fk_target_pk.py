@@ -4,12 +4,9 @@ The constructor takes the foreign-key column only; refusing `warehouse=` names
 `warehouse_id=warehouse.code`, the target's own key, not the source's `id`.
 """
 
-from typing import Annotated
-
 import pytest
 
-from ferro import Field, Model
-from ferro.base import ForeignKey
+from ferro import Field, Forward, Model, Relation
 
 
 @pytest.fixture(autouse=True)
@@ -17,7 +14,7 @@ def _isolate_relation_state():
     """Restore the global relation registries after each test.
 
     Each test below declares its models *inside the test function*, but
-    `ModelMetaclass` still queues their `ForeignKey` metadata on the
+    `ModelMetaclass` still queues their relation metadata on the
     Registry's pending-relations queue and registers the classes in
     the model registry (see `src/ferro/metaclass.py`) unconditionally at
     class-creation time -- nothing about being defined inside a function
@@ -26,8 +23,7 @@ def _isolate_relation_state():
     `D5Warehouse`/`D5Shipment`/`D5Author`/`D5Book` FK metadata leaks into
     later tests: the next `connect(auto_migrate=True)` anywhere in the
     suite calls `resolve_relationships()`, which replays *every* pending
-    relation, including these stale ones, and blows up because their
-    target models never declared the matching `BackRef()`.
+    relation, including these stale ones.
     """
     from ferro.registry import REGISTRY
 
@@ -43,7 +39,8 @@ def test_relation_keyword_refusal_names_the_target_pk():
 
     class D5Shipment(Model):
         id: int | None = Field(default=None, primary_key=True)
-        warehouse: Annotated[D5Warehouse, ForeignKey(related_name="shipments")]
+        warehouse_id: int = Field(foreign_key=D5Warehouse)
+        warehouse: Relation[D5Warehouse] = Forward("warehouse_id")
 
     wh = D5Warehouse(code=7, city="Reno")
     with pytest.raises(TypeError) as refused:
@@ -63,7 +60,8 @@ def test_relation_keyword_refusal_with_target_pk_named_id():
 
     class D5Book(Model):
         id: int | None = Field(default=None, primary_key=True)
-        author: Annotated[D5Author, ForeignKey(related_name="books")]
+        author_id: int = Field(foreign_key=D5Author)
+        author: Relation[D5Author] = Forward("author_id")
 
     a = D5Author(id=3, name="x")
     with pytest.raises(TypeError, match=r"author_id=author\.id$"):
