@@ -29,6 +29,7 @@ from ferro import (
     reset_engine,
 )
 from ferro.registry import REGISTRY
+from ferro.relations.fixes import DeclarationRefusal
 
 _COUNTER = itertools.count()
 FUTURE = "from __future__ import annotations\n"
@@ -612,9 +613,8 @@ class Coach(Model):
 """
     assert _refusal(tmp_path, body, future=False) == (
         "Team.players: a relation is annotated Relation[...], and Player and "
-        "Coach each declare team_id pointing at Team. Write: players: "
-        'Relation[list["Player"]] = Reverse("team_id") or players: '
-        'Relation[list["Coach"]] = Reverse("team_id")'
+        "Coach each declare team_id pointing at Team. Annotate players as "
+        "Relation[list[...]] of the one it reads"
     )
 
 
@@ -682,8 +682,7 @@ class Player(Model):
 # it or the model itself, over a required or a nullable key column beside a
 # second key to the same target, with the marker's column positional or by
 # keyword. Each outcome is a working relation over the named column, or a
-# refusal whose every Write line, pasted in place of the refused one, defines
-# one.
+# refusal whose carried edit, replacing the refused line, defines one.
 
 _SPELLINGS = {
     "assigned": "{relation} = {marker}",
@@ -868,18 +867,18 @@ def test_every_spelling_is_a_relation_or_a_refusal_whose_fix_works(
     try:
         _import(tmp_path, body, future=future)
         ferro.ensure_resolved_modelset()
-    except TypeError as refusal:
+    except DeclarationRefusal as refusal:
         assert not works, f"{body}\nrefused: {refusal}"
-        message = str(refusal)
-        assert "Write: " in message, message
-        for line in message.split("Write: ", 1)[1].split(" or "):
-            fixed = _sweep_body(form, line, nullable, order)
-            try:
-                _defines_the_relation(tmp_path, form, fixed, future)
-            except Exception as error:
-                raise AssertionError(
-                    f"the fix {line!r} for\n{body}\ndoes not work: {error}"
-                ) from error
+        (edit,) = refusal.edits
+        assert (edit.field, edit.action) == (_FIELD[form], "replace"), refusal
+        (line,) = edit.lines
+        fixed = _sweep_body(form, line, nullable, order)
+        try:
+            _defines_the_relation(tmp_path, form, fixed, future)
+        except Exception as error:
+            raise AssertionError(
+                f"the fix {line!r} for\n{body}\ndoes not work: {error}"
+            ) from error
         return
     assert works, f"{body}\nwas accepted"
     _defines_the_relation(tmp_path, form, body, future)

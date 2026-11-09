@@ -457,10 +457,9 @@ def test_a_key_column_that_is_the_primary_key_is_refused():
 
     assert _refused(define) == (
         "Profile.user_id: a foreign-key column cannot be the primary key. "
-        "Fix it by hand: (1) add id: int | None = Field(default=None, "
-        "primary_key=True) to Profile (or another primary key of your "
-        "choosing); (2) take primary_key=True off Profile.user_id and add "
-        "unique=True"
+        "Fix it by hand: (1) on Profile, add `id: int | None = Field(default=None, "
+        "primary_key=True)`; (2) on Profile, replace user_id with `user_id: int "
+        "| None = Field(default=None, foreign_key=User, unique=True)`"
     )
 
 
@@ -493,8 +492,8 @@ def test_a_relation_over_a_column_without_a_foreign_key_is_refused():
             team: Relation[Team] = Forward("team_id")
 
     assert _refused(define) == (
-        "Player.team: team_id has no foreign_key. Fix it by hand: "
-        '(1) give Player.team_id its foreign key: team_id: int = Field(foreign_key="Team")'
+        "Player.team: team_id has no foreign_key. Fix it by hand: (1) on Player, "
+        'replace team_id with `team_id: int = Field(foreign_key="Team")`'
     )
 
 
@@ -524,8 +523,8 @@ def test_a_relation_over_a_missing_column_with_no_key_names_the_column_to_add():
             team: Relation[Team] = Forward("teamid")
 
     assert _refused(define) == (
-        "Player.team: Player has no column teamid. "
-        "Write: teamid: int = Field(foreign_key=Team)"
+        "Player.team: Player has no column teamid. Fix it by hand: (1) on "
+        "Player, add `teamid: int = Field(foreign_key=Team)`"
     )
 
 
@@ -606,9 +605,9 @@ def test_a_reverse_with_no_key_pointing_back_names_the_column_to_add():
 
     assert _refused(define) == (
         "Team.players: Player.mentor_id points at Player, not Team. Fix it by "
-        'hand: (1) add team_id: int = Field(foreign_key="Team") to Player; '
-        "(2) point Team.players at it: "
-        'players: Relation[list["Player"]] = Reverse("team_id")'
+        'hand: (1) on Player, add `team_id: int = Field(foreign_key="Team")`; '
+        "(2) on Team, replace players with "
+        '`players: Relation[list["Player"]] = Reverse("team_id")`'
     )
 
 
@@ -700,7 +699,7 @@ def test_a_forward_relation_over_a_retired_column_goes_with_it():
 
     assert _refused(define) == (
         "Player.team: team_id is retired, so the relation is retired with it. "
-        'Delete: team: Relation[Team | None] = Forward("team_id")'
+        "Fix it by hand: (1) on Player, remove team"
     )
 
 
@@ -716,7 +715,7 @@ def test_a_reverse_relation_over_a_retired_column_goes_with_it():
 
     assert _refused(define) == (
         "Team.players: Player.team_id is retired, so the relation is retired "
-        'with it. Delete: players: Relation[list["Player"]] = Reverse("team_id")'
+        "with it. Fix it by hand: (1) on Team, remove players"
     )
 
 
