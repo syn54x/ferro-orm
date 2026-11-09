@@ -1,5 +1,6 @@
 import ast
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -302,37 +303,65 @@ def test_constructions_the_runtime_accepts_pass_the_type_checker():
     )
 
 
-@pytest.mark.parametrize("declare", ["Forward", "Reverse"])
+@pytest.mark.parametrize(
+    "declare",
+    [
+        lambda ferro: ferro.Forward("team_id", init=False),
+        lambda ferro: ferro.Reverse("team_id", init=False),
+        lambda ferro: ferro.ManyToMany(through="post_tags", init=False),
+    ],
+    ids=["Forward", "Reverse", "ManyToMany"],
+)
 def test_a_relation_takes_no_init_keyword_at_runtime(declare):
     """`init: Literal[False]` is in the relation's signature for the type
     checker only; at runtime the keyword stays refused (#894)."""
     import ferro
 
     with pytest.raises(TypeError, match="init"):
-        getattr(ferro, declare)("team_id", init=False)
+        declare(ferro)
 
 
 def test_model_metaclass_names_ferro_field_specifiers():
     """`ModelMetaclass` carries its own `dataclass_transform`, naming
-    Pydantic's three field specifiers and Ferro's four (#894)."""
+    Pydantic's three field specifiers and Ferro's four (#894). Pydantic's
+    private `NoInitField` is a name for the checker only, as Pydantic's own
+    metaclass holds its specifiers."""
     from pydantic.fields import Field as PydanticField
     from pydantic.fields import PrivateAttr
-    from pydantic._internal._model_construction import NoInitField
 
     import ferro
     from ferro.metaclass import ModelMetaclass
 
     transform = vars(ModelMetaclass)["__dataclass_transform__"]
     assert transform["kw_only_default"] is True
-    assert transform["field_specifiers"] == (
-        PydanticField,
-        PrivateAttr,
-        NoInitField,
+    specifiers = transform["field_specifiers"]
+    assert len(specifiers) == 7
+    assert specifiers[:2] == (PydanticField, PrivateAttr)
+    assert specifiers[3:] == (
         ferro.Field,
         ferro.Forward,
         ferro.Reverse,
         ferro.ManyToMany,
     )
+
+
+def test_ferro_imports_without_pydantics_private_no_init_field():
+    """Ferro does not import Pydantic's private `NoInitField` at runtime, so
+    a Pydantic without it (before 2.9) still imports Ferro (#894)."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pydantic\n"
+            "pydantic.BaseModel\n"
+            "import pydantic._internal._model_construction as construction\n"
+            "del construction.NoInitField\n"
+            "import ferro\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_projected_chains_pass_the_type_checker():

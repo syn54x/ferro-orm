@@ -55,3 +55,7 @@ def _constructions() -> None:
     Post(title="Ownership")
     assert_type(player.team, Team)
     assert_type(team.players, Relation[list[Player]])
+
+
+def _field_takes_every_documented_option() -> None:
+    Field(many_to_many=True, through="post_tags", reverse_index=False)
