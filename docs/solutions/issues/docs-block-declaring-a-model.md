@@ -34,14 +34,21 @@ with `dont_inherit=True`.
 - **`JSON` column**: `compile()` inherits the caller's `__future__` flags.
   The runner has `from __future__ import annotations`, so every annotation in
   the block became a string, and the metaclass never saw the `ForeignKey`
-  inside `Annotated[...]`.
+  annotation inside `Annotated[...]`.
 
 Ferro used to have the same gap outside the harness: a module with
-`from __future__ import annotations` that declares
-`author: Annotated[Author, ForeignKey(related_name="posts")]` got a `JSON`
+`from __future__ import annotations` that declared the relation `author`
+through the `ForeignKey` annotation inside `Annotated[...]` got a `JSON`
 column `author` and no error. The metaclass now evaluates the string in the
 defining module's namespace (#751), so the import is safe in model modules;
 a name it cannot evaluate raises `TypeError` at class definition.
+
+> 2026-11-09: the `ForeignKey` annotation this story describes was
+> removed by #874 Explicit foreign-key columns, with relations as typed views.
+> A foreign-key column is now `author_id: int = Field(foreign_key=Author)`
+> and a relation an assignment (`author: Relation[Author] =
+> Forward("author_id")`); the `__future__` lesson stands for every
+> annotation the metaclass reads.
 
 ## How to recognize
 

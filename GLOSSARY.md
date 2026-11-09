@@ -52,6 +52,18 @@ _Avoid_: Column metadata, enriched schema property, field dict
 A database setting declared on one model field (`primary_key`, `unique`, `index`, `db_type`, `foreign_key`, `on_delete`, `renamed_from`, `retired`, `generated`), stored on the field and never printed in its JSON schema.
 _Avoid_: `ferro_field`, raw path, column option
 
+**Foreign-key column**:
+A column the model declares with `Field(foreign_key=Target)`, holding the target's primary-key value. Its constraint, `fk_<table>_<column>_<target table>`, and its index are derived from the declaration; a *forward relation* names it. Nullability, rename and retirement are the column's own options.
+_Avoid_: `*_id` column, injected column, reference column
+
+**Forward relation**:
+A typed view over one foreign-key column of its own model, declared `team: Relation[Team] = Forward("team_id")`. It reads as the related instance: complete when an include or `.load()` filled it, otherwise holding only its key (see *Complete-instance invariant*).
+_Avoid_: Belongs-to, parent link, FK field
+
+**Reverse relation**:
+A query over the rows of another model whose foreign-key column points at this instance, declared `players: Relation[list["Player"]] = Reverse("team_id")`. It is always a query, at every cardinality; a one-to-one's reverse side reads with `.first()`.
+_Avoid_: BackRef, back-reference, has-many, related_name
+
 **Relation traversal**:
 Attribute access on a declared forward-FK field inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
 _Avoid_: Join inference, nested filter, path lookup, string path
@@ -85,7 +97,7 @@ A class tied to one model that carries its data across the application's boundar
 _Avoid_: Shape, schema, API model, serializer
 
 **Include**:
-The explicit request (`.include(lambda t: t.account.owner)`) that a query load a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path loads every hop along it and never changes which rows come back.
+The explicit request (`.include(lambda t: t.account.owner)`) that a query load a forward relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path loads every hop along it and never changes which rows come back.
 _Avoid_: Eager load, select_related, prefetch, join-fetch
 
 **Loaded relation**:
@@ -149,7 +161,7 @@ The per-model state installed when a class body finishes executing — enough fo
 _Avoid_: Import-time registration, partial registry
 
 **Resolved registration**:
-The registry epoch after relationship resolution completes — join tables exist, shadow FK columns are wired, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
+The registry epoch after relationship resolution completes — join tables exist, foreign-key columns are known, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
 _Avoid_: Final registration, committed registry
 
 **Migration strategy**:
@@ -404,7 +416,7 @@ A named boolean invariant over one row of one table, declared on the model as a 
 _Avoid_: table-level check, multi-column check, composite check, row check
 
 **Check predicate**:
-The lambda body of a table check — a ferro predicate over that model's own columns (or a forward-FK null test on the relation or its shadow `*_id`), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
+The lambda body of a table check — a ferro predicate over that model's own columns (or a null test on the relation or its foreign-key column), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
 _Avoid_: check SQL, constraint expression, check body
 
 **Session settings**:
@@ -432,7 +444,7 @@ Drop-and-recreate of a ferro-owned row policy whose live catalog entry no longer
 _Avoid_: Policy alter, policy sync, RLS drift repair
 
 **Retired column**:
-A column the model still declares but that this release's code neither reads nor writes: it is absent from the model's attributes and from every statement the model issues, and it stays in the *schema snapshot*, nullable, so a database built fresh still has it and *historical models* still see it. Retiring a required column is the change that makes it nullable; nothing else about the column changes until the declaration is deleted, which is the drop: its index, unique, check, foreign key, and every *table check*, *row policy*, composite index or unique that names it stay as declared. Only a scalar field or a `ForeignKey` field can be retired; a back-reference over a retired foreign key cannot exist, a join table is a table.
+A column the model still declares but that this release's code neither reads nor writes: it is absent from the model's attributes and from every statement the model issues, and it stays in the *schema snapshot*, nullable, so a database built fresh still has it and *historical models* still see it. Retiring a required column is the change that makes it nullable; nothing else about the column changes until the declaration is deleted, which is the drop: its index, unique, check, foreign key, and every *table check*, *row policy*, composite index or unique that names it stay as declared. Only a field can be retired, a foreign-key column included; a relation over a retired foreign-key column cannot exist, and a join table is a table.
 _Avoid_: Deprecated column, hidden column, ignored field, soft-dropped column
 
 **Retired label**:

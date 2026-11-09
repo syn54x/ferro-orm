@@ -58,7 +58,7 @@ Every IR contract change must preserve or explicitly version these invariants.
 Given one model definition, all DDL emission paths must produce equivalent schema artifacts:
 
 - Table names.
-- Column names (including FK shadow `*_id` columns).
+- Column names (including foreign-key columns).
 - Column type mapping/tokenization.
 - Constraint/index/check naming.
 - Nullability/default semantics.

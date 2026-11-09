@@ -12,7 +12,7 @@ captured: 2026-08-15
 
 # PG18 RESTRICT is SQLSTATE 23001, not 23503
 
-**Problem:** Deleting a parent still referenced by `ForeignKey(on_delete="RESTRICT")` raised `ForeignKeyViolationError` on PostgreSQL 17 and `OperationalError` on PostgreSQL 18.
+**Problem:** Deleting a parent still referenced by `Field(foreign_key=Parent, on_delete="RESTRICT")` raised `ForeignKeyViolationError` on PostgreSQL 17 and `OperationalError` on PostgreSQL 18.
 
 **Takeaway:** Ferro owns the integrity-code table. Do not ask sqlx `kind()` alone, and do not match driver message text. `23001` (PG18 RESTRICT) and SQLite `1811` (RESTRICT implemented as a trigger) are `ForeignKeyViolationError`. `sqlstate` stays the raw driver code.
 
