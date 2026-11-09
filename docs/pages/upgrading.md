@@ -71,7 +71,7 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
 ## Upgrading to X.Y {#explicit-foreign-keys}
 
-`X.Y` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and a `BackRef()` had to name it from the other side. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
+`X.Y` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and the other model needed a `BackRef()` whose name matched its `related_name`. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
 
 A correct conversion leaves the schema as it was: the same columns, the same `fk_*` constraints, the same join tables. The [acceptance check](#explicit-foreign-keys-acceptance) at the end proves it.
 
