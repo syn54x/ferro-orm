@@ -18,7 +18,7 @@ FerroError
 │   ├── NotNullViolationError
 │   └── CheckViolationError
 ├── ModelDoesNotExist       (also a LookupError)
-├── InstanceNotLoaded       (also an AttributeError)
+├── InstanceNotLoaded
 ├── SettingsError           the project configuration is missing a key, malformed, or contradicts itself
 └── MigrationRefused        a migration call refused; .report says how far it got
     ├── PendingMigrationsError
