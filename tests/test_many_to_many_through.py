@@ -17,6 +17,7 @@ snapshot `tests/fixtures/many_to_many_pre_conversion/` recorded from the old
 form.
 """
 
+import inspect
 import shutil
 from pathlib import Path
 
@@ -316,6 +317,102 @@ async def test_a_join_table_rename_without_migrate_updates_names_the_relation(db
         "was not created. The rename runs under connect(..., migrate_updates=True) "
         "or in a migration from ferro migrate new."
     ]
+
+
+_POST_TAGS = """
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    {line}
+"""
+_KEPT = 'tags: Relation[list[Tag]] = ManyToMany(through="post_tags")'
+
+
+@pytest.mark.parametrize(
+    ("renamed_from", "reason"),
+    [
+        (
+            "post_tags",
+            "renamed_from is the join table's previous name, and post_tags is "
+            "the name through= gives it now",
+        ),
+        (
+            "bad-name",
+            "renamed_from is the join table's previous name, a table name: "
+            "letters, digits and underscores, not starting with a digit, at "
+            "most 63 characters",
+        ),
+        (
+            "tag",
+            "renamed_from names tag, a table the models declare, so it is not "
+            "the join table's previous name",
+        ),
+    ],
+    ids=["its own name", "not a table name", "a declared table"],
+)
+def test_a_join_table_rename_that_cannot_be_meant_is_refused(
+    tmp_path, renamed_from, reason
+):
+    line = (
+        "tags: Relation[list[Tag]] = "
+        f'ManyToMany(through="post_tags", renamed_from="{renamed_from}")'
+    )
+
+    message = _refusal(tmp_path, _POST_TAGS.format(line=line), future=False)
+
+    assert message == f"Post.tags: {reason}. Write: {_KEPT}"
+    _wipe()
+    _import(tmp_path, _POST_TAGS.format(line=_KEPT), future=False)
+    ferro.ensure_resolved_modelset()
+
+
+def test_renamed_from_on_the_old_many_to_many_is_refused(tmp_path):
+    body = """
+from ferro import BackRef
+
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    posts: Relation[list["Post"]] = BackRef()
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tags: Relation[list[Tag]] = {marker}
+"""
+    refused = 'ManyToMany(related_name="posts", renamed_from="old_tags")'
+    kept = 'ManyToMany(related_name="posts")'
+
+    message = _refusal(tmp_path, body.format(marker=refused), future=False)
+
+    assert message == (
+        "Post.tags: renamed_from renames a join table named with through=, and "
+        "related_name= derives its join table from the model, which "
+        "__ferro_renamed_from__ renames. "
+        f"Write: tags: Relation[list[Tag]] = {kept}"
+    )
+    _wipe()
+    _import(tmp_path, body.format(marker=kept), future=False)
+    ferro.ensure_resolved_modelset()
+
+
+_ACCEPTED = {"through", "related_name", "renamed_from", "reverse_index"}
+# Every option of `Field` a many-to-many does not use; `init` has its own words.
+_UNUSED = sorted(
+    set(inspect.signature(Field).parameters) - _ACCEPTED - {"init", "unknown"}
+)
+
+
+@pytest.mark.parametrize("option", _UNUSED)
+def test_many_to_many_refuses_every_option_it_would_not_use(option):
+    with pytest.raises(TypeError) as refused:
+        ManyToMany(through="post_tags", **{option: True})
+
+    assert str(refused.value) == (
+        f"ManyToMany() got an unexpected keyword argument '{option}': a "
+        "many-to-many adds no column, so it takes no column or field option. "
+        "A many-to-many takes through=, renamed_from= and reverse_index="
+    )
 
 
 # -- refusals ------------------------------------------------------------------------

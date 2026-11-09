@@ -63,6 +63,7 @@ from .relations import (
     check_declared_foreign_keys,
     is_table_name,
     key_column_line,
+    related_name_rename_refusal,
     relation_line,
     relation_refusal,
     written_type,
@@ -1400,6 +1401,16 @@ class ModelMetaclass(type(BaseModel)):
                     raise TypeError(
                         f"Field '{field_name}' uses many_to_many=True but did not "
                         "provide related_name."
+                    )
+                if relationship_payload.get("renamed_from") is not None:
+                    raise related_name_rename_refusal(
+                        model_name,
+                        field_name,
+                        annotation_text(target),
+                        related_name,
+                        relationship_payload.get("through"),
+                        relationship_payload.get("reverse_index", True),
+                        None if scope is None else scope | frozenset(namespace),
                     )
                 metadata = ManyToManyRelation(
                     related_name=related_name,
