@@ -351,6 +351,12 @@ def test_primary_key_in_json_schema_extra_is_refused():
             ),
             r"Pass index=True, db_type='bigint', nullable=True to Field\(\)",
         ),
+        (
+            lambda: pydantic.Field(
+                json_schema_extra=lambda schema: schema.update(primary_key=True)
+            ),
+            r"Pass primary_key=True to Field\(\) instead of json_schema_extra",
+        ),
     ],
     ids=[
         "unique",
@@ -361,6 +367,7 @@ def test_primary_key_in_json_schema_extra_is_refused():
         "through-ferro-Field",
         "old-ferro_field-key",
         "old-ferro_field-key-several-options",
+        "callable",
     ],
 )
 def test_every_option_key_in_json_schema_extra_is_refused(declare, message):

@@ -292,6 +292,36 @@ def test_a_retired_key_column_keeps_its_column_and_constraint():
         Player().team_id  # noqa: B018
 
 
+def test_a_retired_key_column_to_a_later_model_points_at_its_table():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: str | None = Field(default=None, foreign_key="Team", retired=True)
+
+    class Team(Model):
+        __ferro_table__ = "teams"
+        code: str = Field(primary_key=True)
+
+    player = next(
+        model
+        for model in ensure_resolved_modelset()["payload"]["models"]
+        if model["table_name"] == "player"
+    )
+
+    assert [
+        (key["to_table"], key["to_column"], key["name"])
+        for key in player["foreign_keys"]
+    ] == [("teams", "code", "fk_player_team_id_teams")]
+
+
+def test_a_retired_key_column_to_a_model_never_defined_fails_resolution():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int | None = Field(default=None, foreign_key="Team", retired=True)
+
+    with pytest.raises(RuntimeError, match="'Team' not found"):
+        ensure_resolved_modelset()
+
+
 def test_forward_and_reverse_are_public():
     assert {"Forward", "Reverse"} <= set(ferro.__all__)
 
@@ -375,6 +405,75 @@ def test_set_null_on_a_required_key_column_is_refused():
         'Player.mentor_id: on_delete="SET NULL" needs a nullable column. '
         "Write: mentor_id: int | None = Field(default=None, "
         'foreign_key="Player", on_delete="SET NULL")'
+    )
+
+
+def test_set_null_beside_nullable_false_is_refused_for_the_nullable():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(
+                foreign_key=Team, on_delete="SET NULL", nullable=False
+            )
+
+    assert _refused(define) == (
+        "Player.team_id: a foreign-key column is nullable when its annotation "
+        "allows None, so it takes no nullable=. Write: team_id: int | None = "
+        'Field(default=None, foreign_key=Team, on_delete="SET NULL")'
+    )
+
+
+def test_nullable_false_on_a_key_column_moves_into_the_annotation():
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(foreign_key="Team", nullable=False)
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+
+    assert _refused(define) == (
+        "Player.team_id: a foreign-key column is nullable when its annotation "
+        "allows None, so it takes no nullable=. "
+        'Write: team_id: int = Field(foreign_key="Team")'
+    )
+
+
+def test_nullable_true_on_a_key_column_moves_into_the_annotation():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: Annotated[int, FerroField(foreign_key=Team, nullable=True)]
+
+    assert _refused(define) == (
+        "Player.team_id: a foreign-key column is nullable when its annotation "
+        "allows None, so it takes no nullable=. "
+        "Write: team_id: int | None = Field(default=None, foreign_key=Team)"
+    )
+
+
+def test_a_nullable_fix_rewrites_the_relation_reading_the_column():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key=Team, nullable=True)
+            team: Relation[Team] = Forward("team_id")
+
+    assert _refused(define) == (
+        "Player.team_id: a foreign-key column is nullable when its annotation "
+        "allows None, so it takes no nullable=. Fix it by hand: (1) on Player, "
+        "replace team_id with `team_id: int | None = Field(default=None, "
+        "foreign_key=Team)`; (2) on Player, replace team with "
+        '`team: Relation[Team | None] = Forward("team_id")`'
     )
 
 
@@ -632,6 +731,46 @@ def test_a_bare_reverse_relation_annotation_names_the_model_pointing_back():
     )
 
 
+def test_a_bare_reverse_two_models_point_back_to_is_refused_with_the_class():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+
+    class Coach(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+
+    # Refused when the class is defined, the same refusal resolution gives.
+    with pytest.raises(TypeError) as refusal:
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation = Reverse("team_id")
+
+    assert str(refusal.value) == (
+        "Team.players: a relation is annotated Relation[...], and Player and "
+        "Coach each declare team_id pointing at Team. Write: "
+        'players: Relation[list["Player"]] = Reverse("team_id") or '
+        'players: Relation[list["Coach"]] = Reverse("team_id")'
+    )
+
+
+def test_a_reverse_in_annotated_metadata_is_refused_as_an_assignment():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+
+    def define():
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Annotated[Relation[list[Player]], Reverse("team_id")]
+
+    assert _refused(define) == (
+        "Team.players: a relation is an assignment, not Annotated metadata. "
+        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+    )
+
+
 def test_a_forward_relation_over_a_retired_column_goes_with_it():
     class Team(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -763,6 +902,22 @@ def test_a_string_target_is_checked_when_relations_resolve():
         "Player.team_id: Team.id is int, so its foreign-key column is int too. "
         'Write: team_id: int = Field(foreign_key="Team")'
     )
+
+
+def test_a_refused_resolution_is_refused_again_on_every_later_one():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: str = Field(foreign_key="Team")
+
+    class Team(Model):
+        __ferro_table__ = "teams"
+        id: int | None = Field(default=None, primary_key=True)
+        players: Relation[list[Player]] = Reverse("team_id")
+
+    for _ in range(2):
+        with pytest.raises(TypeError, match="Player.team_id: Team.id is int"):
+            ensure_resolved_modelset()
+    assert REGISTRY.is_dirty()
 
 
 def test_a_class_target_is_checked_when_the_class_is_defined():
