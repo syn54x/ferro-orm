@@ -9,6 +9,7 @@ from functools import partial
 from enum import Enum
 from types import UnionType
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Callable,
@@ -24,7 +25,6 @@ from typing import (
 
 from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
-from pydantic._internal._model_construction import NoInitField
 from pydantic.fields import FieldInfo, PrivateAttr
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
@@ -69,6 +69,13 @@ from .relations import (
     written_type,
 )
 from .relations.descriptors import ForwardDescriptor
+
+if TYPE_CHECKING:
+    from pydantic._internal._model_construction import NoInitField
+else:
+    # Pydantic's private name is for the checker only, the way Pydantic's own
+    # metaclass holds its specifiers; a placeholder keeps the import public.
+    NoInitField = object()
 
 
 def _assert_weakref_support(cls: type) -> None:

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     import re
 
     import annotated_types
-    from pydantic import types
+    from pydantic import Discriminator
     from pydantic.aliases import AliasChoices, AliasPath
     from pydantic.config import JsonDict
     from pydantic.fields import Deprecated, FieldInfo
@@ -108,6 +108,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -125,7 +126,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -166,6 +167,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -183,7 +185,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -224,6 +226,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -240,7 +243,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -281,6 +284,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -297,7 +301,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -338,6 +342,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -354,7 +359,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -394,6 +399,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -411,7 +417,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -451,6 +457,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -468,7 +475,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -508,6 +515,7 @@ def Field(
     many_to_many: bool = ...,
     related_name: str | None = ...,
     through: str | None = ...,
+    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -524,7 +532,7 @@ def Field(
     examples: list[Any] | None = ...,
     exclude: bool | None = ...,
     exclude_if: Callable[[Any], bool] | None = ...,
-    discriminator: str | types.Discriminator | None = ...,
+    discriminator: str | Discriminator | None = ...,
     deprecated: Deprecated | str | bool | None = ...,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = ...,
     frozen: bool | None = ...,
@@ -584,7 +592,7 @@ def Field(
     examples: list[Any] | None = _Unset,
     exclude: bool | None = _Unset,
     exclude_if: Callable[[Any], bool] | None = _Unset,
-    discriminator: str | types.Discriminator | None = _Unset,
+    discriminator: str | Discriminator | None = _Unset,
     deprecated: Deprecated | str | bool | None = _Unset,
     json_schema_extra: JsonDict | Callable[[JsonDict], None] | None = _Unset,
     frozen: bool | None = _Unset,
@@ -904,8 +912,8 @@ class BackRef:
 
 if TYPE_CHECKING:
     # How a relation reads to a type checker: a field specifier that is never
-    # an `__init__` parameter (PEP 681). The runtime functions below take no
-    # `init` keyword; the constructor refuses a relation keyword itself.
+    # an `__init__` parameter (PEP 681). At runtime each one refuses `init`,
+    # and the constructor refuses a relation keyword itself.
     def ManyToMany(
         *,
         through: str | None = None,
@@ -975,14 +983,7 @@ else:
             ]
             ```
         """
-        options = {} if related_name is None else {"related_name": related_name}
-        return Field(
-            many_to_many=True,
-            through=through,
-            reverse_index=reverse_index,
-            **options,
-            **kwargs,
-        )
+        return _many_to_many_field(through, related_name, reverse_index, kwargs)
 
     def Forward(column: str) -> Any:
         """Declare a forward relation over a foreign-key column of this model.
@@ -1077,6 +1078,30 @@ else:
             ```
         """
         return _relation_field("Reverse", "reverse", attribute)
+
+
+def _many_to_many_field(
+    through: str | None,
+    related_name: str | None,
+    reverse_index: bool,
+    kwargs: dict[str, Any],
+) -> Any:
+    """The `FieldInfo` a `ManyToMany(...)` declares, refusing `init` as a relation."""
+    if "init" in kwargs:
+        raise TypeError(
+            "ManyToMany() got an unexpected keyword argument 'init': a relation "
+            "is never a constructor parameter, so drop init= from the declaration"
+        )
+    options: dict[str, Any] = (
+        {} if related_name is None else {"related_name": related_name}
+    )
+    return Field(
+        many_to_many=True,
+        through=through,
+        reverse_index=reverse_index,
+        **options,
+        **kwargs,
+    )
 
 
 def _relation_field(spelling: str, kind: str, name: Any) -> Any:
