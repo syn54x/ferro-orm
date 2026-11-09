@@ -25,9 +25,11 @@ from ferro import (
     Check,
     Field,
     ForeignKey,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
 )
 from ferro.base import FerroField
 from ferro.ir import compile_registry_schema_ir
@@ -110,7 +112,9 @@ def test_a_retired_foreign_key_leaves_the_model_and_keeps_its_constraint():
     class Author(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        team: Annotated[Team | None, ForeignKey(retired=True, index=True)] = None
+        team_id: Annotated[
+            int | None, FerroField(foreign_key=Team, retired=True, index=True)
+        ] = None
 
     resolve_relationships()
 
@@ -118,12 +122,10 @@ def test_a_retired_foreign_key_leaves_the_model_and_keeps_its_constraint():
     assert "team_id" not in Author.__ferro_columns__
     assert "team" not in Author.__ferro_relation_specs__
     author = Author(name="a")
-    for attribute in ("team", "team_id"):
-        with pytest.raises(AttributeError, match=RETIRED):
-            getattr(author, attribute)
-    for keyword in ("team", "team_id"):
-        with pytest.raises(TypeError, match=rf"Author\.{keyword} is retired"):
-            Author(name="a", **{keyword: 1})
+    with pytest.raises(AttributeError, match=RETIRED):
+        author.team_id
+    with pytest.raises(TypeError, match=r"Author\.team_id is retired"):
+        Author(name="a", team_id=1)
 
     column = _column("author", "team_id")
     assert column["retired"] is True
@@ -135,15 +137,17 @@ def test_a_retired_foreign_key_leaves_the_model_and_keeps_its_constraint():
 
 
 def test_a_retired_foreign_key_column_is_the_mapped_one_but_for_the_flag():
-    """The shadow column a retired relation keeps is the column the mapped
-    relation declares, nullable: the IR differs by the flag alone."""
+    """A retired key column is the column the mapped one declares, nullable:
+    the IR differs by the flag alone."""
 
     class Team(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
 
     class Author(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        team: Annotated[Team | None, ForeignKey(retired=True)] = None
+        team_id: Annotated[int | None, FerroField(foreign_key=Team, retired=True)] = (
+            None
+        )
 
     resolve_relationships()
     retired = _column("author", "team_id")
@@ -151,11 +155,12 @@ def test_a_retired_foreign_key_column_is_the_mapped_one_but_for_the_flag():
 
     class Team(Model):  # noqa: F811 - the same model, mapped
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        authors: Relation[list["Author"]] = BackRef()
+        authors: Relation[list["Author"]] = Reverse("team_id")
 
     class Author(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        team: Annotated[Team | None, ForeignKey(related_name="authors")] = None
+        team_id: Annotated[int | None, FerroField(foreign_key=Team)] = None
+        team: Relation[Team | None] = Forward("team_id")
 
     resolve_relationships()
     assert {**_column("author", "team_id"), "retired": True} == retired
@@ -214,12 +219,12 @@ def test_retiring_a_non_optional_foreign_key_is_refused_naming_the_fix():
 
     with pytest.raises(
         TypeError,
-        match=r"Author\.team is retired but not optional: declare it `Team \| None`",
+        match=r"Author\.team_id is retired but not optional: declare it `int \| None`",
     ):
 
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            team: Annotated[Team, ForeignKey(retired=True)]
+            team_id: Annotated[int, FerroField(foreign_key=Team, retired=True)]
 
 
 NOT_NULLABLE = (
@@ -248,13 +253,14 @@ def test_retiring_a_foreign_key_declared_not_nullable_is_refused_naming_the_fix(
     class Team(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
 
-    with pytest.raises(TypeError, match=NOT_NULLABLE.format(field="team")):
+    with pytest.raises(TypeError, match=NOT_NULLABLE.format(field="team_id")):
 
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
-            team: Annotated[Team | None, ForeignKey(retired=True, nullable=False)] = (
-                None
-            )
+            team_id: Annotated[
+                int | None,
+                FerroField(foreign_key=Team, retired=True, nullable=False),
+            ] = None
 
 
 def test_retiring_a_primary_key_is_refused_naming_the_fix():
@@ -403,7 +409,9 @@ async def test_a_retired_column_dropped_by_hand_changes_nothing(db_url):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
         bio: str | None = Field(retired=True)
-        team: Annotated[Team | None, ForeignKey(retired=True)] = None
+        team_id: Annotated[int | None, FerroField(foreign_key=Team, retired=True)] = (
+            None
+        )
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
