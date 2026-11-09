@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from .rowsecurity import RowSecurity
     from .session import Session
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler
+from pydantic_core import CoreSchema
 
 from ._bind_payload import (
     apply_save_exclude,
@@ -512,23 +513,29 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             Raises:
                 InstanceNotLoaded: `update` names a column of an unloaded
                     instance; load it with `.load()` first.
+                TypeError: `update` names a relation; set its foreign-key
+                    column instead, as the constructor says.
             """
-            if update and not type(self).model_fields.keys().isdisjoint(update):
-                _unloaded.require_loaded(self)
+            if update:
+                _refuse_relation_keywords(type(self), update)
+                if not type(self).model_fields.keys().isdisjoint(update):
+                    _unloaded.require_loaded(self)
             copied = super().model_copy(update=update, deep=deep)
             if update:
                 prune_cached_relations(copied)
             return copied
 
-    # Every serializer refuses an unloaded instance: a nested model, a
-    # TypeAdapter and a response model reach pydantic-core without calling
-    # the instance's own `model_dump()`. pydantic-core wraps the refusal in a
-    # `PydanticSerializationError` that carries its message. No return
-    # annotation: one would replace every model's serialization JSON schema.
-    @model_serializer(mode="wrap")
-    def _refuse_unloaded(self, handler):
-        _unloaded.require_loaded(self)
-        return handler(self)
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        # Every serializer refuses an unloaded instance: a nested model, a
+        # TypeAdapter and a response model reach pydantic-core without calling
+        # the instance's own `model_dump()`, and a model's own
+        # `model_serializer` would replace a decorated one.
+        schema = handler(source)
+        _unloaded.guard_serialization(handler.resolve_ref_schema(schema))
+        return schema
 
     def __repr__(self) -> str:
         if _unloaded.is_unloaded(self):

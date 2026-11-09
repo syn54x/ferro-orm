@@ -123,7 +123,7 @@ class TestPublicSurface:
         from ferro import InstanceNotLoaded
 
         assert issubclass(InstanceNotLoaded, FerroError)
-        assert issubclass(InstanceNotLoaded, AttributeError)
+        assert not issubclass(InstanceNotLoaded, AttributeError)
         assert InstanceNotLoaded.__module__ == "ferro.exceptions"
 
     def test_module_is_ferro_exceptions(self):

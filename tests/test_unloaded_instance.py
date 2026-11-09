@@ -14,6 +14,7 @@ refusals (`Team`, `lambda player: player.team`) read as a user's would.
 
 import re
 from contextlib import closing
+from enum import Enum
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -21,7 +22,13 @@ from typing import ClassVar
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    ValidationError,
+    model_serializer,
+)
 from pydantic_core import PydanticSerializationError
 
 import ferro
@@ -255,15 +262,58 @@ async def test_an_unloaded_instance_reprs_as_its_key_and_unloaded(db_url):
 
 
 @pytest.mark.asyncio
-async def test_getattr_with_a_default_and_hasattr_see_an_unloaded_column_as_absent(
-    db_url,
-):
+async def test_getattr_with_a_default_and_hasattr_refuse_an_unloaded_column(db_url):
+    """`InstanceNotLoaded` is no `AttributeError`, so neither swallows it as a
+    missing attribute; a name that is no column is still a plain one."""
     m = await _seed(db_url)
     async with engines.session():
-        player = await m.Player.get(1)
+        team = (await m.Player.get(1)).team
 
-        assert getattr(player.team, "name", None) is None
-        assert hasattr(player.team, "name") is False
+        with pytest.raises(InstanceNotLoaded, match=re.escape(_NOT_LOADED)):
+            getattr(team, "name", None)
+        with pytest.raises(InstanceNotLoaded, match=re.escape(_NOT_LOADED)):
+            hasattr(team, "name")
+        assert not issubclass(InstanceNotLoaded, AttributeError)
+
+        assert getattr(team, "_repr_html_", None) is None
+        assert hasattr(team, "nickname") is False
+        with pytest.raises(AttributeError) as missing:
+            team.nickname
+        assert not isinstance(missing.value, InstanceNotLoaded)
+
+
+@pytest.mark.parametrize("default", [True, False], ids=["defaulted", "required"])
+@pytest.mark.asyncio
+async def test_a_from_attributes_model_refuses_an_unloaded_instance(db_url, default):
+    """Pydantic reads each field with `getattr` and treats an `AttributeError`
+    as a missing attribute; the refusal is none, so it surfaces with its fix."""
+    if default:
+
+        class TeamOut(BaseModel):
+            model_config = ConfigDict(from_attributes=True)
+            id: int
+            name: str = "unknown"
+
+    else:
+
+        class TeamOut(BaseModel):
+            model_config = ConfigDict(from_attributes=True)
+            id: int
+            name: str
+
+    m = await _seed(db_url)
+    async with engines.session():
+        team = (await m.Player.get(1)).team
+
+        with pytest.raises(ValidationError) as refused:
+            TeamOut.model_validate(team)
+
+        assert [error["type"] for error in refused.value.errors()] == [
+            "get_attribute_error"
+        ]
+        assert f"InstanceNotLoaded: {_NOT_LOADED}" in str(refused.value)
+        await team.load()
+        assert TeamOut.model_validate(team) == TeamOut(id=1, name="Rustaceans")
 
 
 @pytest.mark.asyncio
@@ -327,7 +377,7 @@ async def test_an_unloaded_instance_refuses_every_use_but_its_key_naming_the_fix
             with pytest.raises(InstanceNotLoaded) as refusal:
                 call()
             assert str(refusal.value) == _NOT_LOADED, use
-            assert isinstance(refusal.value, AttributeError)
+            assert not isinstance(refusal.value, AttributeError)
             assert isinstance(refusal.value, FerroError)
         with pytest.raises(InstanceNotLoaded, match=re.escape(_NOT_LOADED)):
             await team.save()
@@ -652,6 +702,128 @@ async def test_every_pydantic_serializer_refuses_an_unloaded_instance(db_url):
         assert PlayerOut(team=team).model_dump() == {
             "team": {"id": 1, "name": "Rustaceans"}
         }
+
+
+@pytest.mark.parametrize("mode", ["wrap", "plain"])
+@pytest.mark.asyncio
+async def test_a_model_serializer_of_its_own_still_refuses_an_unloaded_instance(
+    db_url, mode
+):
+    """A model may declare its own `model_serializer`; Pydantic keeps one per
+    class, and the refusal does not depend on it being Ferro's."""
+    if mode == "wrap":
+
+        class Badge(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            label: str
+
+            @model_serializer(mode="wrap")
+            def _shouted(self, handler):
+                return {
+                    name: value.upper() if isinstance(value, str) else value
+                    for name, value in handler(self).items()
+                }
+
+    else:
+
+        class Badge(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            label: str
+
+            @model_serializer(mode="plain")
+            def _shouted(self):
+                values = {
+                    name: self.__dict__.get(name) for name in type(self).model_fields
+                }
+                return {
+                    name: value.upper() if isinstance(value, str) else value
+                    for name, value in values.items()
+                }
+
+    class Holder(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        badge_id: int = Field(foreign_key=Badge)
+        badge: Relation[Badge] = Forward("badge_id")
+
+    class HolderOut(BaseModel):
+        badge: Badge
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Badge.create(id=1, label="Founder")
+        await Holder.create(id=1, badge_id=1)
+    async with engines.session():
+        badge = (await Holder.get(1)).badge
+
+        for use, call in {
+            "nested model_dump()": lambda: HolderOut(badge=badge).model_dump(),
+            "TypeAdapter.dump_json": lambda: TypeAdapter(Badge).dump_json(badge),
+        }.items():
+            with pytest.raises(PydanticSerializationError) as refusal:
+                call()
+            assert "InstanceNotLoaded: Badge(id=1) is not loaded" in str(
+                refusal.value
+            ), use
+
+        await badge.load()
+        assert HolderOut(badge=badge).model_dump() == {
+            "badge": {"id": 1, "label": "FOUNDER"}
+        }
+
+
+@pytest.mark.asyncio
+async def test_model_copy_refuses_a_relation_in_update_as_the_constructor_does(
+    db_url,
+):
+    m = await _seed(db_url)
+    async with engines.session():
+        gophers = await m.Team.create(id=2, name="Gophers")
+        player = await m.Player.get(1)
+
+        with pytest.raises(TypeError) as refused:
+            player.model_copy(update={"team": gophers})
+
+        assert str(refused.value) == (
+            "Player.team is a relation. Pass the foreign-key column's value, "
+            "team_id=team.id"
+        )
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_a_fill_that_fails_to_convert_a_value_leaves_the_instance_unloaded(
+    db_url,
+):
+    class Tier(str, Enum):
+        GOLD = "gold"
+
+    class Club(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        tier: Tier
+
+    class Member(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        club_id: int = Field(foreign_key=Club)
+        club: Relation[Club] = Forward("club_id")
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Club.create(id=1, name="Rust", tier=Tier.GOLD)
+        await Member.create(id=1, club_id=1)
+    database = db_url.removeprefix("sqlite:").split("?")[0]
+    with closing(sqlite3.connect(database)) as raw, raw:
+        raw.execute("PRAGMA ignore_check_constraints = ON")
+        raw.execute("UPDATE club SET tier = 'tin' WHERE id = 1")
+
+    async with engines.session():
+        club = (await Member.get(1)).club
+        with pytest.raises(ValueError, match="tier"):
+            await Club.get(1)  # the fetch fills the session's unloaded club
+
+        assert repr(club) == "Club(id=1, unloaded)"
+        with pytest.raises(InstanceNotLoaded):
+            club.name
 
 
 @pytest.mark.asyncio

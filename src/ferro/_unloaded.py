@@ -9,6 +9,8 @@ known here alone.
 
 from typing import Any
 
+from pydantic_core import CoreSchema, core_schema
+
 from .exceptions import InstanceNotLoaded
 
 #: The `__dict__` key the hydrator sets on an unloaded instance (the Rust
@@ -27,6 +29,31 @@ def require_loaded(instance: object) -> None:
     """Raise the refusal when `instance` is unloaded."""
     if MARKER in instance.__dict__:
         raise refusal(instance)
+
+
+def _refuse_then_serialize(instance: Any, handler: Any) -> Any:
+    require_loaded(instance)
+    return handler(instance)
+
+
+def guard_serialization(schema: CoreSchema) -> None:
+    """Make a model's core schema refuse an unloaded instance before it serializes.
+
+    The guard wraps whatever serializer the schema holds, a model's own
+    `model_serializer` included, so every path through pydantic-core (a
+    dump, a nested model, a `TypeAdapter`) refuses and no subclass can
+    replace it. pydantic-core wraps the refusal in a
+    `PydanticSerializationError` that carries its message. Wrapping is
+    idempotent: a schema already guarded is left as it is.
+    """
+    if schema.get("type") != "model":
+        return
+    current = schema.get("serialization")
+    if current is not None and current.get("function") is _refuse_then_serialize:
+        return
+    schema["serialization"] = core_schema.wrap_serializer_function_ser_schema(
+        _refuse_then_serialize, schema={**schema}
+    )
 
 
 def refusal(instance: Any) -> InstanceNotLoaded:

@@ -178,17 +178,24 @@ class ModelDoesNotExist(FerroError, LookupError):
         return (self.__class__, (self.model, self.pk))
 
 
-class InstanceNotLoaded(FerroError, AttributeError):
+class InstanceNotLoaded(FerroError):
     """An unloaded instance was asked for more than its primary key.
 
     A forward relation nothing loaded reads as an unloaded instance of its
     model, holding only its primary key. Reading another column, assigning
     one, `save()`, `model_dump()` and `model_dump_json()` raise this error,
     whose message names the fix: load the relation with `include()` on the
-    query, or call `.load()` on the instance. It is also an
-    `AttributeError`, so `hasattr()` returns `False` and `getattr()` with a
-    default returns the default. See
+    query, or call `.load()` on the instance. It is not an
+    `AttributeError`, so `hasattr()` and `getattr()` with a default raise it
+    too, and a Pydantic model built `from_attributes` never mistakes the
+    missing column for an absent one. See
     [Loaded relations](../guide/queries.md#loading-relations-with-include).
+
+    Serializing the instance any other way, nested in another model, through
+    a `TypeAdapter` or as a response model, raises Pydantic's
+    `PydanticSerializationError` instead, with this error's message inside
+    it; in Python mode this error is its `__cause__`. See
+    [The unloaded instance](../concepts/identity-map.md#the-unloaded-instance).
 
     Examples:
         ```python {test=run prelude=reference}

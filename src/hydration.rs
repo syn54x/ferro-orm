@@ -468,6 +468,7 @@ pub fn refresh_model_instance<'py>(
 /// [`hydrate_model_instance`] lays one out (the fields in declaration
 /// order, then the connection and persisted markers), so a filled instance
 /// dumps the same shape as a fetched one (I-2). [`UNLOADED_MARKER`] goes.
+/// A row that fails to decode changes nothing.
 fn fill_unloaded<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
@@ -477,17 +478,18 @@ fn fill_unloaded<'py>(
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
     converters: &FieldConverters<'py>,
 ) -> PyResult<()> {
-    let kept = dict.copy()?;
-    kept.del_item(UNLOADED_MARKER)?;
-    dict.clear();
+    // Decoded into a new dict first: a value its converter rejects raises
+    // here and leaves the instance unloaded, exactly as it was.
+    let filled = pyo3::types::PyDict::new(py);
     converters.sort_in_declaration_order(&mut fields);
-    apply_decoded_fields(py, cls, dict, fields_set, fields, py_col_names, converters)?;
-    for (name, value) in kept.iter() {
-        if !dict.contains(&name)? {
-            dict.set_item(name, value)?;
+    apply_decoded_fields(py, cls, &filled, fields_set, fields, py_col_names, converters)?;
+    for (name, value) in dict.iter() {
+        if !filled.contains(&name)? && !name.eq(UNLOADED_MARKER)? {
+            filled.set_item(name, value)?;
         }
     }
-    Ok(())
+    dict.clear();
+    dict.update(filled.as_mapping())
 }
 
 /// The refresh rule for loaded relations (#287, ADR-0008): keep each
