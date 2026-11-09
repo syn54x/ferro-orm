@@ -29,7 +29,11 @@ from pydantic_core import PydanticCustomError, PydanticUndefined
 
 from ._annotation_eval import DeferredNames
 from ._core import prune_stale_relations
-from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
+from ._annotation_utils import (
+    _strip_optional_union,
+    annotation_allows_none,
+    is_closed_domain_annotation,
+)
 from .base import (
     FerroField,
     ForwardRelation,
@@ -54,6 +58,7 @@ from .registry import REGISTRY
 from .relations import (
     BAD_THROUGH,
     check_declared_foreign_keys,
+    default_join_table,
     is_table_name,
     key_column_line,
     relation_line,
@@ -261,13 +266,11 @@ def _layers(annotation: Any) -> tuple[Any, bool, list[Any]]:
             metadata += args[1:]
             annotation = args[0]
             continue
-        if origin in (Union, UnionType):
-            args = get_args(annotation)
-            members = [arg for arg in args if arg is not type(None)]
-            if len(members) == 1 and len(members) < len(args):
-                wrapped = True
-                annotation = members[0]
-                continue
+        stripped = _strip_optional_union(annotation)
+        if stripped is not annotation:
+            wrapped = True
+            annotation = stripped
+            continue
         return annotation, wrapped, metadata
 
 
@@ -508,7 +511,7 @@ def _declared_many_to_many(
         reason = None
     if not isinstance(through, str) or not is_table_name(through):
         # The name the fix writes; the refusal checks it in turn.
-        through = f"{table}_{field_name}"
+        through = default_join_table(table, field_name)
     if view is not None:
         target = view[1]
     elif not _is_bare_relation(core):

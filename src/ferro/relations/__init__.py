@@ -4,13 +4,12 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from types import UnionType
-from typing import Any, ForwardRef, Union, get_args, get_origin
+from typing import Any, ForwardRef
 
 from pydantic_core import PydanticUndefined
 
 from .. import _core
-from .._annotation_utils import annotation_allows_none
+from .._annotation_utils import _strip_optional_union, annotation_allows_none
 from ..base import (
     FerroField,
     ForwardRelation,
@@ -50,7 +49,7 @@ def is_table_name(name: str) -> bool:
     return len(name) <= 63 and _TABLE_NAME.match(name) is not None
 
 
-def _default_join_table(source_table: str, field_name: str) -> str:
+def default_join_table(source_table: str, field_name: str) -> str:
     """The join table a fix writes for a ``ManyToMany`` whose ``through=`` it
     replaces: ``<table>_<field>``."""
     return f"{source_table}_{field_name}"
@@ -108,10 +107,7 @@ def _resolve_target(target: Any, *, final: bool) -> Any:
 
 def _scalar(annotation: Any) -> Any:
     """``annotation`` with ``| None`` set aside and a ``NewType`` read as its supertype."""
-    if get_origin(annotation) in (Union, UnionType):
-        members = [arg for arg in get_args(annotation) if arg is not type(None)]
-        if len(members) == 1:
-            annotation = members[0]
+    annotation = _strip_optional_union(annotation)
     while hasattr(annotation, "__supertype__"):
         annotation = annotation.__supertype__
     return annotation
@@ -138,15 +134,6 @@ def _free_name(model_cls: Any, name: str) -> str:
     while name in model_cls.model_fields:
         name += "_ref"
     return name
-
-
-def _without_none(python_type: Any) -> Any:
-    """``python_type`` with ``| None`` set aside."""
-    if get_origin(python_type) in (Union, UnionType):
-        members = [arg for arg in get_args(python_type) if arg is not type(None)]
-        if len(members) == 1:
-            return members[0]
-    return python_type
 
 
 def _backs(key: ColumnSpec, column: ColumnSpec) -> bool:
@@ -211,7 +198,7 @@ def _primary_key_edits(
         edits = [Edit(model, "id", "replace", (line,))]
         key = plain
     else:
-        key_type = int if needing is None else _without_none(needing.python_type)
+        key_type = int if needing is None else _strip_optional_union(needing.python_type)
         db_type = needing.db_type if needing and needing.db_type_explicit else None
         # The database numbers an integer key, so it starts as None.
         numbered = key_type is int
@@ -329,15 +316,12 @@ def _target_key(model_cls: Any, name: str, target: Any) -> tuple[str, Any]:
             _columns_now(model_cls, None),
             model_cls,
         )
-    return pk, _without_none(target.__ferro_columns__[pk].python_type)
+    return pk, _strip_optional_union(target.__ferro_columns__[pk].python_type)
 
 
 def written_type(annotation: Any) -> str:
     """``annotation`` as source text, with ``| None`` set aside."""
-    if get_origin(annotation) in (Union, UnionType):
-        members = [arg for arg in get_args(annotation) if arg is not type(None)]
-        return " | ".join(annotation_text(member) for member in members)
-    return annotation_text(annotation)
+    return annotation_text(_strip_optional_union(annotation))
 
 
 # Options a foreign-key column cannot take, at the value that leaves them out.
@@ -410,7 +394,7 @@ def key_column_line(
         pk, key_type = _target_key(model_cls or target, column, target)
         key = target.__ferro_columns__[pk]
     else:
-        key_type = _without_none(key.python_type)
+        key_type = _strip_optional_union(key.python_type)
     if foreign_key is None:
         foreign_key = (
             meta.foreign_key
@@ -853,7 +837,7 @@ def many_to_many_refusal(
                     and relation.attribute == field_name
                     and _resolve_target(relation.to, final=False) is owner
                 ):
-                    own = _free_table_name(f"{other.__ferro_table__}_{reader}", claimed)
+                    own = _free_table_name(default_join_table(other.__ferro_table__, reader), claimed)
                     claimed.add(own)
                     line = _many_to_many_line(
                         reader, model, own, True, ON_ANOTHER_MODEL
@@ -1339,7 +1323,7 @@ def _check_reverse_many_to_many(
         name,
         refused,
         [other.__name__],
-        f"{model_cls.__ferro_table__}_{name}",
+        default_join_table(model_cls.__ferro_table__, name),
         True,
         relation.bound,
     )
@@ -1480,7 +1464,7 @@ def _refuse_taken_join_table(
     else:
         return
     through = _free_table_name(
-        _default_join_table(source_model.__ferro_table__, field_name),
+        default_join_table(source_model.__ferro_table__, field_name),
         _tables_taken(source_model, field_name) | {join_table},
     )
     line = _many_to_many_line(
@@ -1538,16 +1522,7 @@ def _resolve_pending() -> None:
         # Everything else queued is a many-to-many.
         if rel.refusal is not None:
             _refuse_unnamed_many_to_many(REGISTRY.models()[model_name], field_name, rel)
-        if isinstance(rel.to, (str, ForwardRef)):
-            to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
-            target_model = REGISTRY.resolve_reference(to_name, default=None)
-            if not target_model:
-                raise RuntimeError(
-                    f"Relationship resolution failed: '{to_name}' not found"
-                )
-            rel.to = target_model
-
-        target_model = rel.to
+        rel.to = target_model = _resolve_target(rel.to, final=True)
         if target_model is REGISTRY.models()[model_name]:
             # The class body names a target by the name its model is
             # registered under, so class definition already refused this.
