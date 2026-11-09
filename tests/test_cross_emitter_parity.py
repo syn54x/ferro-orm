@@ -1085,6 +1085,7 @@ REBUILD_CASES = (
     "A10-change-a-table-check",
     "A10-drop-a-table-check",
     "B3-rename-a-model",
+    "B3-rename-a-join-table",
     "C1-add-an-optional-foreign-key",
     "C1-add-a-required-foreign-key",
     "C2-drop-a-foreign-key-column",
