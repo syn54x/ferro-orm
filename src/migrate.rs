@@ -1347,8 +1347,9 @@ pub fn _render_migration_sql_for_test(
 /// "statements", "row_security_statements", "twin", "index", "marker",
 /// "irreversible"}` ([`ferro_migrate::RevisionOp`]) and each report in the
 /// plan's report shape; or, when no revision is written, the same keys
-/// empty with `"refusal": {"kind", "text"}`, `text` the sentence after
-/// `ferro: autogenerate refused: `.
+/// empty with `"refusal": {"kind", "text", "op"}`, `text` the sentence after
+/// `ferro: autogenerate refused: ` and `op` the planner op it refuses, in the
+/// plan's op shape (`None` for a refusal that names none).
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
