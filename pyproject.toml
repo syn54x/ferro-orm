@@ -115,7 +115,13 @@ version_toml = [
     "Cargo.toml:package.version"
 ]
 version_variables = []
-build_command = "uv run maturin build --release"
+# semantic-release commits only the files it stamps, so uv.lock is re-locked to
+# the new version and staged here, before the release commit is made.
+build_command = """
+    uv lock
+    git add uv.lock
+    uv run maturin build --release
+"""
 major_on_zero = false
 allow_zero_version = true
 branch = "main"
