@@ -1068,29 +1068,24 @@ class ModelMetaclass(type(BaseModel)):
         # We need a complete __annotations__ dict so we can safely modify it.
         if "__annotate_func__" in namespace and "__annotations__" not in namespace:
             try:
-                # Format 1: Value (evaluated)
                 return namespace["__annotate_func__"](1)
             except Exception as value_error:
-                try:
-                    # Format 2: ForwardRef (non-evaluated objects)
-                    return namespace["__annotate_func__"](2)
-                except Exception:
-                    # #155: was `pass` -> returned {} -> Pydantic then raised the
-                    # misleading "non-annotated attribute" on the first class-body
-                    # assignment. Surface the REAL cause (PEP 649 deferred-eval
-                    # failure) instead of silently dropping every annotation.
-                    model = (
-                        namespace.get("__qualname__")
-                        or namespace.get("__name__")
-                        or "<model>"
-                    )
-                    value_error.add_note(
-                        f"ferro: could not resolve deferred annotations for model "
-                        f"'{model}' (PEP 649 / Python 3.14). An annotation on this "
-                        f"model failed to evaluate; an attribute Pydantic may flag "
-                        f"as 'non-annotated' is a symptom, not the cause."
-                    )
-                    raise value_error
+                # #155: was `pass` -> returned {} -> Pydantic then raised the
+                # misleading "non-annotated attribute" on the first class-body
+                # assignment. Surface the REAL cause (PEP 649 deferred-eval
+                # failure) instead of silently dropping every annotation.
+                model = (
+                    namespace.get("__qualname__")
+                    or namespace.get("__name__")
+                    or "<model>"
+                )
+                value_error.add_note(
+                    f"ferro: could not resolve deferred annotations for model "
+                    f"'{model}' (PEP 649 / Python 3.14). An annotation on this "
+                    f"model failed to evaluate; an attribute Pydantic may flag "
+                    f"as 'non-annotated' is a symptom, not the cause."
+                )
+                raise
 
         return namespace.get("__annotations__", {})
 
