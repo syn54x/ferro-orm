@@ -643,6 +643,11 @@ def compile_model_schema_ir(
     # ``__ferro_columns__`` refresh refreshes ``__ferro_relation_specs__`` too,
     # with the dict the checks above compiled against.
     model_cls.__ferro_relation_specs__ = relation_specs
+    # Their key columns, so assigning one prunes a stale cached relation with
+    # one set lookup; rebuilt with every spec dict, never left stale.
+    model_cls.__ferro_relation_key_columns__ = frozenset(
+        spec.fk_column for spec in relation_specs.values()
+    )
     # And the reverse-relation facts (#314, ADR-0007): the same refresh keeps
     # ``__ferro_reverse_specs__`` in step, so existence tests resolve against
     # descriptors the moment relationship resolution recompiles this model.

@@ -300,11 +300,24 @@ def _generated_setattr(inherited: Any):
 
 
 def forward_spec(model_cls: type, name: str) -> RelationSpec:
-    """The spec of `model_cls`'s forward relation `name`.
+    """Return the spec of one forward relation of a model.
 
     Every forward relation over a mapped key column has one from class
     definition. One without is a declaration relation resolution refuses, so
     the modelset resolves here to raise that refusal.
+
+    Args:
+        model_cls: The model declaring the relation.
+        name: The relation's field name.
+
+    Returns:
+        The relation's spec from `__ferro_relation_specs__`.
+
+    Raises:
+        TypeError: The relation's key column is not a mapped column of the
+            model, or another declaration in the modelset is refused.
+        RuntimeError: A relation in the modelset names a model that is not
+            defined.
     """
     spec = model_cls.__ferro_relation_specs__.get(name)
     if spec is None:
@@ -356,13 +369,14 @@ def prune_cached_relations(instance: BaseModel) -> None:
         prune_stale_relations(instance)
 
 
-def _relation_setattr(relations: frozenset[str], inherited: Any):
+def _relation_setattr(cls: type, relations: frozenset[str], inherited: Any):
     """Assign a forward relation through its key column; drop a stale one when the key changes.
 
-    `relations` names the forward relations the class declares; each one's
-    foreign-key column comes from its spec. Assigning the column keeps a
-    loaded relation only while the key still points at it, the refresh rule
-    of ADR-0008.
+    `relations` names the forward relations `cls` declares, and
+    `cls.__ferro_relation_key_columns__` holds their foreign-key columns,
+    published with their specs. Assigning one of those columns keeps a loaded
+    relation only while the key still points at it, the refresh rule of
+    ADR-0008.
     """
 
     def __setattr__(self: BaseModel, name: str, value: Any) -> None:
@@ -370,12 +384,7 @@ def _relation_setattr(relations: frozenset[str], inherited: Any):
             _assign_relation(self, name, value)
             return
         inherited(self, name, value)
-        specs = type(self).__ferro_relation_specs__
-        if any(
-            name == spec.fk_column
-            for relation, spec in specs.items()
-            if relation in relations
-        ):
+        if name in cls.__ferro_relation_key_columns__:
             prune_cached_relations(self)
 
     return __setattr__
@@ -478,7 +487,7 @@ class ModelMetaclass(type(BaseModel)):
             if isinstance(meta, ForwardRelation)
         )
         if forward:
-            cls.__setattr__ = _relation_setattr(forward, cls.__setattr__)
+            cls.__setattr__ = _relation_setattr(cls, forward, cls.__setattr__)
 
         return cls
 

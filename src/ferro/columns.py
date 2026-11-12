@@ -133,7 +133,10 @@ class RelationSpec:
         the first read does when it has not run yet.
 
         Raises:
-            RuntimeError: No model takes the declared name.
+            RuntimeError: No model takes the declared name, or another
+                relation in the modelset names a model that is not defined.
+            TypeError: A declaration in the modelset is refused once its
+                relations are known, this one or another model's.
         """
         target = self.relation.to
         if not isinstance(target, type):

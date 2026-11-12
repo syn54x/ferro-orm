@@ -306,3 +306,31 @@ def test_assigning_a_relation_with_no_key_column_raises_its_refusal(clean_regist
     assert "team" not in Player.__ferro_relation_specs__
     with pytest.raises(TypeError, match="Player has no column team_id"):
         Player(id=1).team = Team(id=7)
+
+
+def test_key_columns_are_published_with_the_specs(clean_registry):
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+        team: Relation["Team"] = Forward("team_id")  # noqa: F821
+
+    assert Player.__ferro_relation_key_columns__ == frozenset({"team_id"})
+
+
+def test_reading_target_raises_a_refusal_elsewhere_in_the_modelset(clean_registry):
+    # The first read resolves the whole modelset, so another model's refused
+    # declaration surfaces here as its TypeError.
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+        team: Relation["Team"] = Forward("team_id")  # noqa: F821
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Coach(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team: Relation["Team"] = Forward("team_id")  # noqa: F821
+
+    with pytest.raises(TypeError, match="Coach has no column team_id"):
+        Player.__ferro_relation_specs__["team"].target
