@@ -131,8 +131,6 @@ class ForwardDescriptor(BaseModel):
     """The related model's name."""
     field_name: str
     """The relation's field name."""
-    fk_column: str
-    """The foreign-key column the relation reads."""
     _target_model: Model | None = None
 
     def __get__(self, instance, owner):
@@ -142,7 +140,9 @@ class ForwardDescriptor(BaseModel):
         if self._target_model is None:
             self._target_model = REGISTRY.resolve_reference(self.target_model_name)
 
-        key = getattr(instance, self.fk_column)
+        from ..metaclass import forward_spec
+
+        key = getattr(instance, forward_spec(type(instance), self.field_name).fk_column)
         if key is None:
             return None
         related = unloaded_instance(

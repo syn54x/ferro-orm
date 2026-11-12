@@ -17,7 +17,7 @@ import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import _core
 from . import fn as _fn
@@ -26,7 +26,6 @@ from .checks import (
     _check_literal_token,
     _CheckProxy,
     _iter_code_objects,
-    _relation_fk_columns,
     _reverse_relation_names,
 )
 from .query.nodes import (
@@ -36,6 +35,9 @@ from .query.nodes import (
     NegateValueExpr,
     QueryNode,
 )
+
+if TYPE_CHECKING:
+    from .columns import RelationSpec
 
 #: Python arithmetic to the IR's binary operator.
 _BINARY_OPS = {"+": "add", "-": "sub", "*": "mul", "/": "div"}
@@ -137,11 +139,11 @@ class _ValueProxy(_CheckProxy):
     _subject = "generated expression"
 
     def __getattr__(self, name: str) -> Any:
-        fk_column = self._relations.get(name)
-        if fk_column is not None or name in self._reverse_relations:
+        relation = self._relations.get(name)
+        if relation is not None or name in self._reverse_relations:
             hint = (
-                f"; read the foreign-key column {fk_column!r} instead"
-                if fk_column
+                f"; read the foreign-key column {relation.fk_column!r} instead"
+                if relation is not None
                 else ""
             )
             raise TypeError(
@@ -312,7 +314,10 @@ def _declared_generated(model_cls: type[Any]) -> dict[str, Callable[..., Any]]:
 
 
 def compile_generated_columns(
-    model_cls: type[Any], model_name: str, columns: Mapping[str, Any]
+    model_cls: type[Any],
+    model_name: str,
+    columns: Mapping[str, Any],
+    relations: Mapping[str, RelationSpec],
 ) -> dict[str, GeneratedColumnSpec]:
     """Validate and lower every `Field(generated=...)` of one model.
 
@@ -323,6 +328,7 @@ def compile_generated_columns(
         model_cls: The model class.
         model_name: The model class name, for refusals.
         columns: The compile's column specs, keyed by column name.
+        relations: The compile's forward relation specs, keyed by field name.
 
     Returns:
         One `GeneratedColumnSpec` per generated field, in declaration order.
@@ -338,7 +344,7 @@ def compile_generated_columns(
     proxy = _ValueProxy(
         model_cls,
         columns,
-        _relation_fk_columns(model_cls, columns),
+        relations,
         _reverse_relation_names(model_cls),
     )
     specs: dict[str, GeneratedColumnSpec] = {}

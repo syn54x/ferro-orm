@@ -595,12 +595,19 @@ def compile_model_schema_ir(
     indexes = drop_overlap_with_uniques(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
+    # The forward relations this pass publishes, built before checks and
+    # generated columns, which compile before anything is published.
+    relation_specs = build_relation_specs(model_cls, specs)
     # Table checks compile against THIS pass's specs (never the class's
     # published ones), so a predicate can reference a foreign-key column at class
     # definition and the resolved second pass re-lowers against fresh specs.
-    table_checks = compile_table_checks(model_cls, model_name, schema_specs)
+    table_checks = compile_table_checks(
+        model_cls, model_name, schema_specs, relation_specs
+    )
     # Generated expressions lower beside them, against the same fresh specs.
-    generated = compile_generated_columns(model_cls, model_name, schema_specs)
+    generated = compile_generated_columns(
+        model_cls, model_name, schema_specs, relation_specs
+    )
     # Row security lowers against the same fresh column IR for the same reason:
     # a shorthand policy's column type is validated on every compile pass, so a
     # declaration can never outlive the column it scopes on.
@@ -632,11 +639,15 @@ def compile_model_schema_ir(
     # Same choke point caches the PK fact: every ``__ferro_columns__`` refresh
     # re-derives ``__ferro_pk__``, so it can never go stale relative to specs.
     model_cls.__ferro_pk__ = pk_field
-    # Same choke point compiles relation-traversal facts (#268): every
-    # ``__ferro_columns__`` refresh (provisional class-body registration and
-    # the resolved second pass) refreshes ``__ferro_relation_specs__`` too, so
-    # the latter is never stale relative to the former.
-    model_cls.__ferro_relation_specs__ = build_relation_specs(model_cls, specs)
+    # Same choke point publishes relation-traversal facts (#268): every
+    # ``__ferro_columns__`` refresh refreshes ``__ferro_relation_specs__`` too,
+    # with the dict the checks above compiled against.
+    model_cls.__ferro_relation_specs__ = relation_specs
+    # Their key columns, so assigning one prunes a stale cached relation with
+    # one set lookup; rebuilt with every spec dict, never left stale.
+    model_cls.__ferro_relation_key_columns__ = frozenset(
+        spec.fk_column for spec in relation_specs.values()
+    )
     # And the reverse-relation facts (#314, ADR-0007): the same refresh keeps
     # ``__ferro_reverse_specs__`` in step, so existence tests resolve against
     # descriptors the moment relationship resolution recompiles this model.

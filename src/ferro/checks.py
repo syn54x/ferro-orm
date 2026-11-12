@@ -34,10 +34,9 @@ import textwrap
 import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fn as _fn
-from ._bind_payload import relation_key_columns
 from .base import ForwardRelation
 from .query.nodes import (
     FieldProxy,
@@ -47,6 +46,9 @@ from .query.nodes import (
     ValueExpr,
     value_comparison,
 )
+
+if TYPE_CHECKING:
+    from .columns import RelationSpec
 
 FERRO_CHECKS = "__ferro_checks__"
 """The class attribute a model declares its table checks in."""
@@ -187,10 +189,9 @@ class _CheckProxy(QueryProxy[Any]):
     during resolution that compile is the only one there is — so this proxy
     reads the column specs and relation metadata the compile just built.
 
-    Relation resolution deliberately does not need a resolved target class: a
-    forward relation names its foreign-key column, which is all a null test
-    needs, so a forward-referenced key compiles at class definition like any
-    other.
+    A forward relation's spec names its foreign-key column from class
+    definition, which is all a null test needs, so a forward-referenced key
+    compiles at class definition like any other.
     """
 
     __slots__ = ("_columns", "_relations", "_reverse_relations")
@@ -202,7 +203,7 @@ class _CheckProxy(QueryProxy[Any]):
         self,
         model_cls: type,
         columns: Mapping[str, Any],
-        relations: Mapping[str, str],
+        relations: Mapping[str, RelationSpec],
         reverse_relations: frozenset[str],
     ) -> None:
         super().__init__(model_cls)
@@ -211,9 +212,9 @@ class _CheckProxy(QueryProxy[Any]):
         self._reverse_relations = reverse_relations
 
     def __getattr__(self, name: str) -> Any:
-        fk_column = self._relations.get(name)
-        if fk_column is not None:
-            return _RelationNullProxy(self._model_cls, name, fk_column)
+        relation = self._relations.get(name)
+        if relation is not None:
+            return _RelationNullProxy(self._model_cls, name, relation.fk_column)
         if name in self._reverse_relations:
             raise TypeError(
                 f"check predicate references the reverse relation {name!r}: an "
@@ -244,10 +245,9 @@ class _RelationNullProxy:
 
     ``t.<relation> == None`` desugars to the relation's foreign-key column —
     the same join-free leaf ``RelationProxy._instance_comparison`` builds for
-    ``where()``. It cannot reuse that proxy: ``RelationProxy`` resolves the
-    foreign-key column through the model's *published* ``__ferro_relation_specs__``
-    (which requires a resolved target class), while a check predicate compiles
-    before publication and, for a forward-referenced FK, before resolution.
+    ``where()``. It cannot reuse that proxy: ``RelationProxy`` reads the
+    foreign-key column from the model's *published* ``__ferro_relation_specs__``,
+    while a check predicate compiles before anything is published.
     """
 
     __slots__ = ("_model_cls", "_relation", "_fk_column")
@@ -348,22 +348,6 @@ def _declared_checks(model_cls: type[Any]) -> tuple[Check, ...]:
             )
         seen.add(entry.suffix)
     return raw
-
-
-def _relation_fk_columns(
-    model_cls: type[Any], columns: Mapping[str, Any]
-) -> dict[str, str]:
-    """Map each forward relation field to the key column its ``Forward`` names.
-
-    The forward relations among `relation_key_columns`, read from the
-    class body so the mapping is complete at class definition, whose key
-    column is one of ``columns``.
-    """
-    return {
-        name: column
-        for name, column in relation_key_columns(model_cls).items()
-        if column in columns
-    }
 
 
 def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
@@ -737,6 +721,7 @@ def _resolve_check_node(
     model_name: str,
     check: Check,
     columns: Mapping[str, Any],
+    relations: Mapping[str, RelationSpec],
 ) -> QueryNode:
     """Evaluate one check's lambda against a validating proxy.
 
@@ -749,7 +734,7 @@ def _resolve_check_node(
     proxy = _CheckProxy(
         model_cls,
         columns,
-        _relation_fk_columns(model_cls, columns),
+        relations,
         _reverse_relation_names(model_cls),
     )
     prefix = f"{model_name}.{FERRO_CHECKS} check {check.suffix!r}: "
@@ -783,7 +768,10 @@ def _resolve_check_node(
 
 
 def compile_table_checks(
-    model_cls: type[Any], model_name: str, columns: Mapping[str, Any]
+    model_cls: type[Any],
+    model_name: str,
+    columns: Mapping[str, Any],
+    relations: Mapping[str, RelationSpec],
 ) -> tuple[TableCheckSpec, ...]:
     """Validate and lower ``__ferro_checks__`` for one model.
 
@@ -796,6 +784,7 @@ def compile_table_checks(
         model_cls: The model class carrying ``__ferro_checks__``.
         model_name: Registry key / model class name, for error messages.
         columns: The compile's column specs, keyed by column name.
+        relations: The compile's forward relation specs, keyed by field name.
 
     Returns:
         One `TableCheckSpec` per declared check, in declaration order.
@@ -810,7 +799,7 @@ def compile_table_checks(
         return ()
     specs: list[TableCheckSpec] = []
     for check in declared:
-        node = _resolve_check_node(model_cls, model_name, check, columns)
+        node = _resolve_check_node(model_cls, model_name, check, columns, relations)
         specs.append(
             TableCheckSpec(
                 suffix=check.suffix,

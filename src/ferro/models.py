@@ -51,7 +51,7 @@ from .base import ManyToManyRelation, ReverseRelation
 from .exceptions import ModelDoesNotExist
 from .metaclass import (
     ModelMetaclass,
-    _resolved_relation_specs,
+    forward_spec,
     generated_refusal,
     prune_cached_relations,
 )
@@ -115,7 +115,7 @@ def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
             f"{model}.{name} is a relation. Save the {instance}, then "
             f"await {instance}.{name}.add(*{name})"
         )
-    spec = _resolved_relation_specs(model_cls, {name})[name]
+    spec = forward_spec(model_cls, name)
     refusal = (
         f"{model}.{name} is a relation. Pass the foreign-key "
         f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}"
@@ -375,6 +375,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
     __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
+    #: The key columns of those forward relations, published beside them.
+    __ferro_relation_key_columns__: ClassVar[frozenset[str]] = frozenset()
     #: Reverse and many-to-many relation facts for existence tests (#314, ADR-0007),
     #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
     __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}

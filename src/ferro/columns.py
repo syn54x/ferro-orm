@@ -108,20 +108,43 @@ class RelationSpec:
 
     Built alongside `ColumnSpec` at the same compile choke point
     (`compile_model_schema_ir`) and exposed as
-    `cls.__ferro_relation_specs__`. Relation-traversal query planning
-    resolves an attribute access like `post.author` to its target model and
-    foreign-key column through this lookup, hop by hop.
+    `cls.__ferro_relation_specs__`, complete from class definition.
+    Relation-traversal query planning resolves an attribute access like
+    `post.author` to its target model and foreign-key column through this
+    lookup, hop by hop.
     """
 
     field_name: str
     """The relation field's name on the declaring model."""
-    target: type
-    """The model the relation points at."""
     fk_column: str
     """The foreign-key column holding the target's primary key, the one
     `Forward` names."""
     nullable: bool
     """Whether the foreign-key column is nullable."""
+    relation: ForwardRelation
+    """The declaration `target` reads, which holds the target's name until
+    relation resolution binds its class."""
+
+    @property
+    def target(self) -> type:
+        """The model the relation points at.
+
+        A target declared by name is bound when the modelset resolves, which
+        the first read does when it has not run yet.
+
+        Raises:
+            RuntimeError: No model takes the declared name, or another
+                relation in the modelset names a model that is not defined.
+            TypeError: A declaration in the modelset is refused once its
+                relations are known, this one or another model's.
+        """
+        target = self.relation.to
+        if not isinstance(target, type):
+            from . import ensure_resolved_modelset
+
+            ensure_resolved_modelset()
+            target = self.relation.to
+        return target
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,12 +706,12 @@ def build_relation_specs(
     Reads the `ForwardRelation` entries of ``__ferro_relations__`` and pairs
     each with the already-compiled ColumnSpec of the key column it names —
     the single-source nullability derivation lives there, not here (design
-    pin: do not re-derive). Reverse and many-to-many entries are skipped.
+    pin: do not re-derive). Reverse and many-to-many entries are skipped, and
+    so is a relation whose key column is not a mapped column.
 
-    A relation whose target hasn't been resolved to a concrete class yet
-    (provisional, class-body time, before ``resolve_relationships()``) is
-    omitted here; the resolved second pass recompiles with real targets so
-    the lookup is complete once resolution finishes.
+    The result is complete at class definition: a target still declared by
+    name is read through the declaration, so `RelationSpec.target` returns
+    its class once the modelset resolves.
 
     Callers store the result on ``cls.__ferro_relation_specs__`` and must
     replace, never mutate — same convention as ``__ferro_columns__``.
@@ -698,25 +721,22 @@ def build_relation_specs(
         columns: The model's compiled column specs, keyed by column name.
 
     Returns:
-        One spec per resolved forward relation, keyed by field name.
+        One spec per forward relation over a mapped column, keyed by field
+            name.
     """
     declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     specs: dict[str, RelationSpec] = {}
     for field_name, meta in declared_relations.items():
         if not isinstance(meta, ForwardRelation):
             continue
-        fk_column = meta.fk_column
-        target = meta.to
-        if not isinstance(target, type):
-            continue
-        fk_spec = columns.get(fk_column)
+        fk_spec = columns.get(meta.fk_column)
         if fk_spec is None:
             continue
         specs[field_name] = RelationSpec(
             field_name=field_name,
-            target=target,
-            fk_column=fk_column,
+            fk_column=meta.fk_column,
             nullable=fk_spec.nullable,
+            relation=meta,
         )
     return specs
 
