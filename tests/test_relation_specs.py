@@ -1,17 +1,20 @@
-"""RelationSpec: forward-FK traversal facts at resolved registration (#268).
+"""RelationSpec: the facts each forward relation of a model reads.
 
-Prefactor for query-time joins (PRD #267 stage 1) — a per-model lookup of
-declared forward relations (field name -> target model, foreign-key column,
-nullability), authoritative once ``resolve_relationships()`` has run. Zero
-behavior change: this only adds ``cls.__ferro_relation_specs__`` alongside the
-existing ``__ferro_columns__``.
+``cls.__ferro_relation_specs__`` maps each declared forward relation to its
+target model, foreign-key column and nullability. The lookup is complete at
+class definition: an entry and its key column exist before the target is
+defined, and reading ``target`` resolves the modelset when the declaration
+still holds the target's name.
 """
 
 from typing import Annotated
 
-from ferro import Forward, ManyToMany, Model, Relation, Reverse
+import pytest
+
+from ferro import Check, Field, Forward, ManyToMany, Model, Relation, Reverse
 from ferro.base import FerroField
 from ferro.columns import RelationSpec
+from ferro.registry import REGISTRY
 
 
 class TestRelationSpecBasics:
@@ -159,29 +162,114 @@ class TestExclusions:
 
 
 class TestProvisionalVsResolved:
-    def test_forward_ref_fk_is_complete_once_resolved(self, clean_registry):
-        """Before resolve_relationships(), the target may not yet be a real class;
-        after resolution the lookup must be complete and correct (design pin)."""
-        from ferro.relations import resolve_relationships
+    def test_forward_ref_fk_is_complete_at_class_definition(self, clean_registry):
+        """The entry and its key column exist before the target is defined;
+        reading `target` afterwards resolves it with no resolve call."""
 
         class FwdChild(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             parent_id: Annotated[int, FerroField(foreign_key="FwdParent")]
             parent: Relation["FwdParent"] = Forward("parent_id")
 
+        specs = FwdChild.__ferro_relation_specs__
+        assert set(specs) == {"parent"}
+        assert specs["parent"].fk_column == "parent_id"
+
         class FwdParent(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             children: Relation[list["FwdChild"]] = Reverse("parent_id")
 
-        # Attribute exists pre-resolution regardless of contents (invariant).
-        assert hasattr(FwdChild, "__ferro_relation_specs__")
+        assert FwdChild.__ferro_relation_specs__["parent"].target is FwdParent
 
-        resolve_relationships()
 
-        specs = FwdChild.__ferro_relation_specs__
-        assert set(specs) == {"parent"}
-        assert specs["parent"].target is FwdParent
-        assert specs["parent"].fk_column == "parent_id"
+class TestCompleteAtClassDefinition:
+    """A forward relation's spec exists the moment its class does, target or not."""
+
+    def test_the_spec_is_there_before_its_target_is_defined(self, clean_registry):
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key="Team")
+            team: Relation["Team"] = Forward("team_id")
+
+        specs = Player.__ferro_relation_specs__
+
+        assert set(specs) == {"team"}
+        assert (specs["team"].fk_column, specs["team"].nullable) == ("team_id", False)
+
+    def test_reading_target_resolves_without_a_resolve_call(self, clean_registry):
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key="Team")
+            team: Relation["Team"] = Forward("team_id")
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+
+        assert Player.__ferro_relation_specs__["team"].target is Team
+
+    def test_a_spec_read_before_its_target_existed_returns_it(self, clean_registry):
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key="Team")
+            team: Relation["Team"] = Forward("team_id")
+
+        spec = Player.__ferro_relation_specs__["team"]
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+
+        assert spec.target is Team
+
+    def test_a_target_no_model_takes_raises_the_resolution_refusal(
+        self, clean_registry
+    ):
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key="Ghost")
+            team: Relation["Ghost"] = Forward("team_id")
+
+        spec = Player.__ferro_relation_specs__["team"]
+
+        with pytest.raises(RuntimeError, match="'Ghost' not found"):
+            spec.target
+
+    def test_the_forward_descriptor_keeps_no_key_column_of_its_own(self):
+        from ferro.relations.descriptors import ForwardDescriptor
+
+        assert "fk_column" not in ForwardDescriptor.model_fields
+
+    def test_a_check_reads_a_relation_whose_target_is_not_defined_yet(
+        self, clean_registry
+    ):
+        class Spelling(Model):
+            __ferro_checks__ = (
+                Check("via_relation", lambda spelling: spelling.target == None),  # noqa: E711
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            target_id: int | None = Field(default=None, foreign_key="SpellTarget")
+            target: Relation["SpellTarget | None"] = Forward("target_id")
+
+        envelope = REGISTRY.envelope(Spelling.__ferro_identity__)
+        (model,) = envelope["payload"]["models"]
+
+        assert [check["predicate"] for check in model["table_checks"]] == [
+            {"kind": "is_null", "column": "target_id"}
+        ]
+
+    def test_assigning_a_relation_before_connect_sets_its_key(self, clean_registry):
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key="Team")
+            team: Relation["Team"] = Forward("team_id")
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+
+        player = Player(team_id=1)
+        player.team = Team(id=7)
+
+        assert player.team_id == 7
 
 
 def test_a_relation_spec_names_its_declared_key_column(clean_registry):
