@@ -291,3 +291,18 @@ def test_a_relation_spec_names_its_declared_key_column(clean_registry):
         False,
     )
     assert RelationSpec.__slots__ == ("field_name", "fk_column", "nullable", "relation")
+
+
+def test_assigning_a_relation_with_no_key_column_raises_its_refusal(clean_registry):
+    # No mapped key column, so no spec: assigning resolves the modelset,
+    # whose refusal names the column to add.
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team: Relation["Team"] = Forward("team_id")  # noqa: F821
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    assert "team" not in Player.__ferro_relation_specs__
+    with pytest.raises(TypeError, match="Player has no column team_id"):
+        Player(id=1).team = Team(id=7)

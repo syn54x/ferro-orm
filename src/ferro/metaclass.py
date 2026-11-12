@@ -30,7 +30,7 @@ from .base import (
     FerroField,
     ForwardRelation,
 )
-from .columns import RetiredField, build_column_specs
+from .columns import RelationSpec, RetiredField, build_column_specs
 from .fields import (
     Field,
     Forward,
@@ -299,7 +299,7 @@ def _generated_setattr(inherited: Any):
     return __setattr__
 
 
-def forward_spec(model_cls: type, name: str) -> Any:
+def forward_spec(model_cls: type, name: str) -> RelationSpec:
     """The spec of `model_cls`'s forward relation `name`.
 
     Every forward relation over a mapped key column has one from class
