@@ -1,44 +1,34 @@
 """The metaclass that turns a model class declaration into a registered table."""
 
 import __future__
-import ast
 import sys
-import warnings
+from collections.abc import Iterable
 from dataclasses import replace
 from functools import partial
 from enum import Enum
-from types import UnionType
 from typing import (
     TYPE_CHECKING,
-    Annotated,
     Any,
     Callable,
     ClassVar,
     ForwardRef,
-    Union,
     dataclass_transform,
-    get_args,
-    get_origin,
     get_type_hints,
 )
 
 from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
-from pydantic.fields import FieldInfo, PrivateAttr
+from pydantic.fields import PrivateAttr
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
-from ._annotation_eval import DeferredNames
 from ._core import prune_stale_relations
 from ._annotation_utils import (
-    _strip_optional_union,
     annotation_allows_none,
     is_closed_domain_annotation,
 )
 from .base import (
     FerroField,
     ForwardRelation,
-    ManyToManyRelation,
-    ReverseRelation,
 )
 from .columns import RetiredField, build_column_specs
 from .fields import (
@@ -46,25 +36,19 @@ from .fields import (
     Forward,
     ManyToMany,
     Reverse,
-    _RelationOptions,
     annotation_text,
     field_line,
     field_options,
 )
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
-from .query import Relation
 from .registry import REGISTRY
 from .relations import (
-    BAD_THROUGH,
+    _a,
     check_declared_foreign_keys,
-    default_join_table,
     is_table_name,
-    forward_line,
-    key_column_line,
-    relation_refusal,
-    reverse_line,
-    written_type,
+    none_assignment_refusal,
+    read_relations,
 )
 from .relations.fixes import DeclarationRefusal, Edit
 from .relations.descriptors import ForwardDescriptor
@@ -130,418 +114,6 @@ def _retired_and_renamed(model: str, field_name: str) -> TypeError:
         f"{model}.{field_name}: retire it or rename it, not both; drop "
         "`renamed_from` once its migration is generated"
     )
-
-
-def _many_to_many_retired(model: str, field_name: str) -> TypeError:
-    return TypeError(
-        f"{model}.{field_name}: a ManyToMany cannot be retired; it is a join "
-        "table, not a column. Delete the declaration to drop the join table"
-    )
-
-
-def _parsed(text: str) -> ast.expr | None:
-    """``text`` as an expression node, or ``None`` when it does not parse."""
-    try:
-        return ast.parse(text, mode="eval").body
-    except SyntaxError:
-        return None
-
-
-def _head(node: ast.expr) -> str | None:
-    """The name a node spells: ``Team`` for ``Team`` or ``models.Team``."""
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
-def _is_none(node: ast.expr) -> bool:
-    return (isinstance(node, ast.Constant) and node.value is None) or _head(
-        node
-    ) == "None"
-
-
-def _union_members(node: ast.expr) -> list[ast.expr] | None:
-    """The members of ``A | B``, ``Optional[A]`` or ``Union[A, B]``, else ``None``."""
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-        return [*(_union_members(node.left) or [node.left]), node.right]
-    if isinstance(node, ast.Subscript) and _head(node.value) == "Optional":
-        return [node.slice, ast.Constant(None)]
-    if isinstance(node, ast.Subscript) and _head(node.value) == "Union":
-        inner = node.slice
-        return list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
-    return None
-
-
-def _node_view(node: ast.expr | None) -> tuple[bool, Any, bool]:
-    """``(is_list, target name, nullable)`` of a relation argument written as text."""
-    if node is None:
-        return False, "", False
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return _node_view(_parsed(node.value))
-    if isinstance(node, ast.Subscript) and _head(node.value) in ("list", "List"):
-        _, target, _ = _node_view(node.slice)
-        return True, target, False
-    members = _union_members(node)
-    if members is not None:
-        kept = [member for member in members if not _is_none(member)]
-        # A union of several models names no one target.
-        _, target, _ = _node_view(kept[0]) if len(kept) == 1 else (False, None, False)
-        return False, target, len(kept) != len(members)
-    return False, _head(node) or ast.unparse(node), False
-
-
-def _relation_view(hint: Any) -> tuple[bool, Any, bool] | None:
-    """What a `Relation[...]` annotation declares: ``(is_list, target, nullable)``.
-
-    The target is a class, or its name when the annotation writes it as a
-    string (as every annotation is under ``from __future__ import
-    annotations``), and ``None`` when it is a union of several models, which
-    names no one target. ``None`` when the annotation is not ``Relation[...]``.
-    """
-    if isinstance(hint, ForwardRef):
-        hint = hint.__forward_arg__
-    if isinstance(hint, str):
-        node = _parsed(hint)
-        if not isinstance(node, ast.Subscript) or _head(node.value) != "Relation":
-            return None
-        return _node_view(node.slice)
-    if get_origin(hint) is not Relation or not get_args(hint):
-        return None
-    return _relation_argument(get_args(hint)[0])
-
-
-def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
-    if isinstance(argument, ForwardRef):
-        argument = argument.__forward_arg__
-    if isinstance(argument, str):
-        return _node_view(_parsed(argument))
-    if get_origin(argument) is list:
-        inner = get_args(argument)
-        _, target, _ = _relation_argument(inner[0] if inner else "")
-        return True, target, False
-    if get_origin(argument) in (Union, UnionType):
-        inner = _strip_optional_union(argument)
-        nullable = type(None) in get_args(argument)
-        # A union of several models names no one target.
-        several = get_origin(inner) in (Union, UnionType)
-        _, target, _ = (False, None, False) if several else _relation_argument(inner)
-        return False, target, nullable
-    return False, argument, False
-
-
-def _evaluated(hint: Any, namespace: dict, frame_ns: dict | None) -> Any:
-    """``hint`` as Python evaluates it: a string annotation in the class's scope.
-
-    A name not defined yet becomes a ``ForwardRef``, so a target declared
-    later still evaluates, and an alias (``Annotated as A``) is the object it
-    names. A quoted annotation in a postponed module is text twice over, so
-    text is evaluated until it is not. ``hint`` itself when it is not a string
-    or does not evaluate.
-    """
-    module_ns = getattr(
-        sys.modules.get(namespace.get("__module__", "")), "__dict__", {}
-    )
-    names = DeferredNames({**(frame_ns or {}), **namespace}, module_ns)
-    for _ in range(2):
-        if not isinstance(hint, str):
-            break
-        try:
-            # Read for its markers only: the class's own evaluation reports.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                hint = eval(hint, module_ns, names)
-        except Exception:
-            break
-    return hint
-
-
-def _layers(annotation: Any) -> tuple[Any, bool, list[Any]]:
-    """The annotation under its ``| None`` and ``Annotated[...]`` wrappers.
-
-    Returns:
-        ``(core, wrapped_in_none, metadata)``: ``Annotated[Relation[Team],
-        "doc"] | None`` is ``(Relation[Team], True, ["doc"])``.
-    """
-    wrapped, metadata = False, []
-    while True:
-        origin = get_origin(annotation)
-        if origin is Annotated:
-            args = get_args(annotation)
-            metadata += args[1:]
-            annotation = args[0]
-            continue
-        stripped = _strip_optional_union(annotation)
-        if stripped is not annotation:
-            wrapped = True
-            annotation = stripped
-            continue
-        return annotation, wrapped, metadata
-
-
-_RELATION_KINDS = ("forward", "reverse", "many_to_many")
-
-
-def _relation_marker(
-    field_name: str, annotation: Any, namespace: dict
-) -> tuple[str, dict[str, Any], bool] | None:
-    """The relation a field declares: ``(kind, options, in_metadata)``.
-
-    ``kind`` is ``"forward"``, ``"reverse"`` or ``"many_to_many"``, and
-    ``options`` the keywords its ``Forward``, ``Reverse`` or ``ManyToMany``
-    carries. The marker is read from the annotation's ``Annotated`` metadata,
-    under any ``| None``, then from the value the field is assigned;
-    ``in_metadata`` says it sat in the metadata, where a relation is refused.
-    ``None`` when the field declares no relation.
-    """
-    holders = [(item, True) for item in _layers(annotation)[2]]
-    holders.append((namespace.get(field_name), False))
-    for holder, in_metadata in holders:
-        if not isinstance(holder, FieldInfo):
-            continue
-        for option in holder.metadata:
-            if isinstance(option, _RelationOptions):
-                kind = next(k for k in _RELATION_KINDS if k in option.options)
-                return kind, option.options, in_metadata
-    return None
-
-
-def _is_bare_relation(core: Any) -> bool:
-    if core is Relation:
-        return True
-    return isinstance(core, str) and _head(_parsed(core) or ast.Constant(0)) == (
-        "Relation"
-    )
-
-
-def _foreign_key_name(foreign_key: Any) -> str:
-    """The class name a foreign key or relation target is written as."""
-    if isinstance(foreign_key, ForwardRef):
-        foreign_key = foreign_key.__forward_arg__
-    if isinstance(foreign_key, type):
-        return foreign_key.__name__
-    return str(foreign_key).rsplit(".", 1)[-1]
-
-
-def _declared_target(
-    column: str, namespace: dict, annotations: dict, frame_ns: dict | None
-) -> tuple[str, bool] | None:
-    """The target and nullability a column of the class body declares, if any."""
-    annotation = _evaluated(annotations.get(column), namespace, frame_ns)
-    core, wrapped, metadata = _layers(annotation)
-    options = []
-    value = namespace.get(column)
-    if isinstance(value, FieldInfo):
-        options += value.metadata
-    for item in metadata:
-        options += item.metadata if isinstance(item, FieldInfo) else [item]
-    for option in options:
-        if isinstance(option, FerroField) and option.foreign_key is not None:
-            nullable = wrapped or (
-                not isinstance(core, str) and annotation_allows_none(core)
-            )
-            return _foreign_key_name(option.foreign_key), nullable
-    return None
-
-
-_NOT_RELATION = "a relation is annotated Relation[...]"
-_IN_METADATA = "a relation is an assignment, not Annotated metadata"
-_NONE_OUTSIDE = "a relation is annotated Relation[...], with no | None around it"
-
-
-def _declared_relation(
-    model: str,
-    field_name: str,
-    annotation: Any,
-    spelling: str,
-    column: str,
-    *,
-    in_metadata: bool,
-    namespace: dict,
-    annotations: dict,
-    frame_ns: dict | None,
-    scope: frozenset[str] | None,
-) -> ForwardRelation | ReverseRelation:
-    """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
-
-    A declaration that is not ``Relation[...]`` assigned the marker is
-    refused with the line to write. When the class body cannot name the
-    target that line needs (a bare ``Relation``: a forward one over a column
-    whose target is declared later, or a reverse one, whose model only the
-    models pointing back name), the record carries the refusal, raised with
-    the target named once the class exists or relations resolve.
-
-    Args:
-        model: The model's name.
-        field_name: The relation's field name.
-        annotation: The field's annotation, evaluated where it could be.
-        spelling: ``"Forward"`` or ``"Reverse"``.
-        column: The column the relation names.
-        in_metadata: Whether the marker sits in ``Annotated`` metadata.
-        namespace: The class body.
-        annotations: The class body's annotations.
-        frame_ns: The scope running the class statement, if a function.
-        scope: The names defined where the class statement runs, so a fix
-            line quotes a target defined later; ``None`` when the module
-            postpones its annotations and no name needs quotes.
-
-    Raises:
-        TypeError: The relation is ``Annotated`` metadata, the annotation is
-            not ``Relation[...]`` or wraps it in ``| None``, or it is not the
-            shape the relation reads (one row forward, a list in reverse).
-    """
-    core, wrapped, _ = _layers(annotation)
-    view = _relation_view(core)
-    # `Relation[A | B]` (or `A | B` alone) names no one model: refused like a
-    # bare `Relation`, its target named from the column or at resolution.
-    several = (view is not None and view[1] is None) or (
-        view is None
-        and not _is_bare_relation(core)
-        and _relation_argument(core)[1] is None
-    )
-    if several:
-        view = None
-    bound = None if scope is None else scope | frozenset(namespace)
-    # The column the relation reads decides its target and nullability.
-    declared = (
-        _declared_target(column, namespace, annotations, frame_ns)
-        if spelling == "Forward"
-        else None
-    )
-    if in_metadata or wrapped or view is None:
-        if in_metadata:
-            reason = _IN_METADATA
-        elif view is None:
-            reason = _NOT_RELATION
-        else:
-            reason = _NONE_OUTSIDE
-        if declared is not None:
-            named: tuple[str, bool] | None = declared
-        elif view is not None:
-            _, target, nullable = view
-            named = (annotation_text(target), nullable or wrapped)
-        elif not several and not _is_bare_relation(core):
-            named = (annotation_text(core), wrapped)
-        else:
-            named = None
-        if named is not None:
-            target_text, nullable = named
-            line = (
-                forward_line(field_name, target_text, column, bound, nullable=nullable)
-                if spelling == "Forward"
-                else reverse_line(field_name, target_text, column, bound)
-            )
-            raise relation_refusal(model, field_name, reason, line)
-        if spelling == "Forward":
-            return ForwardRelation(column, None, False, refusal=reason, bound=bound)
-        return ReverseRelation(column, None, refusal=reason, bound=bound)
-    is_list, target, nullable = view
-    if spelling == "Forward" and is_list:
-        target_text, nullable = declared or (annotation_text(target), False)
-        raise relation_refusal(
-            model,
-            field_name,
-            "a forward relation reads one row, so it is annotated Relation[...] "
-            "of its target",
-            forward_line(field_name, target_text, column, bound, nullable=nullable),
-        )
-    if spelling == "Reverse" and not is_list:
-        raise relation_refusal(
-            model,
-            field_name,
-            "a reverse relation reads every row pointing back, so it is "
-            "annotated Relation[list[...]]",
-            reverse_line(field_name, annotation_text(target), column, bound),
-        )
-    if spelling == "Forward":
-        return ForwardRelation(column, target, nullable, bound=bound)
-    return ReverseRelation(column, target, bound=bound)
-
-
-_NOT_LIST = (
-    "a many-to-many reads a list of linked rows, so it is annotated Relation[list[...]]"
-)
-_NO_THROUGH = "a many-to-many needs through=, the name of its join table"
-
-
-def _declared_many_to_many(
-    model: str,
-    field_name: str,
-    annotation: Any,
-    options: dict[str, Any],
-    *,
-    in_metadata: bool,
-    table: str,
-    namespace: dict,
-    scope: frozenset[str] | None,
-) -> ManyToManyRelation:
-    """The record of a ``ManyToMany(through=...)`` declaration.
-
-    A declaration that is not ``Relation[list[...]]`` assigned the marker,
-    or names no join table, carries why as its refusal; a ``through=`` that
-    is no table name is recorded as ``<table>_<field>``, the name its fix
-    writes. The refusal is
-    raised once the class exists, by `many_to_many_refusal`, which also
-    refuses a target naming the model itself; a bare ``Relation`` names no
-    target, and relation resolution raises it.
-
-    Args:
-        model: The model's name.
-        field_name: The relation's field name.
-        annotation: The field's annotation, evaluated where it could be.
-        options: The relation keywords the marker carries.
-        in_metadata: Whether the marker sits in ``Annotated`` metadata.
-        table: The model's table name.
-        namespace: The class body.
-        scope: The names defined where the class statement runs, or ``None``
-            when the module postpones its annotations.
-
-    Returns:
-        The relation, its ``refusal`` set when the declaration is refused.
-    """
-    core, wrapped, _ = _layers(annotation)
-    view = _relation_view(core)
-    # `Relation[list[A | B]]` names no one model: refused like a bare `Relation`.
-    several = view is not None and view[1] is None
-    if several:
-        view = None
-    through = options.get("through")
-    reverse_index = options.get("reverse_index", True)
-    # The order of `_declared_relation`: a missing `Relation[...]` is named
-    # before the `| None` around it.
-    if in_metadata:
-        reason = _IN_METADATA
-    elif view is None:
-        reason = _NOT_RELATION
-    elif wrapped:
-        reason = _NONE_OUTSIDE
-    elif not view[0]:
-        reason = _NOT_LIST
-    elif not isinstance(through, str) or not through:
-        reason = _NO_THROUGH
-    elif not is_table_name(through):
-        reason = BAD_THROUGH
-    else:
-        reason = None
-    if not isinstance(through, str) or not is_table_name(through):
-        # The name the fix writes; the refusal checks it in turn.
-        through = default_join_table(table, field_name)
-    if view is not None:
-        target = view[1]
-    elif not several and not _is_bare_relation(core):
-        target = _relation_argument(core)[1]
-    else:
-        target = None
-    relation = ManyToManyRelation(
-        through=through,
-        reverse_index=reverse_index,
-        refusal=reason,
-        bound=None if scope is None else scope | frozenset(namespace),
-        renamed_from=options.get("renamed_from"),
-    )
-    relation.to = target
-    return relation
 
 
 def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
@@ -742,42 +314,6 @@ def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
     return specs
 
 
-def _a(name: str) -> str:
-    """`name` after its indefinite article: "a Team", "an Author", "a User"."""
-    first, rest = name[:1].upper(), name[1:3].lower()
-    vowel = first in "AEIO" or (
-        first == "U" and not (rest[:1] not in "aeiou" and rest[1:2] in "aeiou")
-    )
-    return f"{'an' if vowel else 'a'} {name}"
-
-
-def _none_refusal(model_cls: type, name: str, spec: Any) -> DeclarationRefusal:
-    """The refusal of `None` on a relation over a required key column, with the lines to write."""
-    model = model_cls.__name__
-    target = spec.target.__name__
-    declared = model_cls.__ferro_relations__[name]
-    info = model_cls.model_fields[spec.fk_column]
-    column = key_column_line(
-        model_cls,
-        spec.fk_column,
-        spec.target,
-        nullable=True,
-        meta=model_cls.__ferro_fields__[spec.fk_column],
-        annotation=written_type(info.annotation),
-    )
-    relation = forward_line(name, target, spec.fk_column, declared.bound, nullable=True)
-    return DeclarationRefusal(
-        model,
-        name,
-        f"{spec.fk_column} is not nullable, so the relation cannot be None. "
-        f"Assign {_a(target)}, or make both nullable",
-        [
-            Edit(model, spec.fk_column, "replace", (column,)),
-            Edit(model, name, "replace", (relation,)),
-        ],
-    )
-
-
 def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
     """Set the foreign-key column behind a forward relation and cache `value` as loaded.
 
@@ -788,7 +324,7 @@ def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> 
     target = spec.target.__name__
     if value is None:
         if not spec.nullable:
-            raise _none_refusal(type(self), name, spec)
+            raise none_assignment_refusal(type(self), name)
         key = None
     # The exact class: a subclass model has a table of its own, so its key
     # would name another table's row.
@@ -883,16 +419,10 @@ class ModelMetaclass(type(BaseModel)):
             and caller.f_locals is not caller.f_globals
             else None
         )
-        local_relations, fields_to_remove, pending_relations = (
-            mcs._scan_relationship_annotations(
-                annotations,
-                namespace,
-                name,
-                frame_ns=frame_ns,
-                scope=_defined_names(caller),
-            )
+        local_relations = read_relations(
+            name, namespace, annotations, frame_ns, _defined_names(caller)
         )
-        mcs._prepare_namespace_for_pydantic(namespace, annotations, fields_to_remove)
+        mcs._prepare_namespace_for_pydantic(namespace, annotations, local_relations)
 
         # Phase 2: Class Creation
         cls = super().__new__(mcs, name, bases, namespace, **kwargs)
@@ -920,7 +450,7 @@ class ModelMetaclass(type(BaseModel)):
         # store instead, leaving the registry as it was before the class body.
         before = REGISTRY.snapshot()
         try:
-            for field_name, metadata in pending_relations:
+            for field_name, metadata in local_relations.items():
                 REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
             mcs._register_model(cls, cls.__ferro_identity__, local_relations)
@@ -1090,74 +620,8 @@ class ModelMetaclass(type(BaseModel)):
         return namespace.get("__annotations__", {})
 
     @staticmethod
-    def _scan_relationship_annotations(
-        annotations: dict,
-        namespace: dict,
-        model_name: str,
-        frame_ns: dict | None = None,
-        scope: frozenset[str] | None = None,
-    ) -> tuple[dict, list, list]:
-        """Scan annotations for relations (``Forward``, ``Reverse``, ``ManyToMany``).
-
-        Returns:
-            (local_relations, fields_to_remove, pending_relations): each
-            relation's record, the fields to hide from Pydantic, and the
-            ``(field_name, record)`` entries deferred to the Registry's
-            pending-relation queue (flushed under the model's resolved
-            ``__ferro_identity__`` after the class object exists).
-
-        Raises:
-            TypeError: A ``ManyToMany`` is retired, or a relation is refused
-                (see `_declared_relation`).
-        """
-        local_relations = {}
-        fields_to_remove = []
-        pending_relations = []
-
-        for field_name, hint in list(annotations.items()):
-            # Markers are read from the evaluated annotation, under any `| None`
-            # or `Annotated[...]` wrapper, so every spelling is seen with or
-            # without postponed annotations.
-            evaluated = _evaluated(hint, namespace, frame_ns)
-            marker = _relation_marker(field_name, evaluated, namespace)
-            if marker is None:
-                continue
-            kind, options, in_metadata = marker
-            if kind == "many_to_many":
-                if options.get("retired") is True:
-                    raise _many_to_many_retired(model_name, field_name)
-                relation = _declared_many_to_many(
-                    model_name,
-                    field_name,
-                    evaluated,
-                    options,
-                    in_metadata=in_metadata,
-                    table=ModelMetaclass._resolve_table_name(model_name, namespace),
-                    namespace=namespace,
-                    scope=scope,
-                )
-            else:
-                relation = _declared_relation(
-                    model_name,
-                    field_name,
-                    evaluated,
-                    "Forward" if kind == "forward" else "Reverse",
-                    options[kind],
-                    in_metadata=in_metadata,
-                    namespace=namespace,
-                    annotations=annotations,
-                    frame_ns=frame_ns,
-                    scope=scope,
-                )
-            local_relations[field_name] = relation
-            pending_relations.append((field_name, relation))
-            fields_to_remove.append(field_name)
-
-        return local_relations, fields_to_remove, pending_relations
-
-    @staticmethod
     def _prepare_namespace_for_pydantic(
-        namespace: dict, annotations: dict, fields_to_remove: list
+        namespace: dict, annotations: dict, fields_to_remove: Iterable[str]
     ) -> None:
         """
         Hide relationship fields from Pydantic by converting them to ClassVars.

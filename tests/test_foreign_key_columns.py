@@ -838,7 +838,9 @@ def test_a_none_wrapped_relation_takes_its_nullability_from_the_column(column, w
     class Team(Model):
         id: int | None = Field(default=None, primary_key=True)
 
+    # A module's globals name the module, which class creation reads.
     namespace = {
+        "__name__": __name__,
         "Field": Field,
         "Forward": Forward,
         "Model": Model,
@@ -873,6 +875,7 @@ def test_annotated_metadata_takes_its_nullability_from_the_column(column, writte
         id: int | None = Field(default=None, primary_key=True)
 
     namespace = {
+        "__name__": __name__,
         "Annotated": Annotated,
         "Field": Field,
         "Forward": Forward,

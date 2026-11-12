@@ -274,8 +274,8 @@ class ForwardRelation:
         fk_column: str,
         to: Any,
         nullable: bool,
-        refusal: str | None = None,
-        bound: frozenset[str] | None = None,
+        _refusal: str | None = None,
+        _bound: frozenset[str] | None = None,
     ) -> None:
         """Store what the declaration says.
 
@@ -284,10 +284,10 @@ class ForwardRelation:
             to: The model in the relation's annotation, or its name until
                 Ferro resolves it; `None` when the annotation names none.
             nullable: Whether the annotation allows `None`.
-            refusal: Why the declaration is refused, when the class body
-                cannot name the target its fix writes; relation resolution
-                raises it with the target named. Defaults to `None`.
-            bound: The names defined where the relation was declared, so a
+            _refusal: Why the declaration is refused, if it is; raised once
+                the class exists, or at relation resolution when only that
+                names the target. Defaults to `None`.
+            _bound: The names defined where the relation was declared, so a
                 refusal quotes a target declared later; `None` under
                 postponed annotations, where no target needs quotes.
         """
@@ -297,9 +297,9 @@ class ForwardRelation:
         """The target model class, or its name until Ferro resolves it."""
         self.nullable = nullable
         """Whether the relation's annotation allows `None`."""
-        self.refusal = refusal
-        """A refusal waiting for resolution to name its target, or `None`."""
-        self.bound = bound
+        self._refusal = _refusal
+        """Why the declaration is refused, until it is raised, or `None`."""
+        self._bound = _bound
         """The names defined where the relation was declared, or `None`."""
 
 
@@ -314,8 +314,8 @@ class ReverseRelation:
         self,
         attribute: str,
         to: Any,
-        refusal: str | None = None,
-        bound: frozenset[str] | None = None,
+        _refusal: str | None = None,
+        _bound: frozenset[str] | None = None,
     ) -> None:
         """Store what the declaration says.
 
@@ -323,10 +323,10 @@ class ReverseRelation:
             attribute: The foreign-key column on the model `to`.
             to: The model in the relation's annotation, or its name until
                 Ferro resolves it; `None` when the annotation names none.
-            refusal: Why the declaration is refused, when the class body
-                cannot name the model its fix writes; relation resolution
-                raises it with the model named. Defaults to `None`.
-            bound: The names defined where the relation was declared, so a
+            _refusal: Why the declaration is refused, if it is; raised once
+                the class exists, or at relation resolution when only that
+                names the model. Defaults to `None`.
+            _bound: The names defined where the relation was declared, so a
                 refusal quotes a model declared later; `None` under
                 postponed annotations, where no model needs quotes.
         """
@@ -334,9 +334,9 @@ class ReverseRelation:
         """The foreign-key column on the other model that points back."""
         self.to = to
         """The other model's class, or its name until Ferro resolves it."""
-        self.refusal = refusal
-        """A refusal waiting for resolution to name its model, or `None`."""
-        self.bound = bound
+        self._refusal = _refusal
+        """Why the declaration is refused, until it is raised, or `None`."""
+        self._bound = _bound
         """The names defined where the relation was declared, or `None`."""
 
 
@@ -352,8 +352,8 @@ class ManyToManyRelation:
         self,
         through: str,
         reverse_index: bool = True,
-        refusal: str | None = None,
-        bound: frozenset[str] | None = None,
+        _refusal: str | None = None,
+        _bound: frozenset[str] | None = None,
         renamed_from: str | None = None,
     ):
         """Store the options of a many-to-many relation.
@@ -363,10 +363,10 @@ class ManyToManyRelation:
             reverse_index: Add an index on the join table's
                 `(target, source)` columns for queries from the other side.
                 Defaults to `True`; turn it off for a write-heavy join table.
-            refusal: Why the declaration is refused, when the class body
-                cannot name the target its fix writes; relation resolution
-                raises it with the target named. Defaults to `None`.
-            bound: The names defined where the relation was declared, so a
+            _refusal: Why the declaration is refused, if it is; raised once
+                the class exists, or at relation resolution when only that
+                names the target. Defaults to `None`.
+            _bound: The names defined where the relation was declared, so a
                 refusal quotes a target declared later; `None` under
                 postponed annotations, where no target needs quotes.
             renamed_from: The join table's previous name, which a migration
@@ -378,9 +378,9 @@ class ManyToManyRelation:
         """The join table's name."""
         self.reverse_index = reverse_index
         """Whether the join table has an index for reverse queries."""
-        self.refusal = refusal
-        """A refusal waiting for resolution to name its target, or `None`."""
-        self.bound = bound
+        self._refusal = _refusal
+        """Why the declaration is refused, until it is raised, or `None`."""
+        self._bound = _bound
         """The names defined where the relation was declared, or `None`."""
         self.renamed_from = renamed_from
         """The join table's previous name, or `None`."""
