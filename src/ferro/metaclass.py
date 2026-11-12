@@ -299,28 +299,29 @@ def _generated_setattr(inherited: Any):
     return __setattr__
 
 
-def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
-    """The model's relation specs, once every forward relation in `relations` has one.
+def forward_spec(model_cls: type, name: str) -> Any:
+    """The spec of `model_cls`'s forward relation `name`.
 
-    A relation whose target is a class-name string gets its spec when the
-    modelset resolves, so the first assignment before `connect()` resolves it.
+    Every forward relation over a mapped key column has one from class
+    definition. One without is a declaration relation resolution refuses, so
+    the modelset resolves here to raise that refusal.
     """
-    specs = model_cls.__ferro_relation_specs__
-    if not specs.keys() >= relations:
+    spec = model_cls.__ferro_relation_specs__.get(name)
+    if spec is None:
         from . import ensure_resolved_modelset
 
         ensure_resolved_modelset()
-        specs = model_cls.__ferro_relation_specs__
-    return specs
+        spec = model_cls.__ferro_relation_specs__[name]
+    return spec
 
 
-def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
+def _assign_relation(self: BaseModel, name: str, value: Any) -> None:
     """Set the foreign-key column behind a forward relation and cache `value` as loaded.
 
     Every refusal raises before the key column or the cache changes.
     """
     model = type(self).__name__
-    spec = _resolved_relation_specs(type(self), relations)[name]
+    spec = forward_spec(type(self), name)
     target = spec.target.__name__
     if value is None:
         if not spec.nullable:
@@ -349,35 +350,32 @@ def prune_cached_relations(instance: BaseModel) -> None:
     """Drop each forward relation `instance` caches that its key no longer points at.
 
     The refresh rule of ADR-0008, for a key changed in memory. A relation
-    nothing cached has nothing to check, so only a cached one needs its
-    target resolved.
+    nothing cached has nothing to check.
     """
-    relations = type(instance).__ferro_relations__
-    cached = {
-        name
-        for name in instance.__dict__.keys() & relations.keys()
-        if isinstance(relations[name], ForwardRelation)
-    }
-    if cached:
-        _resolved_relation_specs(type(instance), cached)
+    if not instance.__dict__.keys().isdisjoint(type(instance).__ferro_relation_specs__):
         prune_stale_relations(instance)
 
 
-def _relation_setattr(key_columns: dict[str, str], inherited: Any):
+def _relation_setattr(relations: frozenset[str], inherited: Any):
     """Assign a forward relation through its key column; drop a stale one when the key changes.
 
-    `key_columns` maps each forward relation to its foreign-key column.
-    Assigning the column keeps a loaded relation only while the key still
-    points at it, the refresh rule of ADR-0008.
+    `relations` names the forward relations the class declares; each one's
+    foreign-key column comes from its spec. Assigning the column keeps a
+    loaded relation only while the key still points at it, the refresh rule
+    of ADR-0008.
     """
-    keys = frozenset(key_columns.values())
 
     def __setattr__(self: BaseModel, name: str, value: Any) -> None:
-        if name in key_columns:
-            _assign_relation(self, name, value, key_columns.keys())
+        if name in relations:
+            _assign_relation(self, name, value)
             return
         inherited(self, name, value)
-        if name in keys:
+        specs = type(self).__ferro_relation_specs__
+        if any(
+            name == spec.fk_column
+            for relation, spec in specs.items()
+            if relation in relations
+        ):
             prune_cached_relations(self)
 
     return __setattr__
@@ -474,13 +472,13 @@ class ModelMetaclass(type(BaseModel)):
             raise
         if cls.__ferro_generated__:
             cls.__setattr__ = _generated_setattr(cls.__setattr__)
-        key_columns = {
-            field_name: meta.fk_column
+        forward = frozenset(
+            field_name
             for field_name, meta in local_relations.items()
             if isinstance(meta, ForwardRelation)
-        }
-        if key_columns:
-            cls.__setattr__ = _relation_setattr(key_columns, cls.__setattr__)
+        )
+        if forward:
+            cls.__setattr__ = _relation_setattr(forward, cls.__setattr__)
 
         return cls
 
@@ -856,7 +854,6 @@ class ModelMetaclass(type(BaseModel)):
                         target_model_name=getattr(target, "__ferro_identity__", target)
                         or "",
                         field_name=field_name,
-                        fk_column=metadata.fk_column,
                     ),
                 )
             else:

@@ -189,7 +189,7 @@ class TestCompleteAtClassDefinition:
         class Player(Model):
             id: int | None = Field(default=None, primary_key=True)
             team_id: int = Field(foreign_key="Team")
-            team: Relation["Team"] = Forward("team_id")
+            team: Relation["Team"] = Forward("team_id")  # noqa: F821
 
         specs = Player.__ferro_relation_specs__
 
@@ -226,7 +226,7 @@ class TestCompleteAtClassDefinition:
         class Player(Model):
             id: int | None = Field(default=None, primary_key=True)
             team_id: int = Field(foreign_key="Ghost")
-            team: Relation["Ghost"] = Forward("team_id")
+            team: Relation["Ghost"] = Forward("team_id")  # noqa: F821
 
         spec = Player.__ferro_relation_specs__["team"]
 
@@ -248,7 +248,7 @@ class TestCompleteAtClassDefinition:
 
             id: int | None = Field(default=None, primary_key=True)
             target_id: int | None = Field(default=None, foreign_key="SpellTarget")
-            target: Relation["SpellTarget | None"] = Forward("target_id")
+            target: Relation["SpellTarget | None"] = Forward("target_id")  # noqa: F821
 
         envelope = REGISTRY.envelope(Spelling.__ferro_identity__)
         (model,) = envelope["payload"]["models"]
@@ -290,4 +290,4 @@ def test_a_relation_spec_names_its_declared_key_column(clean_registry):
         "keeper_owner_id",
         False,
     )
-    assert RelationSpec.__slots__ == ("field_name", "target", "fk_column", "nullable")
+    assert RelationSpec.__slots__ == ("field_name", "fk_column", "nullable", "relation")
