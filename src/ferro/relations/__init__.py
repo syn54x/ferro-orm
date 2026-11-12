@@ -798,7 +798,7 @@ def many_to_many_refusal(
         relation: The many-to-many as declared: its join table (the declared
             one, or ``<table>_<field>`` when that is no table name), reverse
             index, previous name (kept on the line when it can be) and
-            ``bound``, the names defined where ``owner``'s class statement
+            ``_bound``, the names defined where ``owner``'s class statement
             runs, outside which a target is written by name.
 
     Returns:
@@ -1636,7 +1636,7 @@ def read_relations(
     frame_ns: dict | None,
     scope: frozenset[str] | None,
 ) -> dict[str, ForwardRelation | ReverseRelation | ManyToManyRelation]:
-    """Read every relation a class body declares into its record. Never raises.
+    """Read every relation a class body declares into its record, never raising.
 
     A relation declared wrongly still gets a record, which carries why;
     `check_declared_foreign_keys` raises it once the class exists, or
