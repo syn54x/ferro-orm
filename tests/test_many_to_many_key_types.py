@@ -249,3 +249,35 @@ async def test_adding_an_unsaved_tag_is_refused_by_relation_name(db_url, fresh):
 
         with pytest.raises(ValueError, match=r"owner\.tags\.add\(\): Tag\(id=None\)"):
             await owner.tags.add(Tag())
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_an_unsaved_owner_reads_no_links(db_url, fresh):
+    Owner, Item, value = _keyed_item("date")
+    await auto_migrate(db_url)
+    async with ferro.engines.session():
+        await (await Owner.create()).items.add(await Item.create(key=value))
+        unsaved = Owner()
+
+        assert await unsaved.items.all() == []
+        assert await unsaved.items.count() == 0
+        assert await unsaved.items.exists() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+@pytest.mark.parametrize("verb", ["add", "remove", "clear"])
+async def test_an_unsaved_owner_refuses_a_link_write(db_url, fresh, verb):
+    Owner, Item, value = _keyed_item("date")
+    await auto_migrate(db_url)
+    async with ferro.engines.session():
+        item = await Item.create(key=value)
+        write = getattr(Owner().items, verb)
+
+        with pytest.raises(
+            ValueError,
+            match=rf"owner\.items\.{verb}\(\): the owner has no primary key yet; "
+            "save it first",
+        ):
+            await write(*(() if verb == "clear" else (item,)))
