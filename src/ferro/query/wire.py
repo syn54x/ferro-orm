@@ -192,7 +192,7 @@ class M2mContext:
     target_col: str
     """The join table column that points at the related model."""
     source_id: Any
-    """The owning instance's primary key, as `save()` wrote it."""
+    """The owning instance's primary key."""
 
     def to_ir_dict(self) -> dict[str, Any]:
         """Convert the details to their payload form.

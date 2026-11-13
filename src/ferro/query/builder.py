@@ -720,7 +720,6 @@ class Query(Generic[T]):
         """Store many-to-many linkage context for relationship operations.
 
         A new ``Query`` with the m2m context set; ``self`` is unchanged.
-        The owner's key is kept in its wire form, the value ``save()`` wrote.
         """
         new = self._clone()
         new._m2m_label = label
@@ -728,7 +727,7 @@ class Query(Generic[T]):
             join_table=join_table,
             source_col=source_col,
             target_col=target_col,
-            source_id=canonicalize_wire_scalar(source_id),
+            source_id=source_id,
         )
         return new
 
@@ -1547,7 +1546,7 @@ class Query(Generic[T]):
         return keys
 
     def _m2m_owner_key(self, verb: str) -> Any:
-        """Return the owner's key for a link write, refusing an unsaved owner.
+        """Return the owner's wire-form key for a link write, refusing an unsaved one.
 
         Raises:
             ValueError: The owner has no primary key yet.
@@ -1558,7 +1557,7 @@ class Query(Generic[T]):
                 f"{self._m2m_label}.{verb}(): the owner has no primary key "
                 "yet; save it first"
             )
-        return key
+        return canonicalize_wire_scalar(key)
 
     async def add(self, *instances: Any) -> None:
         """Link instances to the owner of a many-to-many relation.

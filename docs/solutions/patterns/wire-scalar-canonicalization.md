@@ -34,10 +34,12 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
   `to_wire_json` in `src/ferro/query/wire.py`.
 - `update()`: `update_bind_payload` runs the helper, then dict-level
   `to_json` (enums still stringify on that path).
-- Many-to-many keys: `Query._m2m` runs the helper on the owner's key and
-  `Query._m2m_keys` on each related key in `src/ferro/query/builder.py`,
-  so `add`, `remove`, `clear` and the read of the relation send the value
-  `save()` wrote. The core binds it by the join column's storage
+- Many-to-many keys: for `add`, `remove` and `clear`,
+  `Query._m2m_owner_key` runs the helper on the owner's key and
+  `Query._m2m_keys` on each related key in `src/ferro/query/builder.py`;
+  the read of the relation carries the owner's key in the payload
+  `to_wire_json` canonicalizes. Every statement sends the value `save()`
+  wrote, and the core binds it by the join column's storage
   (`join_key_expr`), with no cascade of its own.
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
