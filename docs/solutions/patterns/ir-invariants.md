@@ -119,7 +119,9 @@ Untyped binds (especially NULL/UUID) can cause backend-specific mismatches or hi
 
 ### Enforcement anchors
 
-- `src/codec.rs` (`schema_bind_expr`, `query_bind_expr`, `m2m_bind_expr`)
+- `src/codec.rs` (`schema_bind_expr`, `query_bind_expr`)
+- `src/operations.rs` (`join_key_expr`: a many-to-many key binds through
+  `schema_bind_expr` by its join column's storage)
 - `src/operations.rs` (`engine_bind_values_from_sea`)
 - `src/backend.rs` (`EngineBindValue`, `NullKind`)
 - `tests/test_typed_null_binds.py`

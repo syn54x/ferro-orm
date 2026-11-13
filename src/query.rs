@@ -801,7 +801,7 @@ impl QueryPlan {
             let column =
                 qualify_column_with_joins(root_table, join_plan, &order.column, &order.path)?;
             let bound =
-                self.value_rhs_simple_expr_for_backend(&order.column, &value.value, false, backend);
+                self.value_rhs_simple_expr_for_backend(&order.column, &value.value, backend);
             keys.push(StepwiseKey {
                 column,
                 direction,
@@ -989,7 +989,7 @@ impl QueryPlan {
                 let rhs_is_json_null = value.value.is_null();
                 let val = &value.value;
                 let bind = |v: &Value| {
-                    self.value_rhs_with_context(column, v, false, backend, codec_plan, enum_udt)
+                    self.value_rhs_with_context(column, v, backend, codec_plan, enum_udt)
                 };
                 let expr: SimpleExpr = match operator.as_str() {
                     "==" if rhs_is_json_null => col.is_null(),
@@ -1035,21 +1035,15 @@ impl QueryPlan {
     /// - Temporal types (`date`, `date-time`) and `Decimal` (`numeric`)
     ///   continue to use `CAST` -- typed binds for these are deferred (see
     ///   issue #40 for temporal; plan §3 for Decimal).
-    ///
-    /// `infer_uuid_without_schema` is used for M2M join filters where the RHS
-    /// is a UUID string but the join column is not described on the queried
-    /// model's schema.
     pub fn value_rhs_simple_expr_for_backend(
         &self,
         col_name: &str,
         val: &Value,
-        infer_uuid_without_schema: bool,
         backend: Dialect,
     ) -> SimpleExpr {
         self.value_rhs_with_context(
             col_name,
             val,
-            infer_uuid_without_schema,
             backend,
             self.registration.as_ref().map(|m| &m.codec_plan),
             &self.postgres_enum_udt,
@@ -1067,19 +1061,11 @@ impl QueryPlan {
         &self,
         col_name: &str,
         val: &Value,
-        infer_uuid_without_schema: bool,
         backend: Dialect,
         codec_plan: Option<&crate::codec_plan::ModelCodecPlan>,
         enum_udt: &HashMap<String, String>,
     ) -> SimpleExpr {
-        crate::codec::query_bind_expr(
-            codec_plan,
-            col_name,
-            val,
-            infer_uuid_without_schema,
-            backend,
-            enum_udt,
-        )
+        crate::codec::query_bind_expr(codec_plan, col_name, val, backend, enum_udt)
     }
 
     /// Resolve the codec plan + native-enum UDT catalog that govern a WHERE
@@ -2699,41 +2685,12 @@ mod tests {
     }
 
     #[test]
-    fn uuid_rhs_emits_typed_uuid_bind_on_postgres_no_cast() {
-        let plan = empty_query_plan("Widget");
-        let uuid_str = "3f4c4ca7-a7e7-40d6-8d83-8f4ddf3285e6";
-
-        let postgres_rhs = plan.value_rhs_simple_expr_for_backend(
-            "widget_id",
-            &json!(uuid_str),
-            true,
-            Dialect::Postgres,
-        );
-        let postgres_sql = Query::select()
-            .expr(postgres_rhs.clone())
-            .to_string(PostgresQueryBuilder);
-
-        assert!(
-            !postgres_sql.contains("AS uuid"),
-            "Postgres UUID rhs should no longer use CAST: {postgres_sql}"
-        );
-        match extract_pg_rhs_value(postgres_rhs) {
-            SeaValue::Uuid(Some(u)) => assert_eq!(u.to_string(), uuid_str),
-            other => panic!("expected typed Uuid bind, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn uuid_rhs_passes_through_as_text_on_sqlite() {
         let plan = empty_query_plan("Widget");
         let uuid_str = "3f4c4ca7-a7e7-40d6-8d83-8f4ddf3285e6";
 
-        let sqlite_rhs = plan.value_rhs_simple_expr_for_backend(
-            "widget_id",
-            &json!(uuid_str),
-            true,
-            Dialect::Sqlite,
-        );
+        let sqlite_rhs =
+            plan.value_rhs_simple_expr_for_backend("widget_id", &json!(uuid_str), Dialect::Sqlite);
         let sqlite_sql = Query::select()
             .expr(sqlite_rhs)
             .to_string(SqliteQueryBuilder);
@@ -2764,7 +2721,6 @@ mod tests {
         let rhs = plan.value_rhs_simple_expr_for_backend(
             "count",
             &serde_json::Value::Null,
-            false,
             Dialect::Postgres,
         );
 
@@ -2792,7 +2748,6 @@ mod tests {
         let rhs = plan.value_rhs_simple_expr_for_backend(
             "active",
             &serde_json::Value::Null,
-            false,
             Dialect::Postgres,
         );
 
@@ -2820,7 +2775,6 @@ mod tests {
         let rhs = plan.value_rhs_simple_expr_for_backend(
             "id",
             &serde_json::Value::Null,
-            false,
             Dialect::Postgres,
         );
 
@@ -2845,12 +2799,8 @@ mod tests {
         );
         let plan = empty_query_plan("WidgetBinary");
 
-        let rhs = plan.value_rhs_simple_expr_for_backend(
-            "blob",
-            &json!("some-bytes"),
-            false,
-            Dialect::Postgres,
-        );
+        let rhs =
+            plan.value_rhs_simple_expr_for_backend("blob", &json!("some-bytes"), Dialect::Postgres);
         let sql = Query::select()
             .expr(rhs.clone())
             .to_string(PostgresQueryBuilder);
@@ -2871,12 +2821,7 @@ mod tests {
         plan.postgres_enum_udt
             .insert("color".to_string(), "color".to_string());
 
-        let rhs = plan.value_rhs_simple_expr_for_backend(
-            "color",
-            &json!("red"),
-            false,
-            Dialect::Postgres,
-        );
+        let rhs = plan.value_rhs_simple_expr_for_backend("color", &json!("red"), Dialect::Postgres);
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
         assert!(
@@ -2900,12 +2845,7 @@ mod tests {
         );
         let plan = empty_query_plan("WidgetTextColor");
 
-        let rhs = plan.value_rhs_simple_expr_for_backend(
-            "color",
-            &json!("red"),
-            false,
-            Dialect::Postgres,
-        );
+        let rhs = plan.value_rhs_simple_expr_for_backend("color", &json!("red"), Dialect::Postgres);
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
         assert!(
@@ -2941,12 +2881,8 @@ mod tests {
         );
         let plan = empty_query_plan("WidgetDecimal");
 
-        let rhs = plan.value_rhs_simple_expr_for_backend(
-            "amount",
-            &json!("12.34"),
-            false,
-            Dialect::Postgres,
-        );
+        let rhs =
+            plan.value_rhs_simple_expr_for_backend("amount", &json!("12.34"), Dialect::Postgres);
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
         assert!(
