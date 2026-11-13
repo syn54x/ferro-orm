@@ -224,9 +224,7 @@ async def test_a_varchar_join_column_on_sqlite_is_left_with_a_warning(db_url, fr
     assert "'varchar'" in text and "'NUMERIC'" in text
 
 
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_a_varchar_join_column_on_postgres_is_altered_to_its_key(db_url, fresh):
+def _code_models():
     class Tag(Model):
         id: int | None = Field(default=None, primary_key=True)
 
@@ -234,6 +232,28 @@ async def test_a_varchar_join_column_on_postgres_is_altered_to_its_key(db_url, f
         code: str = Field(primary_key=True, db_type="varchar(36)")
         tags: Relation[list[Tag]] = ManyToMany(through="code_tags")
 
+    return Code, Tag
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_a_varchar_join_column_on_sqlite_under_a_varchar_36_key_is_left_quietly(
+    db_url, fresh
+):
+    _code_models()
+    await _recreate_join_table(db_url, "code_tags", "code_id", "varchar(36)", "varchar")
+
+    report = await warned_auto_migrate(db_url, destructive=True)
+
+    assert await _column_type(db_url, "code_tags", "code_id") == ("varchar",)
+    assert schema_steps(report) == []
+    assert list(report.warnings) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_varchar_join_column_on_postgres_is_altered_to_its_key(db_url, fresh):
+    _code_models()
     await _recreate_join_table(db_url, "code_tags", "code_id", "varchar(36)", "varchar")
 
     report = await auto_migrate(db_url, destructive=True)
