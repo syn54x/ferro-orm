@@ -1545,13 +1545,17 @@ class Query(Generic[T]):
             keys.append(canonicalize_wire_scalar(key))
         return keys
 
-    def _m2m_owner_key(self, verb: str) -> Any:
+    def _m2m_owner_key(self, verb: str, context: M2mContext) -> Any:
         """Return the owner's wire-form key for a link write, refusing an unsaved one.
+
+        Args:
+            verb: The link write being made, for the refusal.
+            context: The relation's join table details.
 
         Raises:
             ValueError: The owner has no primary key yet.
         """
-        key = self._m2m_context.source_id
+        key = context.source_id
         if key is None:
             raise ValueError(
                 f"{self._m2m_label}.{verb}(): the owner has no primary key "
@@ -1580,7 +1584,7 @@ class Query(Generic[T]):
                 "'.add()' can only be used on Many-to-Many relationships"
             )
 
-        owner = self._m2m_owner_key("add")
+        owner = self._m2m_owner_key("add", self._m2m_context)
         ids = self._m2m_keys("add", instances)
 
         route = await self._transaction_or_using()
@@ -1614,7 +1618,7 @@ class Query(Generic[T]):
                 "'.remove()' can only be used on Many-to-Many relationships"
             )
 
-        owner = self._m2m_owner_key("remove")
+        owner = self._m2m_owner_key("remove", self._m2m_context)
         ids = self._m2m_keys("remove", instances)
 
         route = await self._transaction_or_using()
@@ -1642,7 +1646,7 @@ class Query(Generic[T]):
                 "'.clear()' can only be used on Many-to-Many relationships"
             )
 
-        owner = self._m2m_owner_key("clear")
+        owner = self._m2m_owner_key("clear", self._m2m_context)
         route = await self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context.join_table,
