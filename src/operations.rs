@@ -2068,20 +2068,47 @@ fn schema_value_expr(
     )
 }
 
-/// Wrap an M2M target/source ID in a SeaQuery expression for a join table.
+/// A key written to or compared with a join-table column, bound by that
+/// column's own storage: the bind `save()` gives a value of the key it
+/// references (I-13). `key` is the JSON `canonicalize_wire_scalar` produced.
 ///
-/// On Postgres, UUID join columns receive a typed `Value::Uuid(Some(_))` bind
-/// rather than the legacy `cast_as("uuid")` workaround. Non-string values for
-/// UUID columns (e.g. an int passed to a UUID FK) and unparseable UUID strings
-/// fall through to a text-cast for backward compatibility -- Postgres still
-/// surfaces an `invalid input syntax for type uuid` error in those cases.
-fn backend_column_value_expr(
+/// # Errors
+/// `PyValueError` for a null key, which links nothing.
+fn join_key_expr(
+    join: &crate::state::RegisteredModel,
+    catalog: &TableCatalog,
     col_name: &str,
-    value: sea_query::Value,
-    uuid_columns: &HashSet<String>,
+    key: &serde_json::Value,
     backend: Dialect,
-) -> SimpleExpr {
-    crate::codec::m2m_bind_expr(col_name, value, uuid_columns, backend)
+) -> PyResult<SimpleExpr> {
+    if key.is_null() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "M2M source/target ID cannot be None",
+        ));
+    }
+    schema_value_expr(
+        join,
+        &join.table_name,
+        col_name,
+        key,
+        &catalog.enum_udt,
+        &catalog.uuid_columns,
+        &catalog.ts_cast,
+        backend,
+    )
+}
+
+/// The join table's registration and live catalog, which type its key binds.
+async fn join_bind_context(
+    join_table: &str,
+    engine: &EngineHandle,
+    exec: Executor<'_>,
+    backend: Dialect,
+) -> PyResult<(Arc<crate::state::RegisteredModel>, Arc<TableCatalog>)> {
+    Ok((
+        crate::state::registration_for_table(join_table)?,
+        postgres_table_catalog(join_table, engine, exec, backend).await?,
+    ))
 }
 
 /// Begin a root database transaction or a nested savepoint.
@@ -3705,6 +3732,10 @@ async fn build_fetch(
             hop.registration.column_names.iter().map(String::as_str),
         )?;
     }
+    let m2m_join = match &plan.m2m {
+        Some(m2m) => Some(join_bind_context(&m2m.join_table, engine, exec, backend).await?),
+        None => None,
+    };
     let statement = {
         let pk = schema.meta.pk_col.clone();
 
@@ -3732,13 +3763,11 @@ async fn build_fetch(
                 Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                     .equals((join_table.clone(), target_col.clone())),
             );
+            let (join, catalog) = m2m_join.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("No join table for M2M join")
+            })?;
             select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                plan.value_rhs_simple_expr_for_backend(
-                    &m2m.source_col,
-                    &m2m.source_id,
-                    true,
-                    backend,
-                ),
+                join_key_expr(join, catalog, &m2m.source_col, &m2m.source_id, backend)?,
             ));
         }
 
@@ -4212,6 +4241,10 @@ async fn build_count(
     let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
     let join_plan = query_join_plan(plan, &table_name, &reserved)?;
     populate_hop_bind_context(plan, &join_plan, engine, exec, backend).await?;
+    let m2m_join = match &plan.m2m {
+        Some(m2m) => Some(join_bind_context(&m2m.join_table, engine, exec, backend).await?),
+        None => None,
+    };
     let (sql, values) = {
         let mut select = Query::select();
         select.expr(Expr::cust("COUNT(*)"));
@@ -4234,13 +4267,11 @@ async fn build_count(
                 Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                     .equals((join_table.clone(), target_col.clone())),
             );
+            let (join, catalog) = m2m_join.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("No join table for M2M join")
+            })?;
             select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                plan.value_rhs_simple_expr_for_backend(
-                    &m2m.source_col,
-                    &m2m.source_id,
-                    true,
-                    backend,
-                ),
+                join_key_expr(join, catalog, &m2m.source_col, &m2m.source_id, backend)?,
             ));
         } else {
             select.from(Alias::new(&table_name));
@@ -5102,10 +5133,10 @@ pub fn add_m2m_links<'py>(
     target_ids: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let s_id = python_to_sea_value(source_id)?;
-    let t_ids: Vec<sea_query::Value> = target_ids
-        .into_iter()
-        .map(|id| python_to_sea_value(id))
+    let s_id = py_to_json_value(&source_id, &source_col)?;
+    let t_ids = target_ids
+        .iter()
+        .map(|id| py_to_json_value(id, &target_col))
         .collect::<PyResult<Vec<_>>>()?;
 
     let log = operation_log(py, "m2m_add", &route.get().connection_name, no_secrets)?;
@@ -5124,8 +5155,7 @@ pub fn add_m2m_links<'py>(
         let exec = Executor::new(scope.connection(), &engine);
 
         let outcome = async {
-            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-            let uuid_columns = &catalog.uuid_columns;
+            let (join, catalog) = join_bind_context(&join_table, &engine, exec, backend).await?;
 
             let (sql, bind_values) = {
                 let mut insert = InsertStatement::new()
@@ -5133,16 +5163,11 @@ pub fn add_m2m_links<'py>(
                     .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
                     .to_owned();
 
-                for t_id in t_ids {
+                for t_id in &t_ids {
                     insert
                         .values(vec![
-                            backend_column_value_expr(
-                                &source_col,
-                                s_id.clone(),
-                                uuid_columns,
-                                backend,
-                            ),
-                            backend_column_value_expr(&target_col, t_id, uuid_columns, backend),
+                            join_key_expr(&join, &catalog, &source_col, &s_id, backend)?,
+                            join_key_expr(&join, &catalog, &target_col, t_id, backend)?,
                         ])
                         .map_err(|e| {
                             pyo3::exceptions::PyValueError::new_err(format!(
@@ -5195,10 +5220,10 @@ pub fn remove_m2m_links<'py>(
     target_ids: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let s_id = python_to_sea_value(source_id)?;
-    let t_ids: Vec<sea_query::Value> = target_ids
-        .into_iter()
-        .map(|id| python_to_sea_value(id))
+    let s_id = py_to_json_value(&source_id, &source_col)?;
+    let t_ids = target_ids
+        .iter()
+        .map(|id| py_to_json_value(id, &target_col))
         .collect::<PyResult<Vec<_>>>()?;
 
     let log = operation_log(py, "m2m_remove", &route.get().connection_name, no_secrets)?;
@@ -5217,33 +5242,20 @@ pub fn remove_m2m_links<'py>(
         let exec = Executor::new(scope.connection(), &engine);
 
         let outcome = async {
-            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-            let uuid_columns = &catalog.uuid_columns;
+            let (join, catalog) = join_bind_context(&join_table, &engine, exec, backend).await?;
 
-            let (sql, bind_values) =
-                sea_query_build_for_backend!(
-                    Query::delete()
-                        .from_table(Alias::new(&join_table))
-                        .and_where(Expr::col(Alias::new(&source_col)).eq(
-                            backend_column_value_expr(&source_col, s_id, uuid_columns, backend)
-                        ))
-                        .and_where(
-                            Expr::col(Alias::new(&target_col)).is_in(
-                                t_ids
-                                    .into_iter()
-                                    .map(|t_id| {
-                                        backend_column_value_expr(
-                                            &target_col,
-                                            t_id,
-                                            uuid_columns,
-                                            backend,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            )
-                        ),
-                    backend
-                );
+            let source = join_key_expr(&join, &catalog, &source_col, &s_id, backend)?;
+            let targets = t_ids
+                .iter()
+                .map(|t_id| join_key_expr(&join, &catalog, &target_col, t_id, backend))
+                .collect::<PyResult<Vec<_>>>()?;
+            let (sql, bind_values) = sea_query_build_for_backend!(
+                Query::delete()
+                    .from_table(Alias::new(&join_table))
+                    .and_where(Expr::col(Alias::new(&source_col)).eq(source))
+                    .and_where(Expr::col(Alias::new(&target_col)).is_in(targets)),
+                backend
+            );
 
             execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
                 .await
@@ -5282,7 +5294,7 @@ pub fn clear_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let s_id = python_to_sea_value(source_id)?;
+    let s_id = py_to_json_value(&source_id, &source_col)?;
     let log = operation_log(py, "m2m_clear", &route.get().connection_name, no_secrets)?;
 
     let operation = async move {
@@ -5300,18 +5312,15 @@ pub fn clear_m2m_links<'py>(
         let exec = Executor::new(scope.connection(), &engine);
 
         let outcome = async {
-            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-            let uuid_columns = &catalog.uuid_columns;
+            let (join, catalog) = join_bind_context(&join_table, &engine, exec, backend).await?;
 
-            let (sql, bind_values) =
-                sea_query_build_for_backend!(
-                    Query::delete()
-                        .from_table(Alias::new(&join_table))
-                        .and_where(Expr::col(Alias::new(&source_col)).eq(
-                            backend_column_value_expr(&source_col, s_id, uuid_columns, backend)
-                        )),
-                    backend
-                );
+            let source = join_key_expr(&join, &catalog, &source_col, &s_id, backend)?;
+            let (sql, bind_values) = sea_query_build_for_backend!(
+                Query::delete()
+                    .from_table(Alias::new(&join_table))
+                    .and_where(Expr::col(Alias::new(&source_col)).eq(source)),
+                backend
+            );
 
             execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
                 .await
@@ -5324,38 +5333,6 @@ pub fn clear_m2m_links<'py>(
         scope.finish(outcome).await
     };
     pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
-}
-
-/// Convert a Python value into a SeaQuery `Value` for M2M source / target IDs.
-///
-/// M2M IDs cannot be `None`: a NULL target id has no meaningful join semantics
-/// and was previously routed to `String(None)`, which (a) reproduces the #38
-/// text-typed-null bug for non-UUID FKs on Postgres and (b) silently no-ops
-/// on insert. Reject up front with a `PyValueError`.
-///
-/// UUID-string detection happens downstream in `backend_column_value_expr`,
-/// which has the column-context (`uuid_columns`) needed to convert to a typed
-/// `Value::Uuid(Some(_))` for UUID FK columns.
-fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
-    if val.is_none() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "M2M source/target ID cannot be None",
-        ));
-    }
-    // Order matters: in Python, `bool` is a subtype of `int`. Check bool
-    // before i64 or True/False round-trip as 1/0.
-    if let Ok(b) = val.extract::<bool>() {
-        Ok(sea_query::Value::Bool(Some(b)))
-    } else if let Ok(i) = val.extract::<i64>() {
-        Ok(sea_query::Value::BigInt(Some(i)))
-    } else if let Ok(f) = val.extract::<f64>() {
-        Ok(sea_query::Value::Double(Some(f)))
-    } else if let Ok(s) = val.extract::<String>() {
-        Ok(sea_query::Value::String(Some(Box::new(s))))
-    } else {
-        // Fallback to string representation for other types
-        Ok(sea_query::Value::String(Some(Box::new(val.to_string()))))
-    }
 }
 
 /// A per-column bind value for the schema-guided write path: either a
@@ -5995,117 +5972,53 @@ pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
 #[cfg(test)]
 mod m2m_value_tests {
     use super::{
-        BindInput, backend_column_value_expr, bind_input_from_py, bind_input_to_expr,
-        py_to_json_value, python_to_sea_value, set_value_bind_input, set_value_to_expr,
+        BindInput, bind_input_from_py, bind_input_to_expr, join_key_expr, py_to_json_value,
+        set_value_bind_input, set_value_to_expr,
     };
     use crate::state::Dialect;
     use ferro_schema_ir::QueryValueExpr;
     use pyo3::Python;
-    use sea_query::{
-        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
-    };
+    use sea_query::{Expr, PostgresQueryBuilder, Query, Value as SeaValue};
     use std::collections::{HashMap, HashSet};
 
-    fn extract_pg_value(expr: sea_query::SimpleExpr) -> SeaValue {
-        let (_, values) = Query::insert()
-            .into_table(Alias::new("t"))
-            .columns([Alias::new("c")])
-            .values_panic([expr])
-            .build(PostgresQueryBuilder);
-        values.0.into_iter().next().expect("one value")
+    fn date_keyed_join() -> std::sync::Arc<crate::state::RegisteredModel> {
+        crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "shift_id": { "type": "string", "format": "date" } }
+            }),
+            "shift_tags".to_string(),
+        )
     }
 
     #[test]
-    fn python_to_sea_value_rejects_none() {
-        Python::attach(|py| {
-            let none = py.None().into_bound(py);
-            let err = python_to_sea_value(none).expect_err("None must be rejected");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("M2M") && msg.contains("None"),
-                "unexpected error message: {msg}"
-            );
-        });
-    }
-
-    #[test]
-    fn python_to_sea_value_routes_bool_before_int() {
-        // Regression guard: in Python bool is subtype of int. We must extract
-        // bool first or True/False round-trip as 1/0.
-        Python::attach(|py| {
-            use pyo3::types::PyBool;
-
-            let py_true = PyBool::new(py, true).to_owned().into_any();
-            let v = python_to_sea_value(py_true).unwrap();
-            assert!(matches!(v, SeaValue::Bool(Some(true))));
-        });
-    }
-
-    #[test]
-    fn backend_column_value_expr_emits_typed_uuid_on_postgres_no_cast() {
-        let mut uuid_cols = HashSet::new();
-        uuid_cols.insert("user_id".to_string());
-
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Postgres);
-
-        let sql = Query::select()
-            .expr(expr.clone())
-            .to_string(PostgresQueryBuilder);
-        assert!(
-            !sql.contains("AS uuid"),
-            "M2M typed UUID bind should not CAST: {sql}"
-        );
-        match extract_pg_value(expr) {
-            SeaValue::Uuid(Some(u)) => assert_eq!(u.to_string(), uuid_str),
-            other => panic!("expected typed Uuid bind, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn backend_column_value_expr_passthrough_for_non_uuid_column() {
-        let uuid_cols = HashSet::new();
-        let expr = backend_column_value_expr(
-            "team_id",
-            SeaValue::BigInt(Some(42)),
-            &uuid_cols,
+    fn join_key_expr_rejects_a_null_key() {
+        let err = join_key_expr(
+            &date_keyed_join(),
+            &crate::backend::TableCatalog::default(),
+            "shift_id",
+            &serde_json::Value::Null,
             Dialect::Postgres,
-        );
-        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
-        // No CAST for plain integer FK
-        assert!(!sql.contains("CAST"), "non-UUID FK should not CAST: {sql}");
-    }
-
-    #[test]
-    fn backend_column_value_expr_passthrough_on_sqlite() {
-        let mut uuid_cols = HashSet::new();
-        uuid_cols.insert("user_id".to_string());
-
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Sqlite);
-
-        let sql = Query::select().expr(expr).to_string(SqliteQueryBuilder);
-        assert!(!sql.contains("AS uuid"), "SQLite must not CAST: {sql}");
-    }
-
-    #[test]
-    fn backend_column_value_expr_falls_back_to_text_cast_on_unparseable_uuid() {
-        // Defensive path: if a non-UUID-shaped string lands on a UUID FK
-        // column, surface the error from Postgres rather than silently
-        // emitting a typed Uuid bind that would fail with a less obvious
-        // diagnostic.
-        let mut uuid_cols = HashSet::new();
-        uuid_cols.insert("user_id".to_string());
-
-        let value = SeaValue::String(Some(Box::new("not-a-uuid".to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Postgres);
-        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        )
+        .expect_err("a null key must be rejected");
+        let msg = err.to_string();
         assert!(
-            sql.contains("AS uuid"),
-            "fallback CAST expected for unparseable UUID: {sql}"
+            msg.contains("M2M") && msg.contains("None"),
+            "unexpected error message: {msg}"
         );
+    }
+
+    #[test]
+    fn join_key_expr_binds_a_date_key_as_its_join_column() {
+        let expr = join_key_expr(
+            &date_keyed_join(),
+            &crate::backend::TableCatalog::default(),
+            "shift_id",
+            &serde_json::json!("2026-03-01"),
+            Dialect::Postgres,
+        )
+        .expect("a date key binds");
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert_eq!(sql, "SELECT CAST('2026-03-01' AS date)");
     }
 
     #[test]

@@ -28,6 +28,7 @@ from typing import (
     overload,
 )
 
+from .._bind_payload import canonicalize_wire_scalar
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -719,6 +720,7 @@ class Query(Generic[T]):
         """Store many-to-many linkage context for relationship operations.
 
         A new ``Query`` with the m2m context set; ``self`` is unchanged.
+        The owner's key is kept in its wire form, the value ``save()`` wrote.
         """
         new = self._clone()
         new._m2m_label = label
@@ -726,7 +728,7 @@ class Query(Generic[T]):
             join_table=join_table,
             source_col=source_col,
             target_col=target_col,
-            source_id=source_id,
+            source_id=canonicalize_wire_scalar(source_id),
         )
         return new
 
@@ -1514,7 +1516,8 @@ class Query(Generic[T]):
         return await self._count("exists") > 0
 
     def _m2m_keys(self, verb: str, instances: tuple[Any, ...]) -> list[Any]:
-        """Return the primary keys of related instances, refusing unfit ones.
+        """Return the primary keys of related instances, each in its wire
+        form, refusing unfit ones.
 
         Raises:
             TypeError: An instance is not of the related model.
@@ -1541,7 +1544,7 @@ class Query(Generic[T]):
                     f"{self._m2m_label}.{verb}(): {name}({pk}=None) has no "
                     "primary key yet; save it first"
                 )
-            keys.append(key)
+            keys.append(canonicalize_wire_scalar(key))
         return keys
 
     async def add(self, *instances: Any) -> None:
