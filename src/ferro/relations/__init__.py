@@ -26,7 +26,6 @@ from ..columns import (
     ColumnSpec,
     RetiredField,
     fk_column_spec,
-    pk_python_type_for_model,
 )
 from ..fields import _RelationOptions, annotation_text, field_line, field_options
 from ..ir.compiler import (
@@ -1940,6 +1939,18 @@ def resolve_relationships():
         raise
 
 
+def _join_key(join_table: str, column: str, side: Any) -> ColumnSpec:
+    """The primary-key column ``join_table.column`` points at on ``side``.
+
+    Raises:
+        DeclarationRefusal: ``side`` declares no primary key; the fix adds
+            the default one.
+    """
+    if side.__ferro_pk__ is None:
+        raise keyless_target_refusal(join_table, column, side, {}, None)
+    return side.__ferro_columns__[side.__ferro_pk__]
+
+
 def _resolve_pending() -> None:
     """Resolve every queued declaration, then compile the models it touches."""
     # Drained, so a later call resolves only what is declared since.
@@ -1995,17 +2006,12 @@ def _resolve_pending() -> None:
             ),
         )
 
-        join_columns = (
-            fk_column_spec(
-                source_col,
-                python_type=pk_python_type_for_model(source_model),
-                to_table=source_table,
-            ),
-            fk_column_spec(
-                target_col,
-                python_type=pk_python_type_for_model(target_model),
-                to_table=target_table,
-            ),
+        join_columns = tuple(
+            fk_column_spec(column, _join_key(join_table, column, side), to_table=table)
+            for column, side, table in (
+                (source_col, source_model, source_table),
+                (target_col, target_model, target_table),
+            )
         )
         composite_uniques = ((source_col, target_col),)
         composite_indexes = ((target_col, source_col),) if rel.reverse_index else ()

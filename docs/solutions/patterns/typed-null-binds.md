@@ -45,7 +45,6 @@ digraph typed_null_flow {
   "JSON null"        [shape=box];
   "codec::schema_bind_expr (INSERT/UPDATE)"  [shape=box];
   "codec::query_bind_expr (filter)"          [shape=box];
-  "codec::m2m_bind_expr (M2M)"               [shape=box];
   "SeaValue::T(None)"                        [shape=oval];
   "engine_bind_values_from_sea"              [shape=box];
   "EngineBindValue::Null(NullKind::T)"       [shape=oval];
@@ -54,10 +53,8 @@ digraph typed_null_flow {
 
   "JSON null" -> "codec::schema_bind_expr (INSERT/UPDATE)";
   "JSON null" -> "codec::query_bind_expr (filter)";
-  "JSON null" -> "codec::m2m_bind_expr (M2M)";
   "codec::schema_bind_expr (INSERT/UPDATE)" -> "SeaValue::T(None)";
   "codec::query_bind_expr (filter)" -> "SeaValue::T(None)";
-  "codec::m2m_bind_expr (M2M)" -> "SeaValue::T(None)";
   "SeaValue::T(None)" -> "engine_bind_values_from_sea";
   "engine_bind_values_from_sea" -> "EngineBindValue::Null(NullKind::T)";
   "EngineBindValue::Null(NullKind::T)" -> "bind_engine_value";
@@ -72,12 +69,22 @@ digraph typed_null_flow {
 | INSERT values    | `schema_bind_expr`             | `src/codec.rs` |
 | UPDATE values    | `schema_bind_expr`             | `src/codec.rs` |
 | Filter / UPDATE  | `query_bind_expr`              | `src/codec.rs` |
-| M2M target IDs   | `m2m_bind_expr`                | `src/codec.rs` |
+| M2M link keys    | `schema_bind_expr`             | `src/codec.rs` |
 
 **`IS NULL` for typed `== None`:** JSON `null` on `QueryNode::value` deserializes
 as `Option<serde_json::Value>::None` (serde), not `Some(Value::Null)`.
 `node_to_condition_for_backend` maps `==` / `!=` with a null RHS to
 `IS NULL` / `IS NOT NULL` — never `= NULL`, which is never true in SQL.
+
+**Many-to-many link keys:** a key written to or compared with a join-table
+column goes through `join_key_expr` in `src/operations.rs`, which binds it
+with `schema_bind_expr` against the join table's own codec plan and live
+catalog. A `date` key binds as `CAST($1 AS date)` in `add`, `remove`,
+`clear` and the read of the relation, the bind `save()` gives the key it
+references. An owner that is not saved yet has a null key: reading its
+relation binds `CAST(NULL AS date)`, which no link equals, so `all()` is
+`[]` from the same statement shape. `add`, `remove` and `clear` refuse it
+in Python (`Query._m2m_owner_key`), naming the relation and the fix.
 
 These functions inspect column metadata (JSON type, format, `uuid_columns`
 introspection, `ts_cast` metadata) and emit one of the typed SeaQuery `None`
@@ -188,7 +195,7 @@ Ferro itself.
    `Null(Untyped)`, which sends non-null data out as a text-typed null --
    pair the arms or the bug surfaces only at runtime against PG.
 4. Update the schema-driven emitter null switches
-   (`schema_value_expr`, `typed_null_for_column`, `backend_column_value_expr`)
+   (`schema_value_expr`, `typed_null_for_codec`)
    to recognize the type.
 5. Update the table in this doc and add **integration** tests covering the
    new variant on both backends. SeaQuery `SimpleExpr` shape assertions are

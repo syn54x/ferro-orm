@@ -8,7 +8,7 @@ related_files:
   - src/ferro/metaclass.py
   - src/ferro/columns.py
   - src/ferro/relations/__init__.py
-related_issues: [874, 887]
+related_issues: [874, 887, 936]
 captured: 2026-11-09
 ---
 
@@ -56,8 +56,13 @@ its attribute name, and neither adds anything to the schema.
   annotation. A relation over a column with no `foreign_key` is refused.
 - **Join tables are Ferro's.** A `ManyToMany` still gets a join table whose
   two `<table>_id` columns Ferro builds with `fk_column_spec` in
-  `src/ferro/columns.py`, typed from each side's primary key
-  (`pk_python_type_for_model`, beside it).
+  `src/ferro/columns.py`, each derived from the column spec of its side's
+  primary key: the type and storage (`db_type` included) are the key's, so
+  a `Decimal` key gets a `numeric` join column and a `varchar(36)` key a
+  `varchar(36)` one. A join column meets the rule a declared key column is
+  checked against by construction. A side with no primary key is refused
+  when relations resolve, its fix the default
+  `id: int | None = Field(default=None, primary_key=True)`.
 
 ## Recipe: test a column option
 

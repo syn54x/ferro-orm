@@ -217,7 +217,6 @@ fn typed_null_for_codec(codec: Option<&ColumnCodec>) -> SeaValue {
 /// * `plan` — Compiled codec plan (`None` when the model is not registered).
 /// * `col_name` — Filtered column.
 /// * `val` — JSON RHS from the query IR.
-/// * `infer_uuid_without_schema` — When true, parse UUID strings even if the plan lacks the column.
 /// * `backend` — Active SQL dialect.
 /// * `postgres_enum_udt` — Native enum UDT names from `pg_catalog`.
 ///
@@ -227,7 +226,6 @@ pub fn query_bind_expr(
     plan: Option<&ModelCodecPlan>,
     col_name: &str,
     val: &Value,
-    infer_uuid_without_schema: bool,
     backend: Dialect,
     postgres_enum_udt: &HashMap<String, String>,
 ) -> SimpleExpr {
@@ -243,9 +241,7 @@ pub fn query_bind_expr(
                 return crate::schema_bind::postgres_enum_string_rhs_expr(s, tn);
             }
 
-            if let Ok(parsed) = uuid::Uuid::parse_str(s)
-                && (col_is_uuid || infer_uuid_without_schema)
-            {
+            if col_is_uuid && let Ok(parsed) = uuid::Uuid::parse_str(s) {
                 return Expr::value(SeaValue::Uuid(Some(Box::new(parsed))));
             }
 
@@ -290,33 +286,6 @@ pub fn query_bind_expr(
     }
 
     Expr::value(json_value_to_sea_value(val))
-}
-
-/// Wrap a many-to-many join-column bind with Postgres UUID typing when needed.
-///
-/// # Arguments
-/// * `col_name` — Join table column (`source_id` or `target_id`).
-/// * `value` — SeaQuery value produced from the Python ID.
-/// * `uuid_columns` — UUID-typed columns on the join table (Postgres catalog).
-/// * `backend` — Active SQL dialect.
-///
-/// # Returns
-/// Expression with `Value::Uuid` when the column is a Postgres UUID; otherwise passes `value` through.
-pub fn m2m_bind_expr(
-    col_name: &str,
-    value: SeaValue,
-    uuid_columns: &HashSet<String>,
-    backend: Dialect,
-) -> SimpleExpr {
-    if backend == Dialect::Postgres && uuid_columns.contains(col_name) {
-        if let SeaValue::String(Some(s)) = &value
-            && let Ok(parsed) = uuid::Uuid::parse_str(s)
-        {
-            return Expr::value(SeaValue::Uuid(Some(Box::new(parsed))));
-        }
-        return Expr::value(value).cast_as("uuid");
-    }
-    Expr::value(value)
 }
 
 /// Coerce a JSON literal into a SeaQuery `Value` without column context.

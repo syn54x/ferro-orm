@@ -5,7 +5,7 @@ from uuid import UUID
 
 from ferro import Field, Model
 from ferro.base import FerroField
-from ferro.columns import build_column_specs, fk_column_spec, pk_spec
+from ferro.columns import build_column_specs, fk_column_spec
 
 
 class TestAutoincrementDerivation:
@@ -176,17 +176,29 @@ class TestJsonFamilyDefaultSnapshot:
 
 
 class TestJoinTableProducers:
-    def test_pk_spec_uuid(self):
-        spec = pk_spec("user_id", UUID)
-        assert spec.logical_type == "uuid" and spec.format == "uuid"
-        assert spec.primary_key is False and spec.nullable is False
+    def test_fk_column_spec_takes_the_key_s_type_and_storage(self, clean_registry):
+        class User(Model):
+            id: UUID | None = Field(default=None, primary_key=True)
+            code: str = Field(unique=True, index=True, db_type="varchar(36)")
 
-    def test_fk_column_spec(self):
-        spec = fk_column_spec("user_id", python_type=int, to_table="user")
+        key = build_column_specs(User)["code"]
+        spec = fk_column_spec("user_code", key, to_table="user")
+
+        assert (spec.logical_type, spec.python_type) == ("string", str)
+        assert (spec.db_type, spec.db_type_explicit) == ("varchar(36)", True)
+        assert not (spec.unique or spec.index or spec.nullable)
+
+    def test_fk_column_spec_strips_none_and_drops_the_key_s_own_facts(
+        self, clean_registry
+    ):
+        class User(Model):
+            id: UUID | None = Field(default=None, primary_key=True)
+
+        spec = fk_column_spec(
+            "user_id", build_column_specs(User)["id"], to_table="user"
+        )
+
+        assert (spec.logical_type, spec.python_type) == ("uuid", UUID)
+        assert spec.primary_key is False and spec.default is None
         assert spec.foreign_key.to_table == "user"
         assert spec.foreign_key.on_delete == "CASCADE"
-        assert spec.nullable is False and spec.logical_type == "integer"
-
-    def test_pk_spec_unknown_type_falls_back_to_string(self):
-        # Mirrors schema_fragment_for_pk's historical fallback.
-        assert pk_spec("x", None).logical_type == "string"

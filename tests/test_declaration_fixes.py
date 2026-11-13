@@ -561,6 +561,17 @@ def _cases(storage: str) -> dict[str, dict]:
         local=True,
         Player=['links: Relation[list["Tag"]] = ManyToMany(through="team")'],
     )
+    # A many-to-many to a model with no primary key: the join column has no
+    # key to be stored as, so the fix gives Tag the default one.
+    cases["many-to-many to a model with no primary key"] = _case(
+        "join key",
+        "tag_id",
+        owner="player_links",
+        local=False,
+        no_pk=("Tag",),
+        Tag=['name: str = ""'],
+        Player=['links: Relation[list["Tag"]] = ManyToMany(through="player_links")'],
+    )
     # A join table's renamed_from that cannot be its previous name.
     for spelling, previous in {
         "its own join table": "player_links",
@@ -782,6 +793,9 @@ async def _works(mod, case: dict) -> None:
             if column.foreign_key is not None
         ]
         assert columns
+    elif case["kind"] == "join key":
+        columns = {c.name: c for c in REGISTRY.join_tables()["player_links"].columns}
+        assert columns[field].python_type is int, columns
     elif case["kind"] == "shared key":
         columns = mod.Player.__ferro_columns__
         assert mod.Player.__ferro_pk__ == "id"

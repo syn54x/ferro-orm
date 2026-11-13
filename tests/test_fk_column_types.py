@@ -17,17 +17,8 @@ from ferro import (
     Reverse,
     connect,
 )
-from ferro.columns import pk_python_type_for_model
 
 pytestmark = pytest.mark.backend_matrix
-
-
-def test_pk_python_type_for_model_uuid():
-    class UuidPkParent(Model):
-        id: UUID = Field(default_factory=uuid4, primary_key=True)
-        name: str
-
-    assert pk_python_type_for_model(UuidPkParent) is UUID
 
 
 def test_a_join_table_types_its_columns_as_each_model_s_primary_key():
