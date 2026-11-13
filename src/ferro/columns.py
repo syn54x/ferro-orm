@@ -22,7 +22,6 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from uuid import UUID
 
 from pydantic import BaseModel, SecretBytes, SecretStr, TypeAdapter
 from pydantic_core import PydanticUndefined, to_json
@@ -35,6 +34,7 @@ from ._annotation_utils import (
     _is_json_family,
     _scalar_part_of_annotation,
     _strip_optional_and_annotated,
+    _strip_optional_union,
 )
 from .base import FerroField, ForwardRelation
 
@@ -48,8 +48,6 @@ __all__ = [
     "build_relation_specs",
     "build_reverse_specs",
     "fk_column_spec",
-    "pk_python_type_for_model",
-    "pk_spec",
     "primary_key_field_name",
     "retired_clause",
     "retired_column_specs",
@@ -214,7 +212,7 @@ class ColumnSpec:
 
     Producers differ: `build_column_specs` stores the stripped annotation,
     which may still be a union (`int | None` for an optional primary key);
-    `pk_spec` and `fk_column_spec` store the bare scalar. A consumer that
+    `fk_column_spec` stores the bare scalar. A consumer that
     needs the scalar unwraps it (`_scalar_part_of_annotation`, or union
     handling).
     """
@@ -800,78 +798,25 @@ def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
     return specs
 
 
-_PK_TYPE_FACTS: dict[Any, tuple[str, str | None]] = {
-    int: ("integer", None),
-    str: ("string", None),
-    UUID: ("uuid", "uuid"),
-    float: ("number", None),
-    bool: ("boolean", None),
-    bytes: ("binary", "binary"),
-}
-
-
-def pk_python_type_for_model(target: type[Any]) -> Any | None:
-    """Return the PK column's scalar python type from the target's specs."""
-    pk_field = getattr(target, "__ferro_pk__", None)
-    if pk_field is None:
-        return None
-    specs = getattr(target, "__ferro_columns__", None) or {}
-    spec = specs.get(pk_field)
-    return spec.python_type if spec is not None else None
-
-
-def pk_spec(name: str, python_type: Any) -> ColumnSpec:
-    """Build the spec of a column typed like a primary key, for join tables.
-
-    A `None` or unknown type falls back to a string column.
-
-    Args:
-        name: The column's name.
-        python_type: The primary key's Python type.
-
-    Returns:
-        A non-null, non-key column spec of that type.
-    """
-    scalar = (
-        _scalar_part_of_annotation(python_type) if python_type is not None else None
-    )
-    origin = get_origin(scalar)
-    if origin is Union or origin is types.UnionType:
-        non_none = [a for a in get_args(scalar) if a is not type(None)]
-        if len(non_none) == 1:
-            scalar = _scalar_part_of_annotation(non_none[0])
-    logical_type, fmt = _PK_TYPE_FACTS.get(scalar, ("string", None))
-    return ColumnSpec(
-        name=name,
-        logical_type=logical_type,
-        nullable=False,
-        primary_key=False,
-        autoincrement=False,
-        unique=False,
-        index=False,
-        default=None,
-        format=fmt,
-        python_type=scalar,
-    )
-
-
 def fk_column_spec(
     name: str,
+    key: ColumnSpec,
     *,
-    python_type: Any,
     to_table: str,
-    on_delete: str | None = "CASCADE",
+    on_delete: str = "CASCADE",
     unique: bool = False,
     index: bool = False,
     nullable: bool = False,
 ) -> ColumnSpec:
-    """Build a foreign-key column's spec at a known target.
+    """Build the spec of a foreign-key column stored as the key it points at.
 
-    Join tables use it.
+    Join tables use it. The column takes the key's type and storage and
+    nothing else: it is never a primary key, numbered by the database,
+    defaulted, checked or retired.
 
     Args:
         name: The column's name.
-        python_type: The target primary key's Python type.
+        key: The column spec of the primary key the column points at.
         to_table: The target table's name.
         on_delete: The `ON DELETE` action. Defaults to `"CASCADE"`.
         unique: Add a unique constraint. Defaults to `False`.
@@ -881,12 +826,25 @@ def fk_column_spec(
     Returns:
         The column spec.
     """
-    return replace(
-        pk_spec(name, python_type),
-        foreign_key=ForeignKeyRef(to_table=to_table, on_delete=on_delete),
+    return ColumnSpec(
+        name=name,
+        logical_type=key.logical_type,
+        nullable=nullable,
+        primary_key=False,
+        autoincrement=False,
         unique=unique,
         index=index,
-        nullable=nullable,
+        default=None,
+        format=key.format,
+        python_type=_strip_optional_union(key.python_type),
+        enum_values=key.enum_values,
+        enum_type_name=key.enum_type_name,
+        enum_class=key.enum_class,
+        secret_class=key.secret_class,
+        json_adapter=key.json_adapter,
+        db_type=key.db_type,
+        db_type_explicit=key.db_type_explicit,
+        foreign_key=ForeignKeyRef(to_table=to_table, on_delete=on_delete),
     )
 
 
