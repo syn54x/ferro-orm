@@ -81,7 +81,10 @@ column goes through `join_key_expr` in `src/operations.rs`, which binds it
 with `schema_bind_expr` against the join table's own codec plan and live
 catalog. A `date` key binds as `CAST($1 AS date)` in `add`, `remove`,
 `clear` and the read of the relation, the bind `save()` gives the key it
-references. A null key is refused, since it links nothing.
+references. An owner that is not saved yet has a null key: reading its
+relation binds `CAST(NULL AS date)`, which no link equals, so `all()` is
+`[]` from the same statement shape. `add`, `remove` and `clear` refuse it
+in Python (`Query._m2m_owner_key`), naming the relation and the fix.
 
 These functions inspect column metadata (JSON type, format, `uuid_columns`
 introspection, `ts_cast` metadata) and emit one of the typed SeaQuery `None`
