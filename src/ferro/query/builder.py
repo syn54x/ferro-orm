@@ -1516,8 +1516,7 @@ class Query(Generic[T]):
         return await self._count("exists") > 0
 
     def _m2m_keys(self, verb: str, instances: tuple[Any, ...]) -> list[Any]:
-        """Return the primary keys of related instances, each in its wire
-        form, refusing unfit ones.
+        """Return the wire-form primary keys of related instances, refusing unfit ones.
 
         Raises:
             TypeError: An instance is not of the related model.
@@ -1547,6 +1546,20 @@ class Query(Generic[T]):
             keys.append(canonicalize_wire_scalar(key))
         return keys
 
+    def _m2m_owner_key(self, verb: str) -> Any:
+        """Return the owner's key for a link write, refusing an unsaved owner.
+
+        Raises:
+            ValueError: The owner has no primary key yet.
+        """
+        key = self._m2m_context.source_id
+        if key is None:
+            raise ValueError(
+                f"{self._m2m_label}.{verb}(): the owner has no primary key "
+                "yet; save it first"
+            )
+        return key
+
     async def add(self, *instances: Any) -> None:
         """Link instances to the owner of a many-to-many relation.
 
@@ -1560,13 +1573,15 @@ class Query(Generic[T]):
         Raises:
             RuntimeError: The query is not a many-to-many relation.
             TypeError: An instance is not of the related model.
-            ValueError: An instance has no primary key yet. Save it first.
+            ValueError: An instance or the owner has no primary key yet. Save
+                it first.
         """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.add()' can only be used on Many-to-Many relationships"
             )
 
+        owner = self._m2m_owner_key("add")
         ids = self._m2m_keys("add", instances)
 
         route = await self._transaction_or_using()
@@ -1574,7 +1589,7 @@ class Query(Generic[T]):
             self._m2m_context.join_table,
             self._m2m_context.source_col,
             self._m2m_context.target_col,
-            self._m2m_context.source_id,
+            owner,
             ids,
             route,
         )
@@ -1592,13 +1607,15 @@ class Query(Generic[T]):
         Raises:
             RuntimeError: The query is not a many-to-many relation.
             TypeError: An instance is not of the related model.
-            ValueError: An instance has no primary key yet. Save it first.
+            ValueError: An instance or the owner has no primary key yet. Save
+                it first.
         """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.remove()' can only be used on Many-to-Many relationships"
             )
 
+        owner = self._m2m_owner_key("remove")
         ids = self._m2m_keys("remove", instances)
 
         route = await self._transaction_or_using()
@@ -1606,7 +1623,7 @@ class Query(Generic[T]):
             self._m2m_context.join_table,
             self._m2m_context.source_col,
             self._m2m_context.target_col,
-            self._m2m_context.source_id,
+            owner,
             ids,
             route,
         )
@@ -1619,17 +1636,19 @@ class Query(Generic[T]):
 
         Raises:
             RuntimeError: The query is not a many-to-many relation.
+            ValueError: The owner has no primary key yet. Save it first.
         """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.clear()' can only be used on Many-to-Many relationships"
             )
 
+        owner = self._m2m_owner_key("clear")
         route = await self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context.join_table,
             self._m2m_context.source_col,
-            self._m2m_context.source_id,
+            owner,
             route,
         )
 

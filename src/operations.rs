@@ -2071,9 +2071,8 @@ fn schema_value_expr(
 /// A key written to or compared with a join-table column, bound by that
 /// column's own storage: the bind `save()` gives a value of the key it
 /// references (I-13). `key` is the JSON `canonicalize_wire_scalar` produced.
-///
-/// # Errors
-/// `PyValueError` for a null key, which links nothing.
+/// A null key, an owner not saved yet, binds as the column's typed NULL,
+/// which no link equals.
 fn join_key_expr(
     join: &crate::state::RegisteredModel,
     catalog: &TableCatalog,
@@ -2081,11 +2080,6 @@ fn join_key_expr(
     key: &serde_json::Value,
     backend: Dialect,
 ) -> PyResult<SimpleExpr> {
-    if key.is_null() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "M2M source/target ID cannot be None",
-        ));
-    }
     schema_value_expr(
         join,
         &join.table_name,
@@ -3750,7 +3744,7 @@ async fn build_fetch(
         apply_include_select_list(&mut select, &include_hops);
         select.from(Alias::new(&table_name));
 
-        if let Some(m2m) = &plan.m2m {
+        if let Some((m2m, (join, catalog))) = plan.m2m.as_ref().zip(m2m_join.as_ref()) {
             let join_table = Alias::new(&m2m.join_table);
             let source_col = Alias::new(&m2m.source_col);
             let target_col = Alias::new(&m2m.target_col);
@@ -3763,9 +3757,6 @@ async fn build_fetch(
                 Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                     .equals((join_table.clone(), target_col.clone())),
             );
-            let (join, catalog) = m2m_join.as_ref().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("No join table for M2M join")
-            })?;
             select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
                 join_key_expr(join, catalog, &m2m.source_col, &m2m.source_id, backend)?,
             ));
@@ -4249,7 +4240,7 @@ async fn build_count(
         let mut select = Query::select();
         select.expr(Expr::cust("COUNT(*)"));
 
-        if let Some(m2m) = &plan.m2m {
+        if let Some((m2m, (join, catalog))) = plan.m2m.as_ref().zip(m2m_join.as_ref()) {
             let join_table = Alias::new(&m2m.join_table);
             let source_col = Alias::new(&m2m.source_col);
             let target_col = Alias::new(&m2m.target_col);
@@ -4267,9 +4258,6 @@ async fn build_count(
                 Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                     .equals((join_table.clone(), target_col.clone())),
             );
-            let (join, catalog) = m2m_join.as_ref().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("No join table for M2M join")
-            })?;
             select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
                 join_key_expr(join, catalog, &m2m.source_col, &m2m.source_id, backend)?,
             ));
@@ -5991,20 +5979,17 @@ mod m2m_value_tests {
     }
 
     #[test]
-    fn join_key_expr_rejects_a_null_key() {
-        let err = join_key_expr(
+    fn join_key_expr_binds_a_null_key_as_its_join_column_s_typed_null() {
+        let expr = join_key_expr(
             &date_keyed_join(),
             &crate::backend::TableCatalog::default(),
             "shift_id",
             &serde_json::Value::Null,
             Dialect::Postgres,
         )
-        .expect_err("a null key must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("M2M") && msg.contains("None"),
-            "unexpected error message: {msg}"
-        );
+        .expect("a null key binds");
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert_eq!(sql, "SELECT CAST(NULL AS date)");
     }
 
     #[test]
