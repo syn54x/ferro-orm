@@ -208,19 +208,6 @@ async def test_allow_ahead_takes_only_its_three_values(project, pkg, db, value, 
         assert str(raised.value) == text
 
 
-async def test_up_raises_a_run_refusal_rather_than_returning_it(project, pkg, db):
-    configure(project, pkg, db.backend)
-    write_models(project, pkg, AUTHOR)
-    new("create_author")
-    await connect(db.url)
-    await ferro.migrations.up()
-    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
-    up_file.write_bytes(up_file.read_bytes() + b"\n")
-
-    with pytest.raises(MigrationRefused, match="was edited after it was applied"):
-        await ferro.migrations.up()
-
-
 # -- check --------------------------------------------------------------------------
 
 

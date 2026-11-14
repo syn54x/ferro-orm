@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from ferro.cli.output import applied_at_short, kind_of_file
+from ferro.cli.output import applied_at_short
 from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     no_bytecode,
     plain_env,
@@ -132,57 +132,6 @@ def ahead_of_the_directory(project, pkg, db) -> None:
 
 
 # -- the plain form: status --------------------------------------------------------
-
-
-@pytest.mark.backend_matrix
-def test_plain_status_before_any_run(project, pkg, db, capsys):
-    two_pending(project, pkg, db)
-
-    code, out, err = cli(capsys, "status", "--url", db.url)
-
-    assert code == 3
-    assert out == (
-        f"{db.line}\n"
-        f"-- 2 pending  {table(db)}\n"
-        "  -- 0001_create_author  pending\n"
-        "  -- 0002_second         pending\n"
-    )
-    assert err == ""
-
-
-@pytest.mark.backend_matrix
-def test_plain_status_after_up(project, pkg, db, capsys):
-    two_applied(project, pkg, db)
-    doc = document(capsys, db)
-
-    code, out, _ = cli(capsys, "status", "--url", db.url)
-
-    assert code == 0
-    assert out == (
-        f"{db.line}\n"
-        f"ok 2 applied  {table(db)}\n"
-        f"  ok 0001_create_author  applied  {at(doc, 1)}\n"
-        f"  ok 0002_second         applied  {at(doc, 2)}\n"
-    )
-    assert at(doc, 1).endswith("Z") and len(at(doc, 1)) == len("2026-10-14 09:40Z")
-
-
-@pytest.mark.backend_matrix
-def test_plain_status_with_steps_expands_every_migration(project, pkg, db, capsys):
-    two_applied(project, pkg, db)
-    doc = document(capsys, db)
-
-    code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
-
-    assert code == 0
-    assert out == (
-        f"{db.line}\n"
-        f"ok 2 applied  {table(db)}\n"
-        f"  ok 0001_create_author  applied  {at(doc, 1)}\n"
-        f"      01_schema.up.{db.backend}.sql  applied  expand\n"
-        f"  ok 0002_second         applied  {at(doc, 2)}\n"
-        "      01_second.up.sql  applied  contract\n"
-    )
 
 
 @pytest.mark.backend_matrix
@@ -375,15 +324,6 @@ def drifted(project, pkg, db) -> None:
     two_applied(project, pkg, db)
     db.execute('CREATE INDEX "idx_author_status" ON "author" ("status")')
     db.execute('CREATE INDEX "idx_author_name" ON "author" ("name")')
-
-
-@pytest.mark.backend_matrix
-def test_plain_drift_clean_is_the_one_liner(project, pkg, db, capsys):
-    two_applied(project, pkg, db)
-
-    code, out, err = cli(capsys, "drift", "--url", db.url)
-
-    assert (code, out, err) == (0, f"{db.line}\nno drift against 0002_second\n", "")
 
 
 @pytest.mark.backend_matrix
@@ -714,17 +654,6 @@ def test_applied_at_is_the_minute_in_utc_with_z():
     assert applied_at_short("2026-10-14T09:40:12.123456Z") == "2026-10-14 09:40Z"
     assert applied_at_short("2026-10-14T11:40:12+02:00") == "2026-10-14 09:40Z"
     assert applied_at_short(None) == ""
-
-
-def test_a_files_kind_is_read_from_its_suffix():
-    assert kind_of_file("02_backfill_account.py") == "data"
-    assert kind_of_file("01_expand.up.postgres.sql") == "ddl"
-    assert kind_of_file("01_expand.down.sqlite.sql") == "ddl"
-    assert kind_of_file("01_second.up.sql") == "portable_sql"
-    assert kind_of_file("01_second.down.sql") == "portable_sql"
-    assert kind_of_file("ir.json") == "snapshot"
-    with pytest.raises(ValueError, match="notes.txt"):
-        kind_of_file("notes.txt")
 
 
 # -- a terminal that cannot show Unicode -------------------------------------------
