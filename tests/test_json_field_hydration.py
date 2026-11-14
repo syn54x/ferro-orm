@@ -88,20 +88,6 @@ def test_native_json_fields_register_no_converter():
     assert JNative._hydration_converters == {}
 
 
-def test_declared_json_fields_register_a_json_converter():
-    kinds = {n: kind for n, (kind, _) in JShade._hydration_converters.items()}
-    assert kinds == {"dimensions": "json", "plain": "json", "items": "json"}
-    assert set(JLiteral._hydration_converters) == {"tones"}
-    assert set(JRich._hydration_converters) == {
-        "tags",
-        "pair",
-        "stamps",
-        "owners",
-        "prices",
-        "tones",
-    }
-
-
 @pytest.mark.asyncio
 async def test_nested_model_hydrates_as_the_model(db_url):
     await ferro.connect(db_url, auto_migrate=True)

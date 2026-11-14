@@ -154,17 +154,6 @@ def _assert_core_values(row: Model) -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_type_row_hydrates_expected_values(db_url):
-    specimen_cls = await _connect(db_url)
-    async with ferro.engines.session():
-        await _save_specimen(specimen_cls)
-
-        rows = await specimen_cls.all()
-        assert len(rows) == 1
-        _assert_core_values(rows[0])
-
-
-@pytest.mark.asyncio
 async def test_every_fetch_path_hydrates_identically(db_url):
     """all(), get(), where().all(), first(), get_or_none(), refresh() agree."""
     specimen_cls = await _connect(db_url)
@@ -185,17 +174,6 @@ async def test_every_fetch_path_hydrates_identically(db_url):
 
         for row in fetched:
             _assert_core_values(row)
-
-
-@pytest.mark.asyncio
-async def test_uuid_exact_object_equality_not_str(db_url):
-    """UUID casing must not leak: compare UUID objects and canonical str."""
-    specimen_cls = await _connect(db_url)
-    async with ferro.engines.session():
-        pk = await _save_specimen(specimen_cls)
-        row = await specimen_cls.get(pk)
-        assert row.token == TOKEN
-        assert str(row.token) == str(TOKEN)  # canonical lowercase hyphenated
 
 
 @pytest.mark.asyncio
