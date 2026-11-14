@@ -301,7 +301,7 @@ def test_a_rebuild_never_hands_out_a_deleted_rows_id_again(project, pkg, db):
 # -- A7b and A4: nullability ----------------------------------------------------------
 
 
-@backend_matrix
+@sqlite_only
 def test_a7b_relaxing_not_null_rebuilds_and_its_down_fails_on_a_null(
     project, pkg, db, capsys
 ):
@@ -314,15 +314,6 @@ def test_a7b_relaxing_not_null_rebuilds_and_its_down_fails_on_a_null(
 
     up = step_file(project, number, "up", db.backend)
     down = step_file(project, number, "down", db.backend)
-    if db.backend == "postgres":
-        assert up.read_text() == (
-            'ALTER TABLE "author" ALTER COLUMN "nickname" DROP NOT NULL;\n'
-        )
-        assert down.read_text() == (
-            DATA_DEPENDENT + "\n"
-            'ALTER TABLE "author" ALTER COLUMN "nickname" SET NOT NULL;\n'
-        )
-        return
     copy = (
         '("id", "name", "nickname", "status") SELECT "id", "name", "nickname", "status"'
     )

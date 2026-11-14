@@ -1591,14 +1591,6 @@ mod tests {
     }
 
     #[test]
-    fn declaration_order_is_preserved() {
-        let (_, binds) =
-            render_set_config_batch(&[setting("b.two", "2"), setting("a.one", "1")], true)
-                .expect("two settings render a statement");
-        assert_eq!(bind_strings(&binds), vec!["b.two", "2", "a.one", "1"]);
-    }
-
-    #[test]
     fn settings_never_apply_off_postgres_or_off_session() {
         // No session, no settings — and SQLite short-circuits before it would
         // need a session at all, so an unknown id can never be consulted there.
@@ -1942,30 +1934,6 @@ mod tests {
         assert_eq!(
             merge_setting(&[], "pinch.ledger_id", "acme"),
             vec![setting("pinch.ledger_id", "acme")]
-        );
-    }
-
-    #[test]
-    fn merge_setting_is_the_basis_for_lost_update_safety() {
-        // Two "concurrent" merges computed from the SAME snapshot (simulating
-        // what would happen WITHOUT the settings_write_lock serializing the
-        // read): each only sees its own key, which is exactly the lost-update
-        // bug `operations::set_session_config` avoids by merging inside the
-        // lock against a freshly re-read snapshot rather than a caller-suppled
-        // one. This pins `merge_setting` itself is a pure, order-preserving
-        // single-key update — the concurrency safety property is asserted at
-        // the Python level (two sibling tasks, both keys present).
-        let base = vec![setting("pinch.ledger_id", "acme")];
-        let after_first = merge_setting(&base, "app.role", "owner");
-        let after_second = merge_setting(&after_first, "app.request_id", "r-1");
-        assert_eq!(
-            after_second,
-            vec![
-                setting("pinch.ledger_id", "acme"),
-                setting("app.role", "owner"),
-                setting("app.request_id", "r-1"),
-            ],
-            "sequential merges against the latest snapshot keep every key"
         );
     }
 

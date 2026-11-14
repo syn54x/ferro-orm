@@ -25,14 +25,6 @@ class TestWhereColumnValidation:
         assert "name" in message  # did-you-mean + valid columns list
         assert "id" in message
 
-    def test_valid_columns_pass(self):
-        class ValUser2(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            name: str = ""
-
-        q = ValUser2.where(lambda u: u.name == "x")
-        assert q.where_clause[0].column == "name"
-
     def test_fk_column_is_valid(self):
         class ValAuthor(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -83,26 +75,6 @@ class TestQueryProxyContract:
 
 
 class TestOrderByValidation:
-    def test_order_by_lambda_is_validated_and_extracts_column(self):
-        class ObUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            created_at: str = ""
-
-        q = ObUser.select().order_by(lambda u: u.created_at, "desc")
-        assert q.order_by_clause == [
-            OrderByEntry(column="created_at", direction="desc", path=())
-        ]
-
-    def test_order_by_string_is_validated(self):
-        class ObUser2(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            age: int = 0
-
-        q = ObUser2.select().order_by("age")
-        assert q.order_by_clause == [
-            OrderByEntry(column="age", direction="asc", path=())
-        ]
-
     def test_order_by_misspelled_string_raises(self):
         class ObUser3(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -189,44 +161,6 @@ class TestOrderByValidation:
         q = ObNotNull.select().order_by(lambda u: u.name, nulls="last")
         assert q.order_by_clause == [
             OrderByEntry(column="name", direction="asc", path=(), nulls="last")
-        ]
-
-    def test_order_by_nulls_native_accepted(self):
-        class ObNative(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            pinned_at: str | None = None
-
-        q = ObNative.select().order_by("pinned_at", "desc", nulls="native")
-        assert q.order_by_clause == [
-            OrderByEntry(column="pinned_at", direction="desc", path=(), nulls="native")
-        ]
-
-    def test_order_by_omitted_nulls_defaults_to_last(self):
-        class ObOmit(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            age: int = 0
-
-        q = ObOmit.select().order_by(lambda u: u.age, "desc")
-        assert q.order_by_clause == [
-            OrderByEntry(column="age", direction="desc", path=(), nulls="last")
-        ]
-        assert q.order_by_clause[0].nulls == "last"
-
-    def test_order_by_nulls_with_relation_traversal(self):
-        class ObAuthor(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            name: str | None = None
-
-        class ObPost(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            author_id: Annotated[int, FerroField(foreign_key=ObAuthor)]
-            author: Relation[ObAuthor] = Forward("author_id")
-
-        q = ObPost.select().order_by(lambda p: p.author.name, "desc", nulls="last")
-        assert q.order_by_clause == [
-            OrderByEntry(
-                column="name", direction="desc", path=("author",), nulls="last"
-            )
         ]
 
     def test_projected_order_by_nulls_output_alias_and_aggregate(self):

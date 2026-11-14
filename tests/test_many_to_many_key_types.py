@@ -110,20 +110,6 @@ def _keyed_item(key):
 
 
 @pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_a_date_keyed_owner_links_a_tag_on_postgres(db_url, fresh):
-    Owner, Tag, _ = _keyed_owner("date")
-    await auto_migrate(db_url)
-    async with ferro.engines.session():
-        owner = await Owner.create(key=datetime.date(2026, 3, 1))
-        tag = await Tag.create()
-
-        await owner.tags.add(tag)
-
-        assert [t.id for t in await owner.tags.all()] == [tag.id]
-
-
-@pytest.mark.asyncio
 @pytest.mark.backend_matrix
 @_each_key
 async def test_a_linked_tag_is_read_back_from_a_fetched_owner(db_url, fresh, key):

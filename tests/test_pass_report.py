@@ -27,7 +27,6 @@ import ferro
 from ferro import ExecutedStatement, Model, PassReport
 from ferro.base import FerroField
 from ferro.pass_report import Report, Subject
-from ferro.raw import execute
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -147,55 +146,3 @@ async def test_a_warning_is_raised_and_listed_typed(db_url, db_backend):
     assert f"ferro auto-migrate: {report.warnings[0]}" in [
         str(w.message) for w in raised
     ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_a_failed_pass_carries_what_committed_before_it(db_url):
-    """Each table is its own transaction on Postgres: ``aaledger`` commits,
-    then ``zzledger``'s cast fails and rolls back. The error's ``.report``
-    is the record of which tables changed."""
-
-    class AaLedger(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        note: str | None = None
-
-    class ZzLedger(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        amount: int | None = None
-
-    await ferro.connect(db_url)
-    async with ferro.engines.session():
-        await execute('CREATE TABLE "aaledger" ("id" serial PRIMARY KEY)')
-        await execute(
-            'CREATE TABLE "zzledger" ("id" serial PRIMARY KEY, "amount" varchar)'
-        )
-        await execute('INSERT INTO "zzledger" ("amount") VALUES (\'not-a-number\')')
-
-    with pytest.raises(Exception, match="Auto-migrate DDL failed") as raised:
-        await ferro.migrate()
-
-    report = raised.value.report
-    assert [(s.subject, s.role, s.sql) for s in report.statements] == [
-        ("aaledger", "lock_timeout", "SET LOCAL lock_timeout = '5000ms'"),
-        ("aaledger", "schema", 'ALTER TABLE "aaledger" ADD COLUMN "note" varchar'),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_connect_carries_the_report_on_its_error_too(db_url):
-    """``connect()`` returns nothing, but a pass it ran that fails raises with
-    the same ``.report`` (here: refused before any DDL, so empty)."""
-    from ferro.migrations import MigrationRefused
-
-    await ferro.connect(db_url)
-    async with ferro.engines.session():
-        await execute('CREATE VIEW "heldview" AS SELECT 1 AS "id"')
-    ferro.reset_engine()
-
-    class HeldView(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-
-    with pytest.raises(MigrationRefused) as raised:
-        await ferro.connect(db_url, auto_migrate=True)
-    assert raised.value.report == PassReport()

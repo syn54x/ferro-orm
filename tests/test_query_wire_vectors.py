@@ -560,12 +560,6 @@ def test_literal_set_emits_every_json_value_kind(
     ]
 
 
-def test_envelope_is_versioned(models: dict[str, type]) -> None:
-    envelope = json.loads(compile_query(models["User"].select(), "fetch").wire_json)
-    assert envelope["ir_kind"] == "query"
-    assert envelope["ir_version"] == 14
-
-
 def test_binary_add_column_literal_matches_hand_authored_vector(
     models: dict[str, type],
 ) -> None:

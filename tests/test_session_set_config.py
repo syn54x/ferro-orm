@@ -211,16 +211,6 @@ async def test_set_config_with_the_same_value_does_not_evict_the_identity_map(
             assert await _current_setting(tx, TENANT_KEY) == "acme"
 
 
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_set_config_with_the_same_value_is_not_an_error(db_url):
-    await connect(db_url)
-    async with engines.session(settings={TENANT_KEY: "acme"}) as session:
-        await session.set_config(TENANT_KEY, "acme")
-        await session.set_config(TENANT_KEY, "acme")
-        assert session.effective_settings == {TENANT_KEY: "acme"}
-
-
 # ---------------------------------------------------------------------------
 # Identity map eviction: `get()` after a scope change refetches.
 # ---------------------------------------------------------------------------

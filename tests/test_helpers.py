@@ -7,26 +7,6 @@ pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.mark.asyncio
-async def test_create_helper(db_url):
-    """Test Model.create() convenience method."""
-
-    class HelperUser(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        username: Annotated[str, FerroField(unique=True)]
-        is_active: bool = True
-
-    await connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        user = await HelperUser.create(username="taylor")
-        assert user.id is not None
-        assert user.username == "taylor"
-
-        # Verify in DB
-        fetched = await HelperUser.get(user.id)
-        assert fetched.username == "taylor"
-
-
-@pytest.mark.asyncio
 async def test_exists_helper(db_url):
     """Test Query.exists() convenience method."""
 

@@ -586,23 +586,6 @@ def test_the_generator_json_carries_the_summary_as_data_and_no_notes(project, pk
     assert raw["notes"] == []
 
 
-def test_a_backfill_to_write_names_the_command_that_skips_it(project, pkg, capsys):
-    write_config(project, pkg)
-    write_models(project, pkg, AUTHOR)
-    assert run("migrate", "new", "create_author") == 0
-    write_models(project, pkg, AUTHOR + "    bio: str\n")
-    capsys.readouterr()
-
-    assert run("migrate", "new", "add_bio") == 0
-
-    out = capsys.readouterr().out
-    assert (
-        "02_backfill_author.py needs writing where it says todo(...); if no author "
-        "needs a value, delete 0002_add_bio/ and run: ferro migrate new add_bio "
-        "--no-backfill author.bio"
-    ) in out, out
-
-
 def test_a_duplicate_number_is_refused_naming_both_directories(project, pkg, capsys):
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)

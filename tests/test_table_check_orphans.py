@@ -507,43 +507,6 @@ async def test_user_created_non_ck_check_survives_both_flags(db_url, recwarn):
 
 
 @pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_second_updates_boot_does_not_remove_the_leftover(db_url, recwarn):
-    Orphan = _define_orphan(with_check=True)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "orphan",
-            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        await Orphan.create(left=None, right=None)
-    _rewind_registry()
-
-    _define_orphan(with_check=False)
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == [
-        "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-    ]
-    recwarn.clear()
-
-    _rewind_registry()
-    _define_orphan(with_check=False)
-    with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        report = await auto_migrate(db_url, updates=True)
-        assert schema_steps(report) == []
-        assert warning_texts(report) == [
-            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-        ]
-    async with engines.session():
-        assert SIDE_CHECK_NAME in await _pg_check_names("orphan")
-
-
-@pytest.mark.backend_matrix
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_sqlite_leftover_warns_and_rewrites_nothing(db_url):

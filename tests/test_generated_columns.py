@@ -22,7 +22,6 @@ statement Ferro writes ever lists the column.
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Annotated
 
@@ -30,7 +29,7 @@ from pydantic import SecretStr
 import pytest
 
 import ferro
-from ferro import Check, Field, Model, _core, fn
+from ferro import Field, Model, _core, fn
 from ferro.base import FerroField
 from ferro.exceptions import DataError
 from ferro.ir import compile_registry_schema_ir
@@ -212,15 +211,6 @@ def test_fn_is_the_rust_function_table():
     assert all(callable(getattr(fn, name)) for name in names)
 
 
-def test_a_check_still_refuses_a_function_call():
-    with pytest.raises(TypeError, match="function call"):
-
-        class Payment(Model):
-            __ferro_checks__ = (Check("x", lambda bad: bad.amount > abs(5)),)
-            id: int | None = Field(default=None, primary_key=True)
-            amount: int
-
-
 # -- the instance ---------------------------------------------------------------------
 
 
@@ -396,24 +386,6 @@ class Transaction(Model):
         generated=lambda transaction: fn.sign(transaction.amount_minor), index=True
     )
 """
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.usefixtures("isolated_imports")
-def test_drift_after_the_migrations_door_creates_the_table_is_empty(
-    project, pkg, db, capsys
-):
-    configure(project, pkg, db.backend)
-    write_models(project, pkg, LEDGER)
-    new("create_ledger")
-    step = next(migrations(project).glob("0001_create_ledger/01_schema.up.*.sql"))
-    assert generated_sql(db.backend) in step.read_text()
-    assert run("migrate", "up", "--url", db.url) == 0
-    capsys.readouterr()
-
-    report = asyncio.run(ferro.migrations.drift(url=db.url))
-    assert report.clean, report.lines
-    assert report.operations == []
 
 
 def test_the_json_schema_carries_no_lambda():

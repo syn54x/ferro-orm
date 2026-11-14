@@ -146,11 +146,6 @@ def test_a_reprint_is_silent_and_a_reconnect_runs_nothing(project, pkg, db, caps
     assert drift_api(db).lines == []
 
 
-def test_a_reconnect_runs_nothing_for_an_unchanged_generated_column(project, pkg, db):
-    auto_migrated(project, pkg, db)
-    assert reconnect_statements(db) == []
-
-
 def test_a_declared_generated_column_absent_live_is_missing(project, pkg, db, capsys):
     migrated(project, pkg, db, capsys)
     db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')

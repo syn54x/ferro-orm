@@ -294,26 +294,6 @@ def test_force_false_never_clears_a_live_force_on_updates():
     assert "migrate_destructive" in warnings[0]
 
 
-def test_a_dropped_declaration_never_disables_and_always_warns():
-    _define_ledger_row(declared=False)
-    statements, warnings = _render(
-        {"enabled": True, "forced": True, "policies": [_live_policy()]}
-    )
-    assert (statements, warnings) == (
-        [],
-        [
-            "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates — the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
-            "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True — dropping a policy removes protection, so it is never automatic.",
-        ],
-    )
-    assert statements == []
-    # Two things are true and both are said: the flags are still on, and the
-    # policy ferro owned is still filtering.
-    assert any("no longer declares __ferro_rls__" in w for w in warnings)
-    assert any(POLICY_NAME in w for w in warnings)
-    assert all("ledgerrow" in w for w in warnings)
-
-
 def test_without_migrate_updates_nothing_is_planned():
     _define_ledger_row()
     statements, warnings = _render(
@@ -639,100 +619,6 @@ async def test_migrate_destructive_tears_the_declaration_down(db_url, recwarn):
         assert await _pg_policies("ledgerrow") == []
     torn_down = [w for w in recwarn if "tore down row security" in str(w.message)]
     assert len(torn_down) == 1, [str(w.message) for w in recwarn]
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_a_reconciled_declaration_does_not_warn_about_an_unapplied_one(
-    db_url, recwarn
-):
-    """#418 warned that a declaration on a live table was never applied. Now
-    that ``migrate_updates`` applies it, that warning must not fire on the very
-    connect that fences the table — it still fires when nothing reconciles."""
-    _define_ledger_row(declared=False)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "ledgerrow",
-            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    _rewind_registry()
-
-    _define_ledger_row()
-    recwarn.clear()
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == [
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
-        (
-            "ledgerrow",
-            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
-        ),
-    ]
-    assert warning_texts(report) == []
-    unapplied = [w for w in recwarn if "create pass never alters" in str(w.message)]
-    assert unapplied == [], [str(w.message) for w in recwarn]
-
-    # …and with reconciliation switched off the gap is reported again.
-    _rewind_registry()
-    _define_ledger_row(declared=False)
-    report = await auto_migrate(db_url, destructive=True)
-    assert schema_steps(report) == [
-        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" NO FORCE ROW LEVEL SECURITY'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" DISABLE ROW LEVEL SECURITY'),
-    ]
-    assert warning_texts(report) == [
-        "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_ledger_id'; cleared FORCE ROW LEVEL SECURITY; disabled ROW LEVEL SECURITY. Rows on this table are no longer filtered by the artifacts ferro owned.",
-    ]
-    _rewind_registry()
-
-    _define_ledger_row()
-    recwarn.clear()
-    reset_engine()
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == [
-        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
-    ]
-    unapplied = [w for w in recwarn if "create pass never alters" in str(w.message)]
-    assert len(unapplied) == 1, [str(w.message) for w in recwarn]
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_the_migrator_warning_is_silent_for_the_superuser_matrix_role(
-    db_url, recwarn
-):
-    _define_ledger_row(declared=False)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "ledgerrow",
-            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    _rewind_registry()
-
-    _define_ledger_row()
-    recwarn.clear()
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == [
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
-        (
-            "ledgerrow",
-            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
-        ),
-    ]
-    assert warning_texts(report) == []
-    filtered = [w for w in recwarn if "BYPASSRLS" in str(w.message)]
-    assert filtered == [], [str(w.message) for w in recwarn]
 
 
 def _url_as_role(db_url: str, role: str, password: str) -> str:

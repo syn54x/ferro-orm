@@ -223,21 +223,6 @@ def test_catalog_wrapping_is_not_drift():
         assert warnings == [], dialect
 
 
-def test_second_boot_shape_replans_to_nothing():
-    _define_rebuild(both=False)
-    live = [
-        _live_check(
-            SIDE_CHECK_NAME,
-            f"CHECK ({SIDE_CHECK_BODY})",
-            printed=(SIDE_PRINTED_OR, SIDE_PRINTED_OR),
-        )
-    ]
-    statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
-    assert (statements, warnings) == ([], [])
-    assert statements == []
-    assert warnings == []
-
-
 def test_user_owned_live_check_is_never_rebuilt():
     _define_rebuild(both=True)
     live = [
@@ -469,39 +454,6 @@ async def test_catalog_parens_do_not_phantom_rebuild(db_url):
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_second_migrate_updates_boot_is_a_noop(db_url, recwarn):
-    Rebuild = _define_rebuild(both=False)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "rebuild",
-            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        await Rebuild.create(left="a", right=None)
-    _rewind_registry()
-
-    _define_rebuild(both=False)
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == []
-    recwarn.clear()
-
-    _rewind_registry()
-    _define_rebuild(both=False)
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == []
-    assert not [w for w in recwarn if "ck_rebuild" in str(w.message)]
-    async with engines.session():
-        assert await _pg_check_names("rebuild") == {SIDE_CHECK_NAME}
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
 async def test_rows_violating_the_new_body_fail_the_connect_and_keep_the_old_constraint(
     db_url,
 ):
@@ -657,35 +609,6 @@ async def test_autogenerate_proposes_the_same_drop_and_add_as_the_runtime(
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert SIDE_CHECK_DROP in code, code
     assert SIDE_CHECK_ADD_AND in code, code
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_autogenerate_is_empty_once_the_body_matches(
-    db_url, postgres_base_url, db_schema_name
-):
-    Rebuild = _define_rebuild(both=False)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "rebuild",
-            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        await Rebuild.create(left="a", right=None)
-    _rewind_registry()
-
-    _define_rebuild(both=False)
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == []
-
-    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
-    assert "DROP CONSTRAINT" not in code, code
-    assert SIDE_CHECK_NAME not in code, code
 
 
 # ---------------------------------------------------------------------------

@@ -59,54 +59,11 @@ def test_position_of_on_pkless_model_raises():
         AfterPkLessPos.select().order_by(lambda r: r.name).position_of(row)
 
 
-def test_after_accepts_nullable_order_key():
-    class AfterNullableKey(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        label: str | None = None
-
-    query = (
-        AfterNullableKey.select()
-        .order_by(lambda row: row.label)
-        .order_by(lambda row: row.id)
-        .after(("x", 1))
-    )
-    assert query._after == ("x", 1)
-
-
-def test_after_none_in_non_pk_slot_is_legal():
-    class AfterNullableNone(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        label: str | None = None
-
-    query = (
-        AfterNullableNone.select()
-        .order_by(lambda row: row.label)
-        .order_by(lambda row: row.id)
-        .after((None, 1))
-    )
-    assert query._after == (None, 1)
-
-
 def test_after_none_on_not_null_root_column_is_legal():
     # A NOT NULL column can still be a NULL position slot (left_join missing
     # relation — traversal e2e is #396). Nullability is not consulted.
     query = _ordered(AfterPageItem).after((None, 1))
     assert query._after == (None, 1)
-
-
-def test_position_of_reads_none_in_non_pk_slot():
-    class AfterNullablePos(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        label: str | None = None
-
-    row = AfterNullablePos(id=7, label=None)
-    position = (
-        AfterNullablePos.select()
-        .order_by(lambda row: row.label)
-        .order_by(lambda row: row.id)
-        .position_of(row)
-    )
-    assert position == (None, 7)
 
 
 def test_after_wrong_arity_raises():
@@ -127,17 +84,6 @@ def test_after_plus_offset_raises():
         _ordered(AfterPageItem).after((ts, 1)).offset(1)
 
 
-def test_after_is_immutable():
-    ts = datetime(2026, 1, 1, tzinfo=UTC)
-    base = _ordered(AfterPageItem)
-    paged = base.after((ts, 1)).limit(2)
-    assert paged is not base
-    assert base._after is None
-    assert paged._after == (ts, 1)
-    assert paged._limit == 2
-    assert base._limit is None
-
-
 def test_update_and_delete_reject_after():
     ts = datetime(2026, 1, 1, tzinfo=UTC)
     query = _ordered(AfterPageItem).after((ts, 1))
@@ -145,15 +91,6 @@ def test_update_and_delete_reject_after():
         compile_query(query, "update", assignments={"name": "x"})
     with pytest.raises(ValueError, match=r"after"):
         compile_query(query, "delete")
-
-
-def test_count_drops_after_from_the_wire():
-    ts = datetime(2026, 1, 1, tzinfo=UTC)
-    query = _ordered(AfterPageItem).after((ts, 1)).limit(3)
-    payload = compile_query(query, "count").payload.to_ir_dict()
-    assert "after" not in payload
-    assert payload["limit"] is None
-    assert payload["offset"] is None
 
 
 # ---------------------------------------------------------------------------

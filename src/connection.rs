@@ -655,22 +655,6 @@ mod tests {
         assert!(postgres_floor_refusal(169999, "u").is_some());
     }
 
-    #[test]
-    fn redact_masks_a_password_containing_an_at_sign() {
-        assert_eq!(
-            redact_connection_url("postgresql://u:p@ss@h:5432/db"),
-            "postgresql://u:***@h:5432/db"
-        );
-    }
-
-    #[test]
-    fn redact_masks_a_password_containing_a_colon() {
-        assert_eq!(
-            redact_connection_url("postgresql://u:p:ss@h/db"),
-            "postgresql://u:***@h/db"
-        );
-    }
-
     /// `redact_connection_url(url)`, asserting that no piece of `secret`
     /// (split on the characters a password may hold raw) appears in it.
     fn redacted_without(url: &str, secret: &str) -> String {

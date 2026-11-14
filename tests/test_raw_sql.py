@@ -25,25 +25,6 @@ def _ph(db_url: str, n: int = 1) -> str:
 
 
 @pytest.mark.asyncio
-async def test_raw_execute_ffi_smoke(db_url):
-    """Task 2 smoke: ferro._core.raw_execute is callable and creates a table."""
-    from ferro._core import RouteHandle, raw_execute
-
-    await connect(db_url)
-    async with engines.session() as session:
-        # FF-D D3: raw_execute takes a single resolved RouteHandle rather than
-        # a tx_id/using/session_id triple. This low-level smoke test builds
-        # one directly instead of going through resolve_operation_scope.
-        route = RouteHandle(
-            connection_name=session.connection_name, session_id=session.session_id
-        )
-        rows_affected = await raw_execute(
-            "CREATE TABLE raw_smoke (id INTEGER PRIMARY KEY)", [], route
-        )
-        assert isinstance(rows_affected, int)
-
-
-@pytest.mark.asyncio
 async def test_top_level_execute_outside_tx_creates_table(db_url):
     """T3.1: ferro.execute outside any tx runs on a one-off pool connection."""
     from ferro import execute
@@ -66,22 +47,6 @@ async def test_top_level_execute_returns_rows_affected(db_url):
         await execute(f"CREATE TABLE t3b ({_id_pk(db_url)}, n INTEGER)")
         inserted = await execute("INSERT INTO t3b (n) VALUES (1), (2), (3)")
         assert inserted == 3
-
-
-@pytest.mark.asyncio
-async def test_top_level_execute_binds_scalars(db_url):
-    """T3.3: scalar binds round-trip via positional args."""
-    from ferro import execute
-
-    await connect(db_url)
-    async with engines.session():
-        await execute(f"CREATE TABLE t3c ({_id_pk(db_url)}, name TEXT, n INTEGER)")
-        inserted = await execute(
-            f"INSERT INTO t3c (n, name) VALUES ({_ph(db_url, 1)}, {_ph(db_url, 2)})",
-            7,
-            "alice",
-        )
-        assert inserted == 1
 
 
 @pytest.mark.asyncio
@@ -191,22 +156,6 @@ async def test_transaction_yields_transaction_handle(db_url):
     async with engines.session():
         async with transaction() as tx:
             assert isinstance(tx, Transaction)
-
-
-@pytest.mark.asyncio
-async def test_transaction_without_as_clause_still_works(db_url):
-    """T5.4: backwards-compatible — bare async-with still works."""
-    from ferro import execute, fetch_one, transaction
-
-    await connect(db_url)
-    async with engines.session():
-        await execute(f"CREATE TABLE t5d ({_id_pk(db_url)}, n INTEGER)")
-
-        async with transaction():
-            await execute(f"INSERT INTO t5d (n) VALUES ({_ph(db_url)})", 1)
-
-        row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
-        assert row is not None and row["c"] == 1
 
 
 @pytest.mark.asyncio

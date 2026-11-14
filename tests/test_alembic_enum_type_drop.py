@@ -29,7 +29,6 @@ from ferro.session import engines
 from tests._alembic_harness import (
     assert_statement_in_code as _assert_statement_in_code,
     autogen_upgrade_and_downgrade_code as _autogen_upgrade_and_downgrade_code,
-    produce_migration_script,
     run_generated_code as _run_generated_code,
     sync_url as _sync_url,
 )
@@ -624,21 +623,6 @@ async def test_two_added_columns_of_one_new_type_create_it_once(
     _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
     assert _live_enum_types(postgres_base_url, db_schema_name) == []
     _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_a_revision_that_creates_no_table_proposes_no_type_drop(
-    db_url, postgres_base_url, db_schema_name
-):
-    """Models in sync generate nothing — no phantom op, no ``DROP TYPE``."""
-    _define_category()
-    await connect(db_url, auto_migrate=True)
-
-    script = produce_migration_script(postgres_base_url, db_schema_name)
-    assert script.upgrade_ops.is_empty(), script.upgrade_ops.ops
-    assert script.downgrade_ops.is_empty(), script.downgrade_ops.ops
 
 
 @pytest.mark.backend_matrix

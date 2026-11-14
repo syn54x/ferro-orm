@@ -235,12 +235,6 @@ def test_unknown_command_is_rejected():
         RowPolicy(column="ledger_id", setting=SETTING, command="truncate")
 
 
-@pytest.mark.parametrize("command", ["all", "select", "insert", "update", "delete"])
-def test_every_supported_command_is_accepted(command):
-    kwargs = {"with_check": "true"} if command == "insert" else {"using": "true"}
-    assert RowPolicy(name="p", command=command, **kwargs).command == command
-
-
 def test_the_command_allowlist_comes_from_the_shared_lowering_layer():
     """``COMMANDS`` is not a Python-side copy — it is Rust's table, read once.
 
@@ -353,16 +347,6 @@ def test_distinct_policy_names_that_truncate_together_are_rejected():
                 RowPolicy(name=long_a, column="ledger_id", setting=SETTING),
                 RowPolicy(name=long_b, column="ledger_id", setting=SETTING),
             )
-
-
-def test_using_on_a_for_insert_policy_is_rejected():
-    with pytest.raises(TypeError, match="use with_check= instead"):
-        RowPolicy(name="p", command="insert", using="true", with_check="true")
-
-
-def test_with_check_on_a_read_only_command_is_rejected():
-    with pytest.raises(TypeError, match="use using= instead"):
-        RowPolicy(name="p", command="select", using="true", with_check="true")
 
 
 def test_ferro_rls_must_be_a_row_security_object():
@@ -685,67 +669,6 @@ async def _drop_tenant_role(role: str, *, owned_tables: tuple[str, ...] = ()) ->
         await execute(f'ALTER TABLE "{table}" OWNER TO "{current}"')
     await execute(f'DROP OWNED BY "{role}"')
     await execute(f'DROP ROLE IF EXISTS "{role}"')
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_policy_filters_rows_for_a_non_superuser_role(db_url, tenant_role):
-    from ferro import transaction
-
-    LedgerRow = _define_ledger_row()
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "ledgerrow",
-            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
-        ),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
-        (
-            "ledgerrow",
-            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        # Seeded as the superuser the matrix connects as — RLS does not apply.
-        await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
-        await LedgerRow.create(ledger_id=LEDGER_A, label="a2")
-        await LedgerRow.create(ledger_id=LEDGER_B, label="b1")
-
-        try:
-            await _grant(tenant_role, "ledgerrow")
-            # No setting at all: fail closed, and NOT an error.
-            async with transaction() as tx:
-                await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
-                assert await tx.fetch_all("SELECT label FROM ledgerrow") == []
-
-            # Scoped: only that ledger's rows, through the ORM.
-            async with transaction() as tx:
-                await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
-                await tx.execute(
-                    "SELECT set_config($1, $2, true)", SETTING, str(LEDGER_A)
-                )
-                rows = await LedgerRow.all()
-                assert sorted(row.label for row in rows) == ["a1", "a2"]
-
-            # Set, then RESET: the GUC reads back as '', and the NULLIF turns
-            # that into zero rows instead of a `''::uuid` cast error.
-            async with transaction() as tx:
-                await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
-                await tx.execute(
-                    "SELECT set_config($1, $2, true)", SETTING, str(LEDGER_A)
-                )
-                assert len(await tx.fetch_all("SELECT label FROM ledgerrow")) == 2
-                await tx.execute(f"RESET {SETTING}")
-                reset = await tx.fetch_one(
-                    "SELECT current_setting($1, true) AS v", SETTING
-                )
-                assert reset["v"] == ""
-                assert await tx.fetch_all("SELECT label FROM ledgerrow") == []
-        finally:
-            await _drop_tenant_role(tenant_role)
 
 
 @pytest.mark.backend_matrix

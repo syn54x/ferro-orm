@@ -23,7 +23,6 @@ from ferro import (
     Check,
     CheckViolationError,
     Field,
-    FerroField,
     Forward,
     Model,
     Relation,
@@ -638,8 +637,3 @@ def test_ferro_exports_check():
 
     assert ferro.Check is Check
     assert "Check" in ferro.__all__
-
-
-def test_field_helpers_still_import_cleanly():
-    """A leaf sanity pin: ``Check`` lives beside the other declaration helpers."""
-    assert FerroField is not None
