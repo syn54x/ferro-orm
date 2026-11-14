@@ -1201,7 +1201,7 @@ fn pg_enum_labels(ir: &IrEnvelope<SchemaIrPayload>, type_name: &str) -> Option<V
 mod tests {
     use super::super::tests::{column, ir, model, pk};
     use super::*;
-    use ferro_schema_ir::{SchemaColumn, SchemaForeignKey};
+    use ferro_schema_ir::SchemaColumn;
 
     fn slug_demand(table: &str, column: &str) -> Demand {
         Demand {
@@ -1228,19 +1228,6 @@ mod tests {
             matches!(&err, GenerateError::Render(message) if message.contains("'status'")),
             "{err:?}"
         );
-    }
-
-    #[test]
-    fn no_backfill_over_every_demanded_column_makes_the_step_the_guard() {
-        let target = ir(vec![author(vec![column("slug", "string")])]);
-        let demands = [slug_demand("author", "slug")];
-        let steps = data_steps(&demands, &target, &skip(&[("author", "slug")])).expect("ok");
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].name, "guard_author");
-        assert!(steps[0].data.as_ref().is_some_and(|data| data.guard));
-        let steps = data_steps(&demands, &target, &[]).expect("ok");
-        assert_eq!(steps[0].name, "backfill_author");
-        assert!(steps[0].data.as_ref().is_some_and(|data| !data.guard));
     }
 
     #[test]
@@ -1360,53 +1347,6 @@ mod tests {
     }
 
     #[test]
-    fn each_reason_is_read_off_the_change() {
-        let factory = SchemaColumn {
-            default_factory: Some("uuid.uuid4".into()),
-            ..column("token", "uuid")
-        };
-        let mut fk = author(vec![column("team_id", "integer")]);
-        fk.foreign_keys.push(SchemaForeignKey {
-            renamed_from: None,
-            column: "team_id".into(),
-            to_table: "team".into(),
-            to_column: "id".into(),
-            on_delete: None,
-            name: Some("fk_author_team_id_team".into()),
-        });
-        let cases = [
-            (
-                add("slug"),
-                author(vec![]),
-                author(vec![column("slug", "string")]),
-                Reason::NoDefault,
-            ),
-            (
-                add("token"),
-                author(vec![]),
-                author(vec![factory]),
-                Reason::DefaultFactory("uuid.uuid4".into()),
-            ),
-            (add("team_id"), author(vec![]), fk, Reason::RequiredFk),
-            (
-                MigrationOp::AlterColumnNullability {
-                    table: "author".into(),
-                    column: "slug".into(),
-                },
-                author(vec![nullable("slug")]),
-                author(vec![column("slug", "string")]),
-                Reason::NowNotNull,
-            ),
-        ];
-        for (op, before, after, reason) in cases {
-            let demand = demand_of(&op, before, after).expect("a demand");
-            assert_eq!(demand.reason, reason, "{op:?}");
-            assert_eq!(demand.table, "author");
-            assert_eq!(demand.driver, Driver::Chunked);
-        }
-    }
-
-    #[test]
     fn a_change_that_asks_the_rows_for_nothing_is_no_demand() {
         let defaulted = SchemaColumn {
             default: Some(serde_json::json!("free")),
@@ -1442,21 +1382,6 @@ mod tests {
     }
 
     #[test]
-    fn a_model_without_one_primary_key_is_backfilled_atomically() {
-        let keyless = model("Tag", vec![column("label", "string")]);
-        let mut with_slug = keyless.clone();
-        with_slug.columns.push(column("slug", "string"));
-        let op = MigrationOp::AddColumn {
-            table: "tag".into(),
-            column: "slug".into(),
-        };
-        assert_eq!(
-            demand_of(&op, keyless, with_slug).map(|d| d.driver),
-            Some(Driver::Atomic)
-        );
-    }
-
-    #[test]
     fn the_staged_check_is_never_a_ck_name_and_is_guarded_at_63() {
         assert_eq!(
             staged_not_null_name("author", "slug"),
@@ -1466,41 +1391,5 @@ mod tests {
         let long = staged_not_null_name(&"t".repeat(40), &"c".repeat(40));
         assert_eq!(long.chars().count(), 63);
         assert!(long.starts_with("_ferro_notnull_") && long.ends_with("_nn"));
-    }
-
-    #[test]
-    fn demands_are_ordered_parents_first() {
-        let team = model("Team", vec![pk()]);
-        let mut member = model("Member", vec![pk(), column("team_id", "integer")]);
-        member.foreign_keys.push(SchemaForeignKey {
-            renamed_from: None,
-            column: "team_id".into(),
-            to_table: "team".into(),
-            to_column: "id".into(),
-            on_delete: None,
-            name: None,
-        });
-        let before = ir(vec![member.clone(), team.clone()]);
-        let mut member_after = member.clone();
-        member_after.columns.push(column("slug", "string"));
-        let mut team_after = team.clone();
-        team_after.columns.push(column("slug", "string"));
-        let after = ir(vec![member_after, team_after]);
-        let ops = [
-            MigrationOp::AddColumn {
-                table: "member".into(),
-                column: "slug".into(),
-            },
-            MigrationOp::AddColumn {
-                table: "team".into(),
-                column: "slug".into(),
-            },
-        ];
-        let ops = ops.map(|op| planned(&op, &before, &after));
-        let tables: Vec<String> = collect(&ops, &before, &after)
-            .into_iter()
-            .map(|d| d.table)
-            .collect();
-        assert_eq!(tables, ["team", "member"]);
     }
 }

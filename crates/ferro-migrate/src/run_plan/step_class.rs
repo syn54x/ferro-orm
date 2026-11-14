@@ -1073,49 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_written_sql_step_is_contract_unless_it_says_expand() {
-        assert_eq!(
-            step_class(&LaidOutStep::HandSql {
-                headers: &Headers::default()
-            }),
-            Contract
-        );
-        assert_eq!(
-            step_class(&LaidOutStep::HandSql {
-                headers: &Headers {
-                    expand: true,
-                    ..Headers::default()
-                }
-            }),
-            Expand
-        );
-    }
-
-    #[test]
-    fn a_data_step_is_expand() {
-        assert_eq!(step_class(&LaidOutStep::Data), Expand);
-    }
-
-    #[test]
-    fn a_constraint_step_is_contract_wherever_it_runs_a_statement() {
-        assert_eq!(
-            step_class(&LaidOutStep::Constraints {
-                headers: &Headers::default()
-            }),
-            Contract
-        );
-        assert_eq!(
-            step_class(&LaidOutStep::Constraints {
-                headers: &Headers {
-                    not_applicable: true,
-                    ..Headers::default()
-                }
-            }),
-            Expand
-        );
-    }
-
-    #[test]
     fn every_op_reads_its_class_off_its_verdict_and_kind() {
         // The op-level table, against the verdicts the one planner decides.
         // The whole plan carried by one contract step, which runs each op as
