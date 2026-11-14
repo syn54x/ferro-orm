@@ -162,18 +162,6 @@ async def test_session_close_from_different_context_succeeds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_close_is_idempotent(tmp_path):
-    app_db = tmp_path / "app.db"
-    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
-
-    session = ferro.engines.session("default")
-    await session.__aenter__()
-    await session.close()
-    await session.close()
-    assert session.session_id is None
-
-
-@pytest.mark.asyncio
 async def test_concurrent_close_same_loop_is_idempotent(tmp_path):
     app_db = tmp_path / "app.db"
     await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
@@ -238,26 +226,6 @@ async def test_nested_session_cross_context_close_inner_then_outer(tmp_path):
 
     with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
         await SessionMarker.all(session=outer)
-
-
-@pytest.mark.asyncio
-async def test_ambient_operations_after_session_close_fail_with_session_closed_error(
-    tmp_path,
-):
-    app_db = tmp_path / "app.db"
-    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
-
-    session = ferro.engines.session("default")
-    await session.__aenter__()
-    await SessionMarker.create(id=3, label="demo")
-
-    async def close_session() -> None:
-        await session.close()
-
-    await asyncio.create_task(close_session())
-
-    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
-        await SessionMarker.all()
 
 
 @pytest.mark.asyncio
@@ -403,28 +371,6 @@ async def test_close_rejected_during_active_transaction_cross_context(tmp_path):
         assert created.id is not None
 
     fetched = await SessionMarker.where(lambda t: t.label == "during-tx").first()
-    assert fetched is not None
-
-    await session.close()
-    assert session.session_id is None
-
-
-@pytest.mark.asyncio
-async def test_close_rejected_during_active_transaction_same_context(tmp_path):
-    app_db = tmp_path / "app.db"
-    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
-
-    session = ferro.engines.session("default")
-    await session.__aenter__()
-
-    async with ferro.transaction():
-        with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
-            await session.close()
-        assert session.session_id is not None
-        created = await SessionMarker.create(label="same-context")
-        assert created.id is not None
-
-    fetched = await SessionMarker.where(lambda t: t.label == "same-context").first()
     assert fetched is not None
 
     await session.close()

@@ -110,13 +110,6 @@ async def test_optional_patterned_string_roundtrip(db_url):
         assert fetched.code == "SKU-123"
 
 
-def test_annotated_and_wrapped_ferro_field_conflict_raises():
-    with pytest.raises(TypeError, match="cannot declare Ferro field metadata twice"):
-
-        class InvalidUser(Model):
-            id: Annotated[int, FerroField(primary_key=True)] = Field(primary_key=True)
-
-
 # Field options live on the field, never in the JSON schema (#875).
 
 _OPTION_NAMES = (

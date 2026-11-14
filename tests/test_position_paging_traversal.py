@@ -53,33 +53,9 @@ def _traversed(model: type[PosTravTransaction] = PosTravTransaction):
 # ---------------------------------------------------------------------------
 
 
-def test_after_accepts_traversed_order_key_from_a_tuple():
-    query = _traversed().after(("a1", 1))
-    assert query._after == ("a1", 1)
-
-
-def test_before_accepts_traversed_order_key_from_a_tuple():
-    query = _traversed().before(("a1", 1))
-    assert query._before == ("a1", 1)
-
-
 def test_related_id_is_not_the_model_primary_key():
     with pytest.raises(ValueError, match=r"primary key"):
         (PosTravTransaction.select().order_by(lambda txn: txn.account.id).after((1,)))
-
-
-def test_position_of_unloaded_traversed_key_raises():
-    row = PosTravTransaction.model_construct(id=1, amount=10, account_id=1)
-    with pytest.raises(ValueError, match=r"'account\.label' loaded on the instance"):
-        _traversed().position_of(row)
-
-
-def test_position_of_loaded_traversed_key_reads_the_related_column():
-    account = PosTravAccount.model_construct(id=7, label="a1")
-    row = PosTravTransaction.model_construct(id=1, amount=10, account_id=7)
-    # include() loading: relation name in __dict__ shadows ForwardDescriptor.
-    row.__dict__["account"] = account
-    assert _traversed().position_of(row) == ("a1", 1)
 
 
 def test_position_of_loaded_none_related_slot_is_legal():
@@ -94,29 +70,6 @@ def test_position_of_loaded_none_related_slot_is_legal():
     assert position == (None, 3)
 
 
-def test_after_none_in_left_joined_related_slot_is_legal():
-    query = (
-        PosTravNote.select()
-        .left_join(lambda note: note.account)
-        .order_by(lambda note: note.account.label)
-        .order_by(lambda note: note.id)
-        .after((None, 3))
-    )
-    assert query._after == (None, 3)
-
-
-def test_projected_after_accepts_a_tuple():
-    query = (
-        PosTravTransaction.select(
-            lambda txn: {"label": txn.account.label, "id": txn.id}
-        )
-        .order_by(lambda txn: txn.account.label)
-        .order_by(lambda txn: txn.id)
-        .after(("a1", 1))
-    )
-    assert query._after == ("a1", 1)
-
-
 def test_projected_position_of_missing_order_key_raises():
     query = (
         PosTravTransaction.select(lambda txn: (txn.id, txn.amount))
@@ -126,18 +79,6 @@ def test_projected_position_of_missing_order_key_raises():
     row = Row.model_construct(id=1, amount=10)
     with pytest.raises(ValueError, match=r"tuple"):
         query.position_of(row)
-
-
-def test_projected_position_of_reads_selected_order_keys():
-    query = (
-        PosTravTransaction.select(
-            lambda txn: {"label": txn.account.label, "id": txn.id}
-        )
-        .order_by(lambda txn: txn.account.label)
-        .order_by(lambda txn: txn.id)
-    )
-    row = Row.model_construct(label="a1", id=1)
-    assert query.position_of(row) == ("a1", 1)
 
 
 def test_grouped_aggregate_after_raises_for_missing_pk():

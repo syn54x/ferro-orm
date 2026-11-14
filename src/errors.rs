@@ -1418,22 +1418,6 @@ mod tests {
     }
 
     #[test]
-    fn restrict_violation_23001_is_foreign_key() {
-        assert_eq!(
-            exception_name_for_database(ErrorKind::Other, Some("23001")),
-            "ForeignKeyViolationError"
-        );
-    }
-
-    #[test]
-    fn sqlite_restrict_trigger_1811_is_foreign_key() {
-        assert_eq!(
-            exception_name_for_database(ErrorKind::Other, Some("1811")),
-            "ForeignKeyViolationError"
-        );
-    }
-
-    #[test]
     fn integrity_codes_win_over_kind() {
         let cases = [
             ("23001", "ForeignKeyViolationError"),

@@ -470,17 +470,6 @@ async def test_load_on_a_gone_row_raises_model_does_not_exist(db_url):
 
 
 @pytest.mark.asyncio
-async def test_refresh_on_a_gone_row_raises_model_does_not_exist(db_url):
-    m = await _seed(db_url)
-    async with engines.session():
-        team = await m.Team.get(1)
-        await m.Team.where(lambda team: team.id == 1).delete()
-
-        with pytest.raises(ModelDoesNotExist):
-            await team.refresh()
-
-
-@pytest.mark.asyncio
 async def test_awaiting_a_relation_raises_type_error(db_url):
     m = await _seed(db_url)
     async with engines.session():

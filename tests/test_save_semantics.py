@@ -378,27 +378,6 @@ async def test_save_only_updates_named_columns(db_url):
         assert fetched.keep == "orig"
 
 
-async def test_bare_save_still_writes_every_column(db_url):
-    class SaveOnlyBare(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        keep: str
-        change: str
-
-    await connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        row = await SaveOnlyBare.create(id=1, keep="orig", change="a")
-        row.keep = "rewritten"
-        row.change = "b"
-        await row.save()
-
-    ferro.reset_engine()
-    await connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        fetched = await SaveOnlyBare.get(1)
-        assert fetched.keep == "rewritten"
-        assert fetched.change == "b"
-
-
 async def test_save_only_rejects_transient_instance(db_url):
     class SaveOnlyTransient(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

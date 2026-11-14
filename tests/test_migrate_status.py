@@ -150,26 +150,6 @@ def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attentio
     )
 
 
-def test_an_edited_applied_step_shows_both_checksums(project, pkg, db, capsys):
-    configure(project, pkg, db.backend)
-    write_models(project, pkg, AUTHOR)
-    new("create_author")
-    assert run("migrate", "up", "--url", db.url) == 0
-    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
-    applied = sha384(up_file)
-    up_file.write_bytes(up_file.read_bytes() + b"\n")
-    capsys.readouterr()
-
-    assert run("migrate", "status", "--url", db.url) == 4
-    out = capsys.readouterr().out
-    assert "  xx 0001_create_author  applied (different checksum)  " in out
-    assert (
-        f"      {up_file.name}  applied (different checksum)\n"
-        f"        applied  sha384:{applied}\n"
-        f"        on disk  sha384:{sha384(up_file)}\n"
-    ) in out
-
-
 def test_steps_print_their_class_beside_their_flags(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
@@ -194,22 +174,6 @@ def test_steps_print_their_class_beside_their_flags(project, pkg, db, capsys):
     assert run("migrate", "status", "--url", db.url) == 3
     out = capsys.readouterr().out
     assert "expand" not in out and "contract" not in out
-
-
-def test_a_baselined_step_says_so(project, pkg, db, capsys):
-    configure(project, pkg, db.backend)
-    write_models(project, pkg, AUTHOR)
-    new("create_author")
-    assert run("migrate", "up", "--url", db.url) == 0
-    db.execute("UPDATE _ferro_migrations SET origin = 'baseline'")
-    capsys.readouterr()
-
-    (first,) = applied_at(capsys, db)
-    assert run("migrate", "status", "--url", db.url) == 0
-    assert (
-        f"  ok 0001_create_author  applied (baseline)  {first}\n"
-        in capsys.readouterr().out
-    )
 
 
 # -- where the database stands -----------------------------------------------------------

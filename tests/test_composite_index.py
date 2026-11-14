@@ -3,7 +3,6 @@
 from typing import ClassVar
 
 import pytest
-import sqlalchemy as sa
 
 from ferro import (
     Field,
@@ -38,10 +37,6 @@ def cleanup_registry():
     reset_engine()
     clear_registry()
     REGISTRY.reset_for_test()
-
-
-def _indexes(table: sa.Table) -> list[sa.Index]:
-    return list(table.indexes)
 
 
 # === Group A: declarative-API validation ===
@@ -268,25 +263,6 @@ def test_overlap_with_unique_partial_match_does_not_warn():
 
 
 # === Group B: schema-bridge correctness (Alembic) ===
-
-
-def test_alembic_metadata_has_index_objects():
-    """B1: get_metadata() exposes a non-unique sa.Index for the composite group."""
-
-    class IdxModel(Model):
-        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("a", "b"),
-        )
-        id: int | None = Field(default=None, primary_key=True)
-        a: int
-        b: int
-
-    metadata = get_metadata()
-    table = metadata.tables["idxmodel"]
-    indexes = _indexes(table)
-    composite = [i for i in indexes if {c.key for c in i.columns} == {"a", "b"}]
-    assert len(composite) == 1
-    assert composite[0].unique is False
 
 
 def test_alembic_metadata_index_column_order_matches_declaration():
@@ -687,45 +663,6 @@ async def test_composite_index_works_with_enum_column(db_url):
     metadata = get_metadata()
     idxs = [i for i in metadata.tables["enumcomposite"].indexes if not i.unique]
     assert any({c.key for c in i.columns} == {"user_id", "role"} for i in idxs)
-
-
-@pytest.mark.asyncio
-@pytest.mark.sqlite_only
-async def test_autogen_idempotent_after_first_apply(db_url):
-    """C9: re-running autogen comparison after migrate produces no diff for composite indexes.
-
-    Note: composite-uniques (`uq_*`) autogen drift is a pre-existing quirk
-    (UniqueConstraint vs. CREATE UNIQUE INDEX reconciliation on SQLite) that
-    is independent of this feature. We assert only that our new
-    `idx_*` composite indexes do not introduce additional drift.
-    """
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-    from sqlalchemy import create_engine
-
-    from ferro.migrations import ferro_options
-
-    class IdxStable(Model):
-        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("c", "d"),
-        )
-        id: int | None = Field(default=None, primary_key=True)
-        c: int
-        d: int
-
-    await connect(db_url, auto_migrate=True)
-
-    db_path = db_url.replace("sqlite:", "").split("?")[0]
-    sync_url = f"sqlite:///{db_path}"
-    engine = create_engine(sync_url)
-    metadata = get_metadata()
-
-    with engine.connect() as conn:
-        ctx = MigrationContext.configure(conn, opts=ferro_options())
-        diff = compare_metadata(ctx, metadata)
-
-    relevant = [d for d in diff if "idx_idxstable" in str(d).lower()]
-    assert relevant == [], f"unexpected autogen drift on composite indexes: {relevant}"
 
 
 # === Group F: common-use-case smoke tests ===

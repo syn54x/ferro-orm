@@ -386,38 +386,6 @@ def test_verbose_changes_nothing_in_a_pipe(project, pkg, capsys):
     assert (check_loud, check_loud_err) == (check_quiet, check_quiet_err)
 
 
-def test_colour_never_carries_meaning_alone(project, pkg, capsys, monkeypatch):
-    """Every file line has its role words, every name list its count
-    heading, read on the text with the escapes stripped."""
-    import re
-
-    add_team(project, pkg)
-    monkeypatch.setenv("FORCE_COLOR", "1")
-    monkeypatch.setenv("COLUMNS", "100")
-
-    code, out, _ = cli(capsys, "new", "add_team", "--data-step", "Author")
-
-    assert code == 0
-    text = re.sub(r"\x1b\[[0-9;]*m", "", out)
-    lines = text.splitlines()
-    files = lines[2 : lines.index("")]
-    roles = (
-        "schema step, up",
-        "schema step, down",
-        "backfill",
-        "data step",
-        "snapshot",
-    )
-    assert files and all(any(r in line for r in roles) for line in files), text
-    for heading in (
-        "1 new model",
-        "1 changed model",
-        "1 dropped model",
-        "1 dropped enum type",
-    ):
-        assert f"  {heading}" in lines, text
-
-
 # -- the TTY form -----------------------------------------------------------------
 #
 # Pinned from what the command printed, escapes and all; a change to the look

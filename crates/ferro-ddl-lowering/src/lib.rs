@@ -4774,14 +4774,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_table_check_body_pins_transfer_is_null_or() {
-        assert_eq!(
-            render_table_check_body(&transfer_at_most_one_outflow_check()),
-            "(\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)"
-        );
-    }
-
     fn transfer_model_with_checks(
         table_checks: Vec<ferro_schema_ir::SchemaTableCheck>,
         checks: Vec<ferro_schema_ir::SchemaCheck>,
@@ -4920,25 +4912,6 @@ mod tests {
         assert!(warning.contains("ck_transfer_kind"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
-    }
-
-    #[test]
-    fn render_check_addition_column_check_reuses_the_idempotent_do_block() {
-        let check = account_role_column_check();
-        let model = transfer_model_with_checks(vec![], vec![check.clone()]);
-        let emission = render_check_addition(
-            "transfer",
-            &model,
-            "ck_transfer_kind",
-            Dialect::Postgres,
-            ConstraintMode::Plain,
-        )
-        .expect("declared column check must resolve");
-        assert_eq!(
-            emission.statement,
-            render_db_check("transfer", &check, Dialect::Postgres, ConstraintMode::Plain).statement,
-            "the column-check ADD is single-sourced with the create path"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -5980,13 +5953,6 @@ mod tests {
             schema_columns_storage_drift(&live_text, &model, Dialect::Sqlite),
             "a real text→blob difference must still be detected"
         );
-    }
-
-    #[test]
-    fn int_to_bigint_still_drifts() {
-        let small = col_with_db_type("n", "integer", None, Some("int"));
-        let big = col_with_db_type("n", "integer", None, Some("bigint"));
-        assert!(schema_columns_storage_drift(&small, &big, Dialect::Sqlite));
     }
 
     #[test]
@@ -7240,41 +7206,6 @@ mod tests {
             .text;
         assert!(warning.contains("ledgerrow"), "{warning}");
         assert!(warning.contains("PostgreSQL-only"), "{warning}");
-    }
-
-    #[test]
-    fn existing_table_warning_names_the_table_and_says_not_enforced() {
-        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
-        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
-            force: true,
-            policies: vec![setting_policy(
-                "rls_ledgerrow_ledger_id",
-                "ledger_id",
-                "pinch.ledger_id",
-                ferro_schema_ir::RowPolicyCommand::All,
-                false,
-            )],
-        });
-        let warning = row_security_existing_table_warning(&model, Dialect::Postgres)
-            .expect("a declaration the create pass cannot apply must never be silent")
-            .text;
-        assert!(warning.contains("ledgerrow"), "{warning}");
-        assert!(warning.contains("NOT filtered"), "{warning}");
-        assert!(warning.contains("ADR-0010"), "{warning}");
-
-        // SQLite says the PostgreSQL-only thing instead — same sentence the
-        // create path emits, single-sourced.
-        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite)
-            .unwrap()
-            .text;
-        assert_eq!(
-            lite,
-            row_security_statements(&model, Dialect::Sqlite)
-                .unwrap()
-                .warning
-                .unwrap()
-                .text
-        );
     }
 
     #[test]

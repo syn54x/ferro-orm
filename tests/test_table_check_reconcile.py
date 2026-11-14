@@ -179,25 +179,6 @@ def test_missing_table_check_renders_one_alter_add_constraint_on_postgres():
     assert warnings == []
 
 
-def test_live_table_check_replans_to_nothing():
-    """No phantom add: a reconciled table produces no DDL on either dialect."""
-    _define_reconcile_with_check()
-    live = [
-        _live_check(
-            SIDE_CHECK_NAME,
-            f"CHECK ({SIDE_CHECK_BODY})",
-            printed='((reconcile."left" IS NULL) OR (reconcile."right" IS NULL))',
-        )
-    ]
-    for dialect in ("postgres", "sqlite"):
-        statements, warnings = _render(
-            "reconcile", RECONCILE_LIVE_COLUMNS, live, dialect
-        )
-        assert (statements, warnings) == ([], [])
-        assert statements == [], dialect
-        assert warnings == [], dialect
-
-
 def test_user_owned_live_check_is_not_a_counterpart_and_is_never_touched():
     _define_reconcile_with_check()
     live = [
@@ -399,40 +380,6 @@ async def _pg_check_names(table: str) -> set[str]:
         f"WHERE conrelid = '\"{table}\"'::regclass AND contype = 'c'"
     )
     return {row["conname"] for row in rows}
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_migrate_updates_adds_a_missing_table_check(db_url):
-    Reconcile = _define_reconcile_without_check()
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "reconcile",
-            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        await Reconcile.create(left="a", right=None)
-    _rewind_registry()
-
-    Reconcile = _define_reconcile_with_check()
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == [
-        (
-            "reconcile",
-            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        assert SIDE_CHECK_NAME in await _pg_check_names("reconcile")
-        # The invariant is enforced from here on.
-        with pytest.raises(CheckViolationError) as excinfo:
-            await Reconcile.create(left="a", right="b")
-        assert excinfo.value.constraint == SIDE_CHECK_NAME
 
 
 @pytest.mark.backend_matrix

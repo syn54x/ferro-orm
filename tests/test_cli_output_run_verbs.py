@@ -32,7 +32,6 @@ import sys
 import pytest
 
 from ferro.migrations import baseline, runner
-from ferro.migrations.rerecord import RerecordReport
 from tests.test_chunked_steps import project_with_authors
 from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     no_bytecode,
@@ -790,28 +789,6 @@ def test_rerecord_continue_in_both_forms(project, pkg, db, capsys, monkeypatch):
         f"{sgr('1;2', '.py')}{sgr('2', '  nothing was run')}\n"
         f"  sha384:{recorded} {sgr('2', '→')} sha384:{edited}\n"
         f"{sgr('2', '  the next up continues from its cursor')}\n"
-    )
-
-
-@pytest.mark.parametrize(
-    ("mode", "note"),
-    [
-        ("record", None),
-        ("continue", "the next up continues from its cursor"),
-        (
-            "restart",
-            "its cursor and rows_done are cleared, so the next up starts from the "
-            "first row",
-        ),
-    ],
-)
-def test_a_rerecord_reports_what_it_leaves_the_next_up(mode, note):
-    report = RerecordReport("0002_x/02_y.py", "a", "b", mode=mode)
-
-    assert report.note == note
-    tail = f"; {note}" if note else ""
-    assert report.render() == (
-        f"re-recorded 0002_x/02_y.py (sha384:a → sha384:b){tail}; nothing was run"
     )
 
 

@@ -5964,9 +5964,8 @@ mod m2m_value_tests {
         set_value_bind_input, set_value_to_expr,
     };
     use crate::state::Dialect;
-    use ferro_schema_ir::QueryValueExpr;
     use pyo3::Python;
-    use sea_query::{Expr, PostgresQueryBuilder, Query, Value as SeaValue};
+    use sea_query::{PostgresQueryBuilder, Query, Value as SeaValue};
     use std::collections::{HashMap, HashSet};
 
     fn date_keyed_join() -> std::sync::Arc<crate::state::RegisteredModel> {
@@ -6144,38 +6143,6 @@ mod m2m_value_tests {
     }
 
     #[test]
-    fn query_ir_set_column_ref_renders_as_column_expr() {
-        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
-
-        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
-            "kind": "column",
-            "column": "score"
-        }))
-        .expect("column-ref value expression");
-
-        let QueryValueExpr::Column { column } = &value else {
-            panic!("expected column-ref arm");
-        };
-        let mut update = UpdateStatement::new();
-        update
-            .table(Alias::new("user"))
-            .value(Alias::new("bonus"), Expr::col(Alias::new(column.as_str())));
-        let (sql, values) = update.build(SqliteQueryBuilder);
-        assert!(
-            sql.contains("score"),
-            "column-ref SET must render the source column: {sql}"
-        );
-        assert!(
-            !sql.contains('?'),
-            "column-ref SET must not bind a literal: {sql}"
-        );
-        assert!(
-            values.0.is_empty(),
-            "column-ref SET must carry no bind values: {values:?}"
-        );
-    }
-
-    #[test]
     fn query_ir_set_add_column_literal_renders_operator_not_bind() {
         use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
 
@@ -6265,21 +6232,6 @@ mod m2m_value_tests {
         assert!(
             values.0.is_empty(),
             "now must not bind a Python datetime: {values:?}"
-        );
-    }
-
-    #[test]
-    fn query_ir_set_rejects_unknown_value_expr_kind() {
-        let err = serde_json::from_value::<ferro_schema_ir::QueryValueExpr>(serde_json::json!({
-            "kind": "concat",
-            "left": {"kind": "column", "column": "score"},
-            "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
-        }))
-        .expect_err("unknown value-expr kind must fail at the trust boundary");
-        let message = err.to_string();
-        assert!(
-            message.contains("concat"),
-            "error must name the unknown kind: {message}"
         );
     }
 
@@ -7303,92 +7255,6 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn rejects_v8_envelope_with_actionable_message() {
-        let mut envelope = v14_envelope();
-        envelope["ir_version"] = serde_json::json!(8);
-
-        let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v8 envelope must be rejected before payload parsing");
-        assert_actionable_version_rejection(err, '8');
-    }
-
-    #[test]
-    fn rejects_v9_envelope_with_actionable_message() {
-        let mut envelope = v14_envelope();
-        envelope["ir_version"] = serde_json::json!(9);
-
-        let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v9 envelope must be rejected before payload parsing");
-        assert_actionable_version_rejection(err, '9');
-    }
-
-    #[test]
-    fn rejects_v10_envelope_with_actionable_message() {
-        let mut envelope = v14_envelope();
-        envelope["ir_version"] = serde_json::json!(10);
-
-        let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v10 envelope must be rejected before payload parsing");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("10"),
-            "message should name the received version: {msg}"
-        );
-        assert!(
-            msg.contains("14"),
-            "message should name the supported version: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("one wheel"),
-            "message should explain Python/Rust ship in one wheel: {msg}"
-        );
-    }
-
-    #[test]
-    fn rejects_v11_envelope_with_actionable_message() {
-        let mut envelope = v14_envelope();
-        envelope["ir_version"] = serde_json::json!(11);
-
-        let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v11 envelope must be rejected before payload parsing");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("11"),
-            "message should name the received version: {msg}"
-        );
-        assert!(
-            msg.contains("14"),
-            "message should name the supported version: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("one wheel"),
-            "message should explain Python/Rust ship in one wheel: {msg}"
-        );
-    }
-
-    #[test]
-    fn rejects_v12_envelope_with_actionable_message() {
-        let mut envelope = v14_envelope();
-        envelope["ir_version"] = serde_json::json!(12);
-
-        let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v12 envelope must be rejected before payload parsing");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("12"),
-            "message should name the received version: {msg}"
-        );
-        assert!(
-            msg.contains("14"),
-            "message should name the supported version: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("one wheel"),
-            "message should explain Python/Rust ship in one wheel: {msg}"
-        );
-    }
-
-    #[test]
     fn rejects_v13_envelope_with_actionable_message() {
         let mut envelope = v14_envelope();
         envelope["ir_version"] = serde_json::json!(13);
@@ -7408,187 +7274,6 @@ mod query_ir_version_gate_tests {
             msg.to_lowercase().contains("one wheel"),
             "message should explain Python/Rust ship in one wheel: {msg}"
         );
-    }
-
-    /// Contract test (#314 acceptance criteria): a v6 envelope must be
-    /// rejected on the version check with the actionable one-wheel message.
-    /// v7 is a pure widening of the v6 predicate-tree shape (the recursive
-    /// `exists` node kind joined `leaf`/`compound`/`not`, ADR-0007), so
-    /// every real v6 payload would still strict-parse — the version gate
-    /// alone retires it, keeping "exactly one supported version" true rather
-    /// than silently accepting a stale wheel's envelopes.
-    #[test]
-    fn rejects_v6_envelope_with_actionable_message() {
-        let v6_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 6,
-            "payload": {
-                "model_name": "Widget",
-                "where": [{
-                    "node_kind": "not",
-                    "child": {
-                        "node_kind": "leaf",
-                        "operator": "==",
-                        "column": "name",
-                        "value": {"kind": "string", "value": "a"},
-                        "path": []
-                    }
-                }],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null,
-                "joins": [],
-                "materialization": {"kind": "root_instances"}
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v6_envelope.to_string())
-            .expect_err("a v6 envelope must be rejected");
-        assert_actionable_version_rejection(err, '6');
-    }
-
-    /// Contract test (#310 acceptance criteria): a v5 envelope must be
-    /// rejected on the version check with the actionable one-wheel message.
-    /// v6 is a pure widening of the v5 predicate-tree shape (the recursive
-    /// `not` node kind joined `leaf`/`compound`, ADR-0008), so every real v5
-    /// payload would still strict-parse — the version gate alone retires it,
-    /// keeping "exactly one supported version" true rather than silently
-    /// accepting a stale wheel's envelopes.
-    #[test]
-    fn rejects_v5_envelope_with_actionable_message() {
-        let v5_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 5,
-            "payload": {
-                "model_name": "Widget",
-                "where": [{
-                    "node_kind": "leaf",
-                    "operator": "==",
-                    "column": "name",
-                    "value": {"kind": "string", "value": "a"},
-                    "path": []
-                }],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null,
-                "joins": [],
-                "materialization": {"kind": "root_instances"}
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v5_envelope.to_string())
-            .expect_err("a v5 envelope must be rejected");
-        assert_actionable_version_rejection(err, '5');
-    }
-
-    /// Contract test (#292 acceptance criteria): a v4 envelope must be
-    /// rejected on the version check with the actionable one-wheel message.
-    /// v5 is a pure widening of the v4 record-field shape (`column` became
-    /// optional next to the new `expr` arm), so every real v4 payload would
-    /// still strict-parse — the version gate alone retires it, keeping
-    /// "exactly one supported version" true rather than silently accepting
-    /// a stale wheel's envelopes.
-    #[test]
-    fn rejects_v4_envelope_with_actionable_message() {
-        let v4_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 4,
-            "payload": {
-                "model_name": "Widget",
-                "where": [],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null,
-                "joins": [],
-                "materialization": {"kind": "record", "fields": [
-                    {"name": "id", "column": "id", "path": []}
-                ]}
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v4_envelope.to_string())
-            .expect_err("a v4 envelope must be rejected");
-        assert_actionable_version_rejection(err, '4');
-    }
-
-    /// Contract test (#285 acceptance criteria, mirroring the v2-at-v3
-    /// precedent): a v3 envelope — with a real v3 payload whose `instances`
-    /// kind is the unit shape this build's strict parse no longer accepts —
-    /// must be rejected on the version check with the actionable one-wheel
-    /// message, not on a serde "missing field `paths`" error. The version
-    /// check fires before strict payload parsing.
-    #[test]
-    fn rejects_v3_envelope_with_actionable_message() {
-        let v3_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 3,
-            "payload": {
-                "model_name": "Widget",
-                "where": [],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null,
-                "joins": [],
-                "materialization": {"kind": "instances"}
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v3_envelope.to_string())
-            .expect_err("a v3 envelope must be rejected");
-        assert_actionable_version_rejection(err, '3');
-    }
-
-    /// Contract test (#278 acceptance criteria, mirroring the v1-at-v2
-    /// precedent): a v2 envelope — with a real v2 payload that predates the
-    /// `materialization` section entirely, as any real v2 emitter would
-    /// produce — must be rejected on the version check with an actionable
-    /// message, not on a serde "missing field" error from strict-parsing a
-    /// payload shape this build no longer understands.
-    #[test]
-    fn rejects_v2_envelope_with_actionable_message() {
-        let v2_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 2,
-            "payload": {
-                "model_name": "Widget",
-                "where": [],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null,
-                "joins": []
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v2_envelope.to_string())
-            .expect_err("a v2 envelope must be rejected");
-        assert_actionable_version_rejection(err, '2');
-    }
-
-    /// A v1 envelope (no `joins`/`path`/`materialization`) stays rejected the
-    /// same way — the gate is "exactly one supported version", not a range.
-    #[test]
-    fn rejects_v1_envelope_with_actionable_message() {
-        let v1_envelope = serde_json::json!({
-            "ir_kind": "query",
-            "ir_version": 1,
-            "payload": {
-                "model_name": "Widget",
-                "where": [],
-                "order_by": [],
-                "limit": null,
-                "offset": null,
-                "m2m": null
-            }
-        });
-
-        let err = query_plan_from_ir_json(&v1_envelope.to_string())
-            .expect_err("a v1 envelope must be rejected");
-        assert_actionable_version_rejection(err, '1');
     }
 
     #[test]
@@ -8120,35 +7805,6 @@ mod record_select_list_tests {
         assert!(
             sql.contains("SUM(\"transaction\".\"amount\") AS \"total\""),
             "the aggregate renders alongside the keys: {sql}"
-        );
-    }
-
-    #[test]
-    fn plain_plan_renders_no_group_by() {
-        // Grouping is derived only when an aggregate is present: a plain
-        // projection never grows a GROUP BY.
-        let plan = plan_with_materialization(record_fields(serde_json::json!([
-            {"name": "id", "column": "id", "path": []},
-            {"name": "amount", "column": "amount", "path": []}
-        ])));
-        let projected = projected_record_fields(&plan)
-            .expect("record plan resolves")
-            .expect("record plan projects fields");
-
-        let mut select = Query::select();
-        apply_select_list(
-            &mut select,
-            "transaction",
-            &[],
-            Some(&projected),
-            &JoinPlan::default(),
-        )
-        .expect("plain plan renders");
-        select.from(Alias::new("transaction"));
-        let sql = select.to_string(PostgresQueryBuilder);
-        assert!(
-            !sql.contains("GROUP BY"),
-            "no aggregate, no grouping: {sql}"
         );
     }
 

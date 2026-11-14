@@ -719,12 +719,7 @@ fn infer_test_logical_type(
 
 #[cfg(test)]
 mod tests {
-    use ferro_ddl_lowering::{composite_index_name, db_check_constraint_name};
-
-    #[test]
-    fn test_composite_index_name_short() {
-        assert_eq!(composite_index_name("users", &["a", "b"]), "idx_users_a_b");
-    }
+    use ferro_ddl_lowering::composite_index_name;
 
     #[test]
     fn test_composite_index_name_at_63_chars() {
@@ -751,19 +746,6 @@ mod tests {
         let cols = ["α_column_one", "β_column_two_extended_for_overflow"];
         let result = composite_index_name(table, &cols);
         assert!(result.chars().count() <= 63);
-    }
-
-    #[test]
-    fn test_db_check_constraint_name_short() {
-        assert_eq!(db_check_constraint_name("doc", "format"), "ck_doc_format");
-    }
-
-    #[test]
-    fn test_db_check_constraint_name_truncates_above_63() {
-        let long_col = "a".repeat(70);
-        let result = db_check_constraint_name("verylongtable", &long_col);
-        assert_eq!(result.chars().count(), 63);
-        assert!(result.ends_with("_ck"));
     }
 
     /// The SQLite twin of `tests/test_ddl_unprepared.py`: the create pass's

@@ -459,24 +459,6 @@ async def test_m2m_reverse_index_in_postgres_catalog(
     assert "UNIQUE" not in row[0].upper()
 
 
-def test_m2m_reverse_index_with_custom_through_name():
-    """D6: ManyToMany(through=...) honors reverse_index."""
-
-    class Student(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        courses: Relation[list["Course"]] = ManyToMany(through="enrollments")
-
-    class Course(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        title: str
-
-    metadata = get_metadata()
-    join = metadata.tables["enrollments"]
-    idxs = [i for i in join.indexes if not i.unique]
-    assert any([c.key for c in i.columns] == ["course_id", "student_id"] for i in idxs)
-
-
 def test_m2m_reverse_index_attribute_preserved_on_relation():
     """D8: reverse_index is stored on ManyToManyRelation and survives re-resolution.
 

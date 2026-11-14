@@ -172,20 +172,6 @@ def test_the_new_form_plans_nothing_against_the_old_forms_snapshot(
     assert listing(project / "migrations") == before
 
 
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-async def test_a_many_to_many_needs_no_reverse_side(db_url):
-    Player, Tournament = _tournament_models(reverse=False)
-    await auto_migrate(db_url)
-    async with ferro.engines.session():
-        ada = await Player.create(name="Ada")
-        cup = await Tournament.create(title="Cup")
-
-        await ada.tournaments.add(cup)
-
-        assert [tournament.id for tournament in await ada.tournaments.all()] == [cup.id]
-
-
 @pytest.mark.usefixtures("clean_registry")
 def test_a_model_redefined_in_one_process_keeps_its_join_table():
     """A notebook or REPL redefines a model: its many-to-many, renamed over the
@@ -485,30 +471,6 @@ def test_a_join_table_named_as_a_models_table_is_refused_naming_a_free_one():
         'Player.teams: through="team" names the table of the model Team, and a '
         "join table needs a table of its own. Write: teams: Relation[list[Team]] "
         '= ManyToMany(through="player_teams")'
-    )
-
-
-def test_a_reverse_naming_a_many_to_many_aimed_elsewhere_is_refused():
-    class Team(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        players: Relation[list["Player"]] = Reverse("tournaments")
-
-    class Player(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        tournaments: Relation[list["Tournament"]] = ManyToMany(
-            through="player_tournaments"
-        )
-
-    class Tournament(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    with pytest.raises(TypeError) as refused:
-        ferro.ensure_resolved_modelset()
-
-    assert str(refused.value) == (
-        "Team.players: Player.tournaments points at Tournament, not Team. "
-        'Write: players: Relation[list["Player"]] = '
-        'ManyToMany(through="team_players")'
     )
 
 

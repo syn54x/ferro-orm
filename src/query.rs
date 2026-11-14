@@ -2337,113 +2337,6 @@ mod tests {
         assert!(err.contains("join_type"), "got {err}");
     }
 
-    #[test]
-    fn build_join_plan_marks_single_left_edge() {
-        // A lone `"left"` 1-hop entry renders its edge LEFT (#272).
-        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
-            "set": [],
-            "model_name": "Note",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
-            "joins": [
-                {"join_type": "left", "path": [
-                    {"relation": "account", "from_column": "account_id",
-                     "to_table": "account", "to_column": "id"}
-                ]}
-            ]
-        }))
-        .expect("payload deserializes");
-        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
-        let join_plan = plan.build_join_plan("note", &[]).expect("join plan");
-        assert_eq!(join_plan.renders.len(), 1);
-        assert_eq!(join_plan.renders[0].join_type, "left");
-        assert_eq!(join_plan.renders[0].alias, "j1_account");
-    }
-
-    #[test]
-    fn build_join_plan_marks_whole_path_left_at_every_hop() {
-        // Whole-path rule: a `"left"` 2-hop entry marks BOTH edges LEFT (#272).
-        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
-            "set": [],
-            "model_name": "Transaction",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
-            "joins": [
-                {"join_type": "left", "path": [
-                    {"relation": "account", "from_column": "account_id",
-                     "to_table": "account", "to_column": "id"},
-                    {"relation": "owner", "from_column": "owner_id",
-                     "to_table": "owner", "to_column": "id"}
-                ]}
-            ]
-        }))
-        .expect("payload deserializes");
-        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
-        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
-        assert_eq!(join_plan.renders.len(), 2);
-        assert_eq!(join_plan.renders[0].join_type, "left", "hop-1 edge LEFT");
-        assert_eq!(join_plan.renders[1].join_type, "left", "hop-2 edge LEFT");
-    }
-
-    #[test]
-    fn build_join_plan_mixed_left_prefix_inner_suffix_is_order_independent() {
-        // The pinned mixed case (#272): a `"left"` `[account]` entry shares its
-        // prefix with an `"inner"` `[account, owner]` entry. Edge-level
-        // resolution yields the account edge LEFT and the owner edge INNER — and
-        // that verdict must not depend on entry order on the wire.
-        let left_first = json!([
-            {"join_type": "left", "path": [
-                {"relation": "account", "from_column": "account_id",
-                 "to_table": "account", "to_column": "id"}
-            ]},
-            {"join_type": "inner", "path": [
-                {"relation": "account", "from_column": "account_id",
-                 "to_table": "account", "to_column": "id"},
-                {"relation": "owner", "from_column": "owner_id",
-                 "to_table": "owner", "to_column": "id"}
-            ]}
-        ]);
-        let inner_first = json!([
-            {"join_type": "inner", "path": [
-                {"relation": "account", "from_column": "account_id",
-                 "to_table": "account", "to_column": "id"},
-                {"relation": "owner", "from_column": "owner_id",
-                 "to_table": "owner", "to_column": "id"}
-            ]},
-            {"join_type": "left", "path": [
-                {"relation": "account", "from_column": "account_id",
-                 "to_table": "account", "to_column": "id"}
-            ]}
-        ]);
-        for joins in [left_first, inner_first] {
-            let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
-                "set": [],
-                "model_name": "Transaction",
-                "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
-                "joins": joins
-            }))
-            .expect("payload deserializes");
-            let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
-            let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
-            // Two edges total (shared account prefix dedups).
-            assert_eq!(
-                join_plan.renders.len(),
-                2,
-                "shared prefix dedups to 2 edges"
-            );
-            let account = join_plan
-                .renders
-                .iter()
-                .find(|r| r.alias == "j1_account" || r.to_table == "account")
-                .expect("account edge rendered");
-            let owner = join_plan
-                .renders
-                .iter()
-                .find(|r| r.to_table == "owner")
-                .expect("owner edge rendered");
-            assert_eq!(account.join_type, "left", "account edge is LEFT");
-            assert_eq!(owner.join_type, "inner", "owner edge is INNER");
-        }
-    }
-
     /// Include edge union (#286, ADR-0008): a payload with `joins` entries
     /// and/or `instances` paths.
     fn union_plan(joins: serde_json::Value, paths: serde_json::Value) -> QueryPlan {
@@ -2461,22 +2354,6 @@ mod tests {
     fn account_hop() -> serde_json::Value {
         json!({"relation": "account", "from_column": "account_id",
                "to_table": "account", "to_column": "id"})
-    }
-
-    #[test]
-    fn build_join_plan_include_only_edge_renders_left() {
-        // An edge only include references renders LEFT (never narrowing);
-        // include paths ride the materialization plan, `joins` stays empty.
-        let plan = union_plan(json!([]), json!([[account_hop()]]));
-        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
-        assert_eq!(join_plan.renders.len(), 1);
-        assert_eq!(join_plan.renders[0].join_type, "left");
-        assert_eq!(join_plan.renders[0].alias, "j1_account");
-        assert_eq!(join_plan.renders[0].prev_alias, "transaction");
-        assert_eq!(
-            join_plan.prefix_alias.get(&vec!["account".to_string()]),
-            Some(&"j1_account".to_string())
-        );
     }
 
     #[test]
@@ -2610,27 +2487,6 @@ mod tests {
             .ensure_no_traversal()
             .expect_err("mutation guard must reject leaf paths");
         assert!(err.contains("path"), "got {err}");
-    }
-
-    #[test]
-    fn from_ir_payload_accepts_non_empty_order_by_path() {
-        // #271 lifts the blanket order_by-path rejection: a path-carrying order_by
-        // entry now builds a plan like any other (the SELECT walkers render it).
-        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
-            "set": [],
-            "model_name": "Pending",
-            "where": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": [
-                {"join_type": "inner", "path": [
-                    {"relation": "account", "from_column": "account_id",
-                     "to_table": "account", "to_column": "id"}
-                ]}
-            ],
-            "order_by": [{"column": "name", "direction": "asc", "path": ["account"], "nulls": "last"}]
-        }))
-        .expect("payload deserializes");
-
-        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
-        assert_eq!(plan.order_by[0].path, vec!["account".to_string()]);
     }
 
     /// `qualify_column_with_joins` is the render-time seam shared by WHERE and

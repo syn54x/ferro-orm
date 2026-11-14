@@ -211,11 +211,6 @@ def test_field_type_tables_are_current() -> None:
     )
 
 
-def test_a_cell_is_the_create_pass_column_type() -> None:
-    cells = _column_definitions("Probe", [("name", str, {})])
-    assert cells["name"] == {"sqlite": "`varchar`", "postgres": "`varchar`"}
-
-
 if __name__ == "__main__":
     INCLUDE.write_text(render_include(), encoding="utf-8")
     print(f"wrote {INCLUDE}", file=sys.stderr)

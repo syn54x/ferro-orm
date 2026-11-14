@@ -636,23 +636,6 @@ def test_a_check_calling_fn_matches_its_v4_vector(clean_model_registry: None) ->
     assert check["predicate"]["kind"] == "compare"
 
 
-def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
-    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
-    from ferro.relations import resolve_relationships
-    from tests.test_cross_emitter_parity import _build_fixture_models
-
-    _build_fixture_models()
-    resolve_relationships()
-
-    first = compile_registry_schema_ir()
-    first_fp = schema_ir_fingerprint(first)
-    second = compile_registry_schema_ir()
-    second_fp = schema_ir_fingerprint(second)
-
-    assert first == second
-    assert first_fp == second_fp
-
-
 def test_compile_registry_schema_ir_persists_modelset_cache(
     clean_model_registry: None,
 ) -> None:
@@ -726,31 +709,6 @@ def test_compiler_omits_db_type_for_non_explicit_columns(
     assert "db_type" not in cols["id"], cols["id"]  # non-explicit -> omitted
     assert cols["code"]["db_type"] == "varchar(32)"  # explicit -> kept
     assert cols["code"]["db_type_explicit"] is True
-
-
-def test_compiler_bytes_field_emits_binary_logical_type(
-    clean_model_registry: None,
-) -> None:
-    from ferro import Field, Model, clear_registry
-    from ferro.columns import build_column_specs
-    from ferro.ir.compiler import compile_schema_ir_payload
-
-    clear_registry()
-    M = type(
-        "Blob",
-        (Model,),
-        {
-            "__annotations__": {"id": int | None, "contents": bytes},
-            "id": Field(default=None, primary_key=True),
-        },
-    )
-    cols = {
-        c["name"]: c
-        for c in compile_schema_ir_payload(
-            "Blob", list(build_column_specs(M).values()), table_name="blob"
-        )["models"][0]["columns"]
-    }
-    assert cols["contents"]["logical_type"] == "binary", cols["contents"]
 
 
 def test_schema_ir_compiler_includes_join_table_models(

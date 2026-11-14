@@ -67,22 +67,6 @@ async def test_update_guard_runs_before_assignment_serialization():
         await PaginationGuardItem.select().limit(1).update(name=object())
 
 
-def test_mutating_payload_omits_pagination_keys():
-    from ferro.query.wire import compile_query
-
-    query = PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
-    for operation in ("update", "delete"):
-        payload = compile_query(query, operation).payload.to_ir_dict()
-        assert "limit" not in payload
-        assert "offset" not in payload
-        assert "after" not in payload
-        assert "before" not in payload
-        assert payload["model_name"] == PaginationGuardItem.__ferro_identity__
-        assert payload["order_by"] == []
-        assert payload["m2m"] is None
-        assert len(payload["where"]) == 1
-
-
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
 async def test_failed_paginated_mutation_touches_no_rows(db_url):

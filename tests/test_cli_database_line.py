@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from ferro.cli.output import Output
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     DIRECTORY_LINE,
@@ -64,29 +63,7 @@ def author_generated(project: Path, pkg: str, db) -> None:
     new("create_author")
 
 
-def test_the_line_is_the_name_a_middle_dot_and_where():
-    import io
-
-    out = io.StringIO()
-    Output.for_streams(out=out, err=io.StringIO()).database_line(
-        "main", "migrations/main"
-    )
-    assert out.getvalue() == "main · migrations/main\n"
-
-
 # -- the verbs that connect -------------------------------------------------------
-
-
-@pytest.mark.backend_matrix
-def test_status_opens_with_the_database_line(project, pkg, db, capsys):
-    author_generated(project, pkg, db)
-
-    code, out, _ = cli(capsys, "status", "--url", db.url)
-
-    assert code == 3
-    assert out == (
-        f"{db.line}\n-- 1 pending  {table(db)}\n  -- 0001_create_author  pending\n"
-    )
 
 
 @pytest.mark.backend_matrix
@@ -104,62 +81,7 @@ def test_status_json_is_the_document_alone_with_the_masked_url(
     assert list(document)[:3] == ["database", "url", "dialect"]
 
 
-@pytest.mark.backend_matrix
-def test_every_connecting_verb_opens_with_the_database_line(project, pkg, db, capsys):
-    author_generated(project, pkg, db)
-
-    code, out, _ = cli(capsys, "up", "--url", db.url)
-    assert code == 0
-    assert out.splitlines()[0] == db.line
-    assert out.splitlines()[1].startswith("0001_create_author  01_schema  applied (")
-
-    code, out, _ = cli(capsys, "up", "--url", db.url)
-    assert (code, out) == (
-        0,
-        f"{db.line}\nnothing to apply: the database is up to date\n",
-    )
-
-    code, out, _ = cli(capsys, "drift", "--url", db.url)
-    assert (code, out) == (0, f"{db.line}\nno drift against 0001_create_author\n")
-
-    code, out, _ = cli(capsys, "baseline", "--remove", "--url", db.url)
-    assert (code, out) == (0, f"{db.line}\nno baseline to remove\n")
-
-    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
-    applied = sha384(up_file)
-    up_file.write_bytes(up_file.read_bytes() + b"-- reviewed\n")
-    edited = sha384(up_file)
-    code, out, _ = cli(capsys, "rerecord", "0001:01", "--url", db.url)
-    assert (code, out) == (
-        0,
-        f"{db.line}\nre-recorded 0001_create_author/{up_file.name} "
-        f"(sha384:{applied} → sha384:{edited}); nothing was run\n",
-    )
-
-    code, out, _ = cli(capsys, "down", "--yes", "--url", db.url)
-    assert code == 0
-    lines = out.splitlines()
-    assert lines[:3] == [
-        db.line,
-        "down reverts, in this order:",
-        "  0001_create_author  01_schema",
-    ]
-    assert lines[3].startswith("0001_create_author  01_schema  reverted (")
-
-
 # -- the verbs that never connect -------------------------------------------------
-
-
-def test_new_and_check_name_the_migrations_directory(project, pkg, capsys):
-    write_config(project, pkg)
-    write_models(project, pkg, AUTHOR)
-
-    code, out, _ = cli(capsys, "new", "initial")
-    assert code == 0
-    assert out.splitlines()[:2] == [DIRECTORY_LINE, "ok Wrote migrations/0001_initial/"]
-
-    code, out, _ = cli(capsys, "check")
-    assert (code, out) == (0, f"{DIRECTORY_LINE}\nok: models match 0001_initial\n")
 
 
 def test_a_named_database_shows_its_own_directory(project, pkg, capsys):

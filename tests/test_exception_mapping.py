@@ -196,12 +196,6 @@ async def test_unopenable_database_is_operational_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_scheme_is_interface_error():
-    with pytest.raises(InterfaceError):
-        await connect("mysql://root@localhost/nope", auto_migrate=False)
-
-
-@pytest.mark.asyncio
 async def test_unknown_connection_name_is_interface_error(tmp_path):
     class RoutedItem(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

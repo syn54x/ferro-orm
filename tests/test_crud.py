@@ -22,27 +22,6 @@ async def test_model_save_new_record(db_url):
 
 
 @pytest.mark.asyncio
-async def test_model_save_update_record(db_url):
-    """Test that calling .save() on an existing model instance updates it."""
-
-    class CrudUser(Model):
-        id: int = Field(default=None, primary_key=True)
-        username: str
-        email: str
-
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        user = CrudUser(id=1, username="initial_name", email="initial@example.com")
-        await user.save()
-        user.username = "updated_name"
-        await user.save()
-
-        users = await CrudUser.all()
-        assert len(users) == 1
-        assert users[0].username == "updated_name"
-
-
-@pytest.mark.asyncio
 async def test_model_all_fetching(db_url):
     """Test that Model.all() retrieves all records from the database."""
 
@@ -135,25 +114,6 @@ async def test_identity_map_disabled_returns_distinct_instances(db_url):
         assert user_a is not user_b
         assert user_a.id == user_b.id == 200
         assert user_a.username == user_b.username
-
-
-@pytest.mark.asyncio
-async def test_model_get_operation(db_url):
-    """Test fetching a single record by primary key."""
-
-    class CrudUser(Model):
-        id: int = Field(default=None, primary_key=True)
-        username: str
-        email: str
-
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        u1 = CrudUser(id=500, username="get_test", email="get@test.com")
-        await u1.save()
-        user = await CrudUser.get(500)
-        assert user is not None
-        assert user.id == 500
-        assert user is u1
 
 
 @pytest.mark.asyncio

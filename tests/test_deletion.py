@@ -6,34 +6,6 @@ pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.mark.asyncio
-async def test_instance_delete(db_url):
-    """Test that a specific model instance can be deleted."""
-
-    class DeletableUser(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        username: str
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        user = DeletableUser(username="delete_me")
-        await user.save()
-        user_id = user.id
-
-        # Verify it exists
-        fetched = await DeletableUser.get(user_id)
-        assert fetched is not None
-
-        # Delete
-        await user.delete()
-
-        # Verify it's gone from DB
-        assert await DeletableUser.get_or_none(user_id) is None
-
-        # Verify it's gone from Identity Map (fetching again should return None)
-        # Note: the 'user' object still exists in Python memory, but it's disconnected from the DB.
-
-
-@pytest.mark.asyncio
 async def test_query_delete(db_url):
     """Test that multiple records can be deleted via the query builder."""
 

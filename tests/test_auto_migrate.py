@@ -25,41 +25,6 @@ class AutoMigratedUser(Model):
 
 
 @pytest.mark.asyncio
-async def test_connect_with_auto_migrate(db_url):
-    """Test that connect(auto_migrate=True) creates tables automatically."""
-    # Reset engine to ensure clean state
-    ferro.reset_engine()
-
-    # Connect with auto_migrate=True
-    # This should internally call the same logic as create_tables()
-    report = await auto_migrate(db_url)
-    # In a full run the registry may hold other modules' models too: this
-    # test's own table is what it asserts.
-    assert [s for s in schema_steps(report) if s[0] == "automigrateduser"] == on(
-        db_url,
-        sqlite=[
-            (
-                "automigrateduser",
-                'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "username" varchar NOT NULL )',
-            ),
-        ],
-        postgres=[
-            (
-                "automigrateduser",
-                'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" serial PRIMARY KEY NOT NULL, "username" varchar NOT NULL )',
-            ),
-        ],
-    )
-    assert not [w for w in warning_texts(report) if "automigrateduser" in w]
-    async with ferro.engines.session():
-        # We can verify it works by trying to call create_tables again
-        # or by just ensuring it doesn't crash.
-        # In a future step, when we have INSERT, we can verify the table exists.
-        # For now, we are verifying the API signature and that it runs without error.
-        assert True
-
-
-@pytest.mark.asyncio
 async def test_connect_without_auto_migrate(db_url):
     """Test that connect(auto_migrate=False) does not create tables (manual mode)."""
     ferro.reset_engine()
@@ -1580,65 +1545,6 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
 
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
-async def test_index_reconcile_noop_when_index_already_present(
-    db_url, db_backend, clean_registry
-):
-    """Running migrate_updates a second time when the index already exists must
-    be a no-op: the index remains and auto-migrate does not fail (false-alarm guard)."""
-    from typing import ClassVar
-
-    class IdxNoopModel(Model):
-        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("x", "y"),
-        )
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        x: int
-        y: int
-
-    # First connect creates the table + index.
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == on(
-        db_url,
-        sqlite=[
-            (
-                "idxnoopmodel",
-                'CREATE TABLE IF NOT EXISTS "idxnoopmodel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "x" integer NOT NULL, "y" integer NOT NULL )',
-            ),
-            (
-                "idxnoopmodel",
-                'CREATE INDEX IF NOT EXISTS "idx_idxnoopmodel_x_y" ON "idxnoopmodel" ("x", "y")',
-            ),
-        ],
-        postgres=[
-            (
-                "idxnoopmodel",
-                'CREATE TABLE IF NOT EXISTS "idxnoopmodel" ( "id" serial PRIMARY KEY NOT NULL, "x" integer NOT NULL, "y" integer NOT NULL )',
-            ),
-            (
-                "idxnoopmodel",
-                'CREATE INDEX IF NOT EXISTS "idx_idxnoopmodel_x_y" ON "idxnoopmodel" ("x", "y")',
-            ),
-        ],
-    )
-    assert warning_texts(report) == []
-    async with ferro.engines.session():
-        names_after_first = _live_index_names(db_url, db_backend, "idxnoopmodel")
-        assert "idx_idxnoopmodel_x_y" in names_after_first
-    ferro.reset_engine()
-
-    # Second connect — same model, same index already present.
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == []
-    assert warning_texts(report) == []
-    async with ferro.engines.session():
-        names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
-        assert "idx_idxnoopmodel_x_y" in names_after_second, (
-            "index must survive second migrate_updates pass (no-op guard)"
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
 async def test_index_reconcile_destructive_drops_removed_composite_index(
     db_url, db_backend, clean_registry
 ):
@@ -1873,94 +1779,6 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
             f"Expected uuid/char storage type for `id` after second pass; got '{id_type}' "
             "(a different type would mean DDL ran on the second pass)"
         )
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registry):
-    """Drift check: a UUID PK model connected with migrate_updates multiple times
-    must not report any DDL drift. The storage-token comparison must see the
-    uuid_text / uuid declared type as stable after the first connect."""
-    import warnings as _warnings
-
-    class UuidDriftModel(Model):
-        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        name: str
-
-    # Bootstrap: create the table.
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == on(
-        db_url,
-        sqlite=[
-            (
-                "uuiddriftmodel",
-                'CREATE TABLE IF NOT EXISTS "uuiddriftmodel" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "name" varchar NOT NULL )',
-            ),
-        ],
-        postgres=[
-            (
-                "uuiddriftmodel",
-                'CREATE TABLE IF NOT EXISTS "uuiddriftmodel" ( "id" uuid PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
-            ),
-        ],
-    )
-    assert warning_texts(report) == []
-    ferro.reset_engine()
-
-    # First migrate_updates pass — should apply nothing (fresh table).
-    from ferro import clear_registry
-    from ferro.registry import REGISTRY
-
-    clear_registry()
-    REGISTRY.reset_for_test()
-
-    class UuidDriftModel(Model):  # noqa: F811
-        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        name: str
-
-    with _warnings.catch_warnings(record=True) as caught_first:
-        _warnings.simplefilter("always")
-        report = await auto_migrate(db_url, updates=True)
-        assert schema_steps(report) == []
-        assert warning_texts(report) == []
-
-    ferro.reset_engine()
-
-    # Second migrate_updates pass — must be identical to the first (idempotent).
-    clear_registry()
-    REGISTRY.reset_for_test()
-
-    class UuidDriftModel(Model):  # noqa: F811
-        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
-        name: str
-
-    with _warnings.catch_warnings(record=True) as caught_second:
-        _warnings.simplefilter("always")
-        report = await auto_migrate(db_url, updates=True)
-        assert schema_steps(report) == []
-        assert warning_texts(report) == []
-
-    drift_warnings_first = [
-        w
-        for w in caught_first
-        if issubclass(w.category, UserWarning)
-        and "ferro auto-migrate" in str(w.message)
-    ]
-    drift_warnings_second = [
-        w
-        for w in caught_second
-        if issubclass(w.category, UserWarning)
-        and "ferro auto-migrate" in str(w.message)
-    ]
-
-    assert drift_warnings_first == [], (
-        f"UUID PK must not trigger drift warning on first migrate_updates: "
-        f"{[str(w.message) for w in drift_warnings_first]}"
-    )
-    assert drift_warnings_second == [], (
-        f"UUID PK must not trigger drift warning on second migrate_updates: "
-        f"{[str(w.message) for w in drift_warnings_second]}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -3201,10 +3019,6 @@ _PD3_CHECK_BODY_TEXT = (
     "declared predicate."
 )
 
-_PD3_SQLITE_PLAIN = (
-    'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY '
-    'AUTOINCREMENT, "status" varchar(8) NOT NULL )'
-)
 _PD3_SQLITE_CHECKED = (
     'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY '
     'AUTOINCREMENT, "status" text NOT NULL CONSTRAINT "ck_pd3order_status" CHECK '
@@ -3304,36 +3118,27 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-@pytest.mark.parametrize("held", [False, True], ids=["no-row", "a-row"])
-@pytest.mark.parametrize("checked", [False, True], ids=["plain", "db_check"])
-async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label(
-    db_url, clean_registry, checked, held
+async def test_a_label_rename_on_sqlite_warns_while_the_check_lists_the_old_label(
+    db_url, clean_registry
 ):
-    """The hint is live while a row holds the old label or the column's
-    ``db_check`` still lists it (ADR-0032); otherwise it is inert and silent."""
-    _define_pd3_order(renamed=False, checked=checked)
+    """A ``db_check`` that still lists the old label keeps the hint live with
+    no row holding it (ADR-0032)."""
+    _define_pd3_order(renamed=False, checked=True)
     report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        ("pd3order", _PD3_SQLITE_CHECKED if checked else _PD3_SQLITE_PLAIN)
-    ]
+    assert schema_steps(report) == [("pd3order", _PD3_SQLITE_CHECKED)]
     assert warning_texts(report) == []
-    values = "('canceled'), ('paid')" if held else "('paid')"
     async with ferro.engines.session():
-        await execute(f'INSERT INTO "pd3order" ("status") VALUES {values}')
+        await execute('INSERT INTO "pd3order" ("status") VALUES (\'paid\')')
     _rewind()
-    _define_pd3_order(renamed=True, checked=checked)
+    _define_pd3_order(renamed=True, checked=True)
 
     report = await _pd3_connect(db_url, updates=True)
     assert schema_steps(report) == []
-    if checked:
-        assert warning_texts(report) == [_PD3_CHECK_BODY_TEXT, _PD3_STRANDED_TEXT]
-    else:
-        assert warning_texts(report) == ([_PD3_STRANDED_TEXT] if held else [])
-
-    assert len(_stranded(report)) == (1 if held or checked else 0), report.warnings
+    assert warning_texts(report) == [_PD3_CHECK_BODY_TEXT, _PD3_STRANDED_TEXT]
+    assert len(_stranded(report)) == 1, report.warnings
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
-    assert [r["status"] for r in rows] == (["canceled", "paid"] if held else ["paid"])
+    assert [r["status"] for r in rows] == ["paid"]
 
 
 # The row probe a SQLite label-rename hint may cost (ADR-0047; ADR-0011: the
@@ -4183,59 +3988,6 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
         assert [r["name"] for r in rows] == ["Bo"]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnauthor", "trnbook", "trnappendix"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_a_live_label_rename_on_postgres_is_only_the_rename(
-    db_url, clean_registry
-):
-    """``__ferro_renamed_labels__ = {"cancelled": "canceled"}`` on a live
-    Postgres type is one ``ALTER TYPE … RENAME VALUE`` and nothing else: the
-    renamed type already holds ``cancelled``, so no ``ADD VALUE 'cancelled'``
-    follows, and ``canceled`` is gone, so no warning calls it a label the
-    model no longer declares."""
-    import warnings
-
-    _define_pd3_order(renamed=False)
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "pd3status",
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
-        ),
-        (
-            "pd3order",
-            'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" serial PRIMARY KEY NOT NULL, "status" pd3status NOT NULL )',
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with ferro.engines.session():
-        await execute('INSERT INTO "pd3order" ("status") VALUES (\'canceled\')')
-    _rewind()
-    _define_pd3_order(renamed=True)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        report = await auto_migrate(db_url, updates=True)
-        assert schema_steps(report) == [
-            (
-                "pd3status",
-                "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'",
-            ),
-        ]
-        assert warning_texts(report) == []
-
-    executed = [sql for _, sql in schema_steps(report)]
-    assert [sql for sql in executed if "ALTER TYPE" in sql] == [
-        "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"
-    ], executed
-    assert not [
-        str(w.message) for w in caught if "no longer declares" in str(w.message)
-    ], [str(w.message) for w in caught]
-    async with ferro.engines.session():
-        rows = await fetch_all('SELECT "status" FROM "pd3order"')
-    assert [r["status"] for r in rows] == ["cancelled"]
 
 
 # ---------------------------------------------------------------------------

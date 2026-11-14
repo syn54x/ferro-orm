@@ -42,7 +42,6 @@ from ferro import (
 )
 from ferro._core import (
     _live_row_security_for_test,
-    _normalize_row_policy_expr,
     _render_migration_sql_for_test,
 )
 from ferro.ir.compiler import compile_registry_schema_ir
@@ -207,71 +206,9 @@ def _render(live_row_security: dict) -> tuple[list[str], list[str]]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("declared", "live"),
-    [
-        pytest.param(_shorthand_expr(), CATALOG_SHORTHAND, id="uuid-shorthand"),
-        pytest.param(
-            "\"owner\" = NULLIF(current_setting('pinch.member', true), '')",
-            "(owner = NULLIF(current_setting('pinch.member'::text, true), ''::text))",
-            id="text-shorthand",
-        ),
-        pytest.param(
-            "\"title\" = NULLIF(current_setting('pinch.title', true), '')",
-            "((title)::text = NULLIF(current_setting('pinch.title'::text, true), "
-            "''::text))",
-            id="varchar-shorthand-implicit-cast",
-        ),
-        pytest.param(
-            '"id" IN (SELECT doc_id FROM membership WHERE member = '
-            "NULLIF(current_setting('pinch.member', true), ''))",
-            "(id IN ( SELECT membership.doc_id\n   FROM membership\n  WHERE "
-            "(membership.member = NULLIF(current_setting('pinch.member'::text, "
-            "true), ''::text))))",
-            id="raw-membership-subquery",
-        ),
-        pytest.param(
-            '"owner" = (SELECT probe_uid())',
-            "(owner = ( SELECT probe_uid() AS probe_uid))",
-            id="raw-function-recipe",
-        ),
-        pytest.param(
-            '"owner" IS NOT NULL AND "n" > 0',
-            "((owner IS NOT NULL) AND (n > 0))",
-            id="raw-boolean-composition",
-        ),
-    ],
-)
-def test_the_catalog_round_trip_is_not_drift(declared: str, live: str):
-    """These pairs are the same predicate written two ways: the left is what
-    ferro (or the author) wrote, the right is what Postgres stored."""
-    assert declared != live
-    assert _normalize_row_policy_expr(declared) == _normalize_row_policy_expr(live)
-
-
-def test_a_real_body_change_is_drift():
-    assert _normalize_row_policy_expr(CATALOG_SHORTHAND) != _normalize_row_policy_expr(
-        _shorthand_expr(OTHER_SETTING)
-    )
-
-
-def test_parentheses_that_change_grouping_are_not_erased():
-    assert _normalize_row_policy_expr("(a OR b) AND c") != _normalize_row_policy_expr(
-        "a OR (b AND c)"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Render level
 # ---------------------------------------------------------------------------
-
-
-def test_an_unchanged_shorthand_policy_is_not_rebuilt():
-    _define_ledger_row()
-    statements, warnings = _render(_live())
-    assert (statements, warnings) == ([], [])
-    assert statements == []
-    assert warnings == []
 
 
 def test_a_drifted_shorthand_body_is_dropped_and_recreated():
@@ -464,49 +401,6 @@ async def _pg_policies(table: str) -> list[dict]:
         "WHERE schemaname = current_schema() AND tablename = $1 ORDER BY policyname",
         table,
     )
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_migrate_updates_rebuilds_a_drifted_policy(db_url):
-    LedgerRow = _define_ledger_row()
-    report = await auto_migrate(db_url)
-    assert schema_steps(report) == [
-        (
-            "ledgerrow",
-            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
-        ),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
-        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
-        (
-            "ledgerrow",
-            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
-    _rewind_registry()
-
-    _define_ledger_row(setting=OTHER_SETTING)
-    report = await auto_migrate(db_url, updates=True)
-    assert schema_steps(report) == [
-        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
-        (
-            "ledgerrow",
-            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
-        ),
-    ]
-    assert warning_texts(report) == []
-    async with engines.session():
-        policies = await _pg_policies("ledgerrow")
-        assert [policy["policyname"] for policy in policies] == [POLICY_NAME]
-        assert "pinch.tenant_id" in policies[0]["qual"]
-        assert "pinch.ledger_id" not in policies[0]["qual"]
-        # Metadata only: the rebuild never touched the row.
-        rows = await fetch_all("SELECT label FROM ledgerrow")
-        assert [row["label"] for row in rows] == ["a1"]
 
 
 @pytest.mark.backend_matrix

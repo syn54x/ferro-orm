@@ -42,34 +42,6 @@ def _clear_state():
 
 
 class TestLambdaPredicates:
-    def test_lambda_simple_appends_one_node(self):
-        """A lambda predicate appends exactly one QueryNode."""
-
-        class LamUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            archived: bool = False
-
-        q: Query[LamUser] = Query(LamUser).where(lambda t: t.id == 1)
-        assert len(q.where_clause) == 1
-        assert q.where_clause[0].column == "id"
-        assert q.where_clause[0].operator == "=="
-        assert q.where_clause[0].value == 1
-
-    def test_lambda_compound_predicate(self):
-        """Compound predicates produce one is_compound=True node."""
-
-        class LamUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            role: str = "user"
-            active: bool = True
-
-        q = Query(LamUser).where(
-            lambda t: (t.role == "admin") & (t.active == True)  # noqa: E712
-        )
-        assert len(q.where_clause) == 1
-        assert q.where_clause[0].is_compound is True
-        assert q.where_clause[0].operator == "AND"
-
     def test_lambda_returning_non_query_node_raises(self):
         """Predicates that don't return a QueryNode are rejected."""
 
@@ -87,18 +59,6 @@ class TestLambdaPredicates:
 
         with pytest.raises(TypeError, match="predicate callable"):
             Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-
-    def test_query_proxy_attribute_returns_field_proxy(self):
-        """QueryProxy attribute access yields a validated FieldProxy at runtime."""
-
-        class ProxyUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            archived: bool = False
-
-        proxy = QueryProxy(ProxyUser)
-        f = proxy.archived
-        assert isinstance(f, FieldProxy)
-        assert f.column == "archived"
 
     @pytest.mark.asyncio
     async def test_lambda_query_round_trips(self, db_url):

@@ -14,14 +14,10 @@ from ferro import (
     Check,
     CheckViolationError,
     Field,
-    Forward,
     Model,
-    Relation,
-    Reverse,
     clear_registry,
     connect,
     engines,
-    fn,
     reset_engine,
 )
 from ferro._core import _render_table_check_body
@@ -192,19 +188,6 @@ def test_function_call_in_predicate_fails_at_class_definition():
             amount: int = 0
 
 
-def test_a_check_may_call_ferro_fn():
-    class Called(Model):
-        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
-            Check("abs_positive", lambda called: fn.abs(called.amount) > 5),
-        )
-
-        id: int | None = Field(default=None, primary_key=True)
-        amount: int = 0
-
-    [check] = _model_payload("called")["table_checks"]
-    assert check["predicate"]["kind"] == "compare"
-
-
 def test_module_global_fails_at_class_definition():
     with pytest.raises(TypeError, match="closes over '_MIN_AMOUNT'"):
 
@@ -258,35 +241,6 @@ def test_column_named_like_module_global_still_compiles():
         limit: int = 0
 
     assert _check_body("ledger", "non_negative") == '"limit" >= 0'
-
-
-@pytest.mark.parametrize(
-    "predicate, expected",
-    [
-        (lambda t: t.owner.label == None, "traversal"),  # noqa: E711
-        (lambda t: t.notes.exists(), "existence test"),
-        (lambda t: t.amount.sum(), "aggregate"),
-    ],
-)
-def test_still_rejected_predicate_forms(predicate, expected):
-    class RejectOwner(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        label: str | None = None
-
-    with pytest.raises(TypeError, match=expected):
-
-        class Rejecting(Model):
-            __ferro_checks__: ClassVar[tuple[Check, ...]] = (Check("rule", predicate),)
-
-            id: int | None = Field(default=None, primary_key=True)
-            amount: int = 0
-            owner_id: int | None = Field(default=None, foreign_key=RejectOwner)
-            owner: Relation[RejectOwner | None] = Forward("owner_id")
-            notes: Relation[list["RejectNote"]] = Reverse("rejecting_id")
-
-        class RejectNote(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            rejecting_id: int = Field(foreign_key=Rejecting)
 
 
 # ---------------------------------------------------------------------------

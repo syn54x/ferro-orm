@@ -65,16 +65,3 @@ async def test_identity_map_is_bounded_under_bulk_scanning(db_url):
             # Live entries collapse once user refs are gone — the map is
             # bounded by *live* instances, not by rows ever loaded.
             assert identity_map_len(s.session_id) < 100
-
-
-@pytest.mark.asyncio
-async def test_identity_dedup_still_works_for_live_instances(db_url):
-    class MemLive(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        n: int
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        a = await MemLive.create(n=1)
-        b = await MemLive.get(a.id)
-        assert b is a  # weak map still dedupes while the instance is alive

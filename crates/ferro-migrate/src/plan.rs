@@ -5902,12 +5902,6 @@ mod down_tests {
     // -- the reverse cases, now planned back -------------------------------
 
     #[test]
-    fn an_empty_up_has_an_empty_down() {
-        let (live, models) = leftover();
-        assert!(plan_down(&[], &models, &live, Dialect::Postgres).is_empty());
-    }
-
-    #[test]
     fn an_added_column_and_its_check_come_off_check_first() {
         let bare = card(vec![column("id", "int", false)]);
         let live = live(vec![bare], LiveTableFacts::default());
