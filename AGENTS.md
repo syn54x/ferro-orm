@@ -487,8 +487,9 @@ player.team.name               # InstanceNotLoaded: Team(id=1) is not loaded. Re
 An unloaded instance is what a forward relation nothing loaded reads as.
 `hydrate_unloaded_instance` builds it as every hydrated instance is built
 (`cls.__new__`, the slots, the connection and persisted markers) with only
-its primary key in `__dict__`, plus the `__ferro_unloaded` marker that
-`ferro._unloaded` alone reads. Reading another column, assigning one,
+its primary key in `__dict__`, plus the `__ferro_unloaded` marker, which on
+the Python side `ferro._unloaded` alone reads (the Rust side reads it in
+`src/hydration.rs`). Reading another column, assigning one,
 `save()`, `model_dump()` and `model_dump_json()` raise `InstanceNotLoaded`,
 naming `include()` and `.load()`. `.load()`, and in a session an include or
 any later fetch of its row, fill the same object in place. The equivalence
@@ -581,7 +582,7 @@ What this means in practice:
   tracked-database refusal of `connect(auto_migrate=True)` and of Alembic
   autogenerate, and the edited-file refusals (`ferro migrate rerecord`,
   `--continue` / `--restart`).
-- **A relation or foreign-key refusal's fix is a list of edits.**
+- **A fix computed from the models is a list of edits.**
 
   ```python
   class Player(Model):
@@ -594,19 +595,36 @@ What this means in practice:
   # Player, replace team with `team: Relation[Team | None] = Forward("team_id")`
   ```
 
-  A refusal of a relation or foreign-key column declaration, at class
-  definition or when relations resolve, is a `DeclarationRefusal`
+  A refusal that prints a `Write:` or `Fix it by hand:` fix is a
+  `DeclarationRefusal`
   (`src/ferro/relations/fixes.py`): a `TypeError` that carries its fix as
   `Edit`s, one tuple per way to fix it. Its message is `render_fix` of those
   edits, the only place that writes `Write:` or `Fix it by hand:`, and which
-  of the two it writes follows from the edits. A new refusal there computes
-  its `Edit`s from the models and raises `DeclarationRefusal`; a fix line
-  formatted at the raise site is an I-6 miss (ADR-0064). Pinned in
+  of the two it writes follows from the edits.
+
+  The refusals raised this way are the ones whose check reads the declared
+  models, so the fix can be computed from them: the relation, key-column and
+  join-table checks in `ferro.relations` (`keyless_target_refusal`, which
+  the schema compile raises too, and `none_assignment_refusal` among them)
+  and `_refuse_foreign_key_options` in `src/ferro/metaclass.py`. One of
+  these that can name no fix, such as a bare `Forward` over a missing
+  column, carries no edits and says what to do in words.
+
+  Outside the rule, as plain `TypeError`s that name the fix in words: a
+  declaring call's check of its own arguments, made before any model exists
+  (`Forward(3)`, `Field(foreign_key=3)`, `on_delete="BOGUS"`, a removed
+  keyword such as `ManyToMany(related_name=...)`), and a retired
+  `ManyToMany`.
+
+  A new refusal whose check reads the declared models computes its `Edit`s
+  from them and raises `DeclarationRefusal`; a fix line formatted at the raise
+  site is an I-6 miss (ADR-0064). Pinned in
   `tests/test_declaration_fixes.py`:
-  `test_every_refusal_carries_a_fix_that_works` applies each refusal's edits
-  to the refused source and loads the result, and
-  `test_the_sweep_reaches_every_refusal` fails for a construction site no
-  case reaches.
+  `test_every_refusal_carries_a_fix_that_works` holds each swept refusal's
+  message to `render_fix` of its own edits, applies every way to the refused
+  source and loads the result, and holds a refusal with no edits to no fix
+  line; `test_the_sweep_reaches_every_refusal` fails for a
+  `DeclarationRefusal` construction site no swept case reaches.
 
 This rule binds human contributors and AI agents equally, and overrides any
 agent default that biases toward minimal or expedient changes.
@@ -910,8 +928,9 @@ await customer.save(only={"updated_at", "name"})
 # UPDATE "customer" SET "name" = ?, "updated_at" = ? WHERE "id" = ?
 ```
 
-`only=` and `exclude=` are sets, and a fetched instance's `__dict__` follows
-the `SELECT`. Neither order reaches the statement: `save`, `bulk_create` and
+`only=` and `exclude=` are sets, whose iteration order can change between
+processes. Neither that order nor the order a row's columns were fetched in
+reaches the statement: `save`, `bulk_create` and
 `save(only=)` / `save(exclude=)` emit their INSERT and SET columns in
 `model_fields` order, walked in `save_bind_payload`. A set is membership
 only.
@@ -923,7 +942,7 @@ violation, the mutation-side twin of the rendered-statement pin in I-1
 
 ---
 
-## I-17: A text/bytes storage mismatch is refused, never written or read
+## I-17: A text/bytes storage mismatch is a `DataError` from one function
 
 A model declares a `SecretBytes` column over a Postgres table whose column
 is still `varchar`:
@@ -948,14 +967,18 @@ raises that `DataError` before the statement is sent, in both directions
 (bytes over text, text over bytes):
 
 - a write that sets the column: `save()` as insert or update,
-  `bulk_create()` and a query `update()`;
-- a fetch that selects it: the root model's columns, a projected column
-  (through a relation too) and every included model's columns.
+  `bulk_create()` and the `SET` columns of a query `update()`;
+- a `Query` fetch that selects it, built by `build_fetch` (`get()`,
+  `where(...).all()`, `first()`, `select()`, `include()`): the root model's
+  columns, a projected column (through a relation too) and every included
+  model's columns.
 
-A fetch that does not select the column runs. SQLite stores the bytes as
+Setting or selecting the column is what the function checks. A fetch that
+does not select it runs, and a statement that only filters on it or
+aggregates over it is not held to the check. SQLite stores the bytes as
 written, so nothing is refused there.
 
-A new statement that binds or selects model columns calls
+A new statement that sets or selects model columns calls
 `refuse_storage_mismatch` with those columns. A second comparison of declared
 and live storage, or a warning in place of the `DataError`, is an I-17
 violation (#785; review I-40 in #786). Pinned by
