@@ -616,7 +616,8 @@ What this means in practice:
   keyword such as `ManyToMany(related_name=...)`), and a retired
   `ManyToMany`.
 
-  A new refusal whose check reads the declared models computes its `Edit`s
+  A new refusal in `ferro.relations`, or in the metaclass's foreign-key
+  option check, whose check reads the declared models computes its `Edit`s
   from them and raises `DeclarationRefusal`; a fix line formatted at the raise
   site is an I-6 miss (ADR-0064). Pinned in
   `tests/test_declaration_fixes.py`:
@@ -960,11 +961,12 @@ await Token(id=1, secret=SecretBytes(b"\xff\x00k")).save()
 ```
 
 Postgres would take the `bytea` bind into the `varchar` column and store its
-hex text, with no error. So on Postgres one function,
-`refuse_storage_mismatch` in `src/operations.rs`, compares each column's
-declared codec with the storage class the table catalog read for it, and
-raises that `DataError` before the statement is sent, in both directions
-(bytes over text, text over bytes):
+hex text, with no error. So on Postgres every write that sets a mismatched
+column and every fetch that selects one is refused with that `DataError`
+before the statement is sent, in both directions (bytes over text, text over
+bytes). One function decides it, `refuse_storage_mismatch` in
+`src/operations.rs`, which compares each column's declared codec with the
+storage class the table catalog read for it. Today it is called by:
 
 - a write that sets the column: `save()` as insert or update,
   `bulk_create()` and the `SET` columns of a query `update()`;
@@ -973,7 +975,12 @@ raises that `DataError` before the statement is sent, in both directions
   columns, a projected column (through a relation too) and every included
   model's columns.
 
-Setting or selecting the column is what the function checks. A fetch that
+`Model.all()` selects every root column through a `SELECT` of its own
+(`_core.fetch_all`, `src/ferro/models.py`, `src/operations.rs`) and never
+calls the function: a standing I-17 violation, tracked in #944, not intended
+behaviour.
+
+Setting or selecting the column is what the contract covers. A fetch that
 does not select it runs, and a statement that only filters on it or
 aggregates over it is not held to the check. SQLite stores the bytes as
 written, so nothing is refused there.
