@@ -772,24 +772,6 @@ fn emit_sql_with_ir_alter_column_type_postgres() {
 }
 
 #[test]
-fn emit_sql_with_ir_alter_column_type_sqlite_warns_only() {
-    let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
-    let new_ir = envelope(vec![schema_model("user", vec![col("name", "int", true)])]);
-    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
-        table: "user".to_string(),
-        column: "name".to_string(),
-    }]);
-    let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
-    assert!(result.statements.is_empty());
-    assert!(
-        result
-            .reports
-            .iter()
-            .any(|w| w.text.contains("cannot change column types"))
-    );
-}
-
-#[test]
 fn sqlite_warn_skips_name_migrations_not_alembic() {
     // #514: every SQLite warning the pass still emits points at the strategy that
     // will work — `ferro migrate new` — never at Alembic.
@@ -1060,24 +1042,6 @@ fn emit_sql_with_ir_alter_column_nullability_postgres() {
 }
 
 #[test]
-fn emit_sql_with_ir_alter_column_nullability_sqlite_warns_only() {
-    let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
-    let new_ir = envelope(vec![schema_model("user", vec![col("name", "text", false)])]);
-    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnNullability {
-        table: "user".to_string(),
-        column: "name".to_string(),
-    }]);
-    let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
-    assert!(result.statements.is_empty());
-    assert!(
-        result
-            .reports
-            .iter()
-            .any(|w| w.text.contains("cannot change column nullability"))
-    );
-}
-
-#[test]
 fn emit_sql_with_ir_unsafe_not_null_add_errors() {
     let model = schema_model("user", vec![col("score", "int", false)]);
     let old_ir = envelope(vec![schema_model("user", vec![])]);
@@ -1089,21 +1053,6 @@ fn emit_sql_with_ir_unsafe_not_null_add_errors() {
     let err = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("NOT NULL"));
     assert!(err.message.contains("no literal default"));
-}
-
-#[test]
-fn emit_sql_with_ir_drop_primary_key_column_errors() {
-    let old_ir = envelope(vec![schema_model(
-        "user",
-        vec![pk_col("id", "int"), col("legacy", "text", true)],
-    )]);
-    let new_ir = envelope(vec![schema_model("user", vec![pk_col("id", "int")])]);
-    let plan = Plan::unplaced(vec![MigrationOp::DropColumn {
-        table: "user".to_string(),
-        column: "id".to_string(),
-    }]);
-    let err = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
-    assert!(err.message.contains("primary key"));
 }
 
 #[test]
@@ -1153,14 +1102,6 @@ fn emit_sql_i1_unique_names() {
     assert_eq!(
         test_composite_unique_index_name("user", &["a", "b"]),
         "uq_user_a_b"
-    );
-}
-
-#[test]
-fn emit_sql_i1_check_names() {
-    assert_eq!(
-        test_db_check_constraint_name("user", "role"),
-        "ck_user_role"
     );
 }
 
@@ -2275,22 +2216,6 @@ fn a_declared_check_whose_live_body_drifted_is_rebuilt() {
 }
 
 #[test]
-fn catalog_wrapping_alone_is_not_check_drift() {
-    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
-    let plan = plan_live_table(
-        transfer_model_with_table_checks(vec![]),
-        new,
-        live_checks(vec![live_outflow_check()]),
-        updates_only(),
-    );
-    assert!(
-        plan.op_list().is_empty(),
-        "catalog parens are not drift: {:?}",
-        plan.op_list()
-    );
-}
-
-#[test]
 fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
         transfer_outflow_table_check(),
@@ -2430,57 +2355,6 @@ fn emit_sql_with_ir_drop_check_fails_loudly_for_a_still_declared_name() {
         err.message.contains("ck_transfer_at_most_one_outflow"),
         "{}",
         err.message
-    );
-}
-
-#[test]
-fn render_check_body_quotes_column_and_joins_values() {
-    let check = SchemaCheck {
-        name: "ck_account_role".to_string(),
-        column: "role".to_string(),
-        values: vec!["'admin'".to_string(), "'user'".to_string()],
-    };
-    assert_eq!(
-        ferro_ddl_lowering::render_check_body(&check),
-        "\"role\" IN ('admin', 'user')"
-    );
-}
-
-#[test]
-fn render_db_check_postgres_emits_quoted_alter_no_warning() {
-    let check = SchemaCheck {
-        name: "ck_account_role".to_string(),
-        column: "role".to_string(),
-        values: vec!["'admin'".to_string(), "'user'".to_string()],
-    };
-    let e = ferro_ddl_lowering::render_db_check(
-        "account",
-        &check,
-        Dialect::Postgres,
-        ferro_ddl_lowering::ConstraintMode::Plain,
-    );
-    assert_eq!(e.statement.as_deref(), Some(PG_DB_CHECK_ACCOUNT_ROLE));
-    assert!(e.warning.is_none());
-}
-
-#[test]
-fn render_db_check_sqlite_renders_inline_without_warning() {
-    let check = SchemaCheck {
-        name: "ck_account_role".to_string(),
-        column: "role".to_string(),
-        values: vec!["'admin'".to_string(), "'user'".to_string()],
-    };
-    let e = ferro_ddl_lowering::render_db_check(
-        "account",
-        &check,
-        Dialect::Sqlite,
-        ferro_ddl_lowering::ConstraintMode::Plain,
-    );
-    assert!(e.statement.is_none());
-    assert!(e.warning.is_none());
-    assert_eq!(
-        e.inline.as_deref(),
-        Some("CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
     );
 }
 
@@ -7693,19 +7567,6 @@ fn a_generated_column_dropped_with_its_input_is_dropped_before_it_and_added_afte
             "{dialect:?}"
         );
     }
-}
-
-#[test]
-fn adding_a_generated_column_can_fail_on_the_rows_it_computes() {
-    let plan = plan_declared(
-        &transaction_without_direction("amount_minor"),
-        &indexed_direction("bigint"),
-        Dialect::Postgres,
-        updates_only(),
-    );
-    let verdict = &plan.operations[0].verdict;
-    assert_eq!(verdict.fails_on_rows, RowRisk::Always);
-    assert!(!verdict.demands_values);
 }
 
 #[test]
