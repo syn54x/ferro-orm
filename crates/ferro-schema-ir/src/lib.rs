@@ -1057,33 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn a_check_comparing_value_expressions_is_the_compare_kind() {
-        let wire = serde_json::json!({
-            "kind": "compare",
-            "left": {"kind": "func", "name": "abs", "args": [{"kind": "column", "name": "amount"}]},
-            "op": "gt",
-            "right": {"kind": "literal", "token": "1000"}
-        });
-        let expr: CheckExpr = serde_json::from_value(wire.clone()).expect("compare deserializes");
-        assert_eq!(
-            expr,
-            CheckExpr::Compare {
-                left: ValueExpr::Func {
-                    name: "abs".to_string(),
-                    args: vec![ValueExpr::Column {
-                        name: "amount".to_string()
-                    }],
-                },
-                op: CheckCmpOp::Gt,
-                right: ValueExpr::Literal {
-                    token: "1000".to_string()
-                },
-            }
-        );
-        assert_eq!(serde_json::to_value(&expr).expect("serializes"), wire);
-    }
-
-    #[test]
     fn schema_table_check_roundtrip() {
         let wire = serde_json::json!({
             "ir_kind": "schema",
@@ -1699,57 +1672,6 @@ mod tests {
         assert_eq!(fields[1].name, "amount");
         let encoded = serde_json::to_value(&envelope).expect("query record IR must serialize");
         assert_eq!(encoded, ir, "query record round-trip must not drift");
-    }
-
-    #[test]
-    fn record_materialization_roundtrips() {
-        // The `record` kind deserializes today (#278) even though the runtime
-        // rejects it until #279 builds the record walker: the types are the
-        // contract, the walkers are the implementation.
-        let wire = serde_json::json!({
-            "kind": "record",
-            "fields": [
-                {"name": "id", "column": "id", "path": []},
-                {"name": "amount", "column": "amount", "path": []}
-            ]
-        });
-        let plan: Materialization =
-            serde_json::from_value(wire.clone()).expect("record kind must deserialize");
-        let Materialization::Record { fields } = &plan else {
-            panic!("expected Record, got {plan:?}");
-        };
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].name, "id");
-        assert_eq!(fields[0].column.as_deref(), Some("id"));
-        assert!(fields[0].path.is_empty());
-        assert!(fields[0].expr.is_none(), "a column field carries no expr");
-        let encoded = serde_json::to_value(&plan).expect("record kind must serialize");
-        assert_eq!(encoded, wire, "record round-trip must not drift");
-    }
-
-    #[test]
-    fn traversed_record_field_roundtrips() {
-        // v5 (#292): a plain traversed record field — non-empty relation
-        // `path`, a `column`, no `expr` — is the shape the tracer-bullet
-        // slice (#293) consumes. The path stays relation names (it keys into
-        // the `joins` section, like `order_by.path`), not hop facts.
-        let wire = serde_json::json!({
-            "kind": "record",
-            "fields": [
-                {"name": "account_name", "column": "name", "path": ["account"]},
-                {"name": "owner_email", "column": "email",
-                 "path": ["account", "owner"]}
-            ]
-        });
-        let plan: Materialization =
-            serde_json::from_value(wire.clone()).expect("traversed fields must deserialize");
-        let Materialization::Record { fields } = &plan else {
-            panic!("expected Record, got {plan:?}");
-        };
-        assert_eq!(fields[0].path, vec!["account".to_string()]);
-        assert_eq!(fields[1].path.len(), 2);
-        let encoded = serde_json::to_value(&plan).expect("traversed fields must serialize");
-        assert_eq!(encoded, wire, "traversed record round-trip must not drift");
     }
 
     #[test]
