@@ -48,6 +48,10 @@ For a single model, every emitter must agree on:
 
 1. **Table name** — already handled by `model_name.lower()`.
 2. **Column names**, including foreign-key columns, which the user declares.
+   A relation (`Forward`, `Reverse`, `ManyToMany`) adds no column to a
+   model's table: it reads a declared foreign-key column, or the join table
+   `through=` names, and its own name reaches no table, column, index or
+   constraint name (ADR-0062).
 3. **Column types** — decided by ONE function:
    `ferro_ddl_lowering::resolve_column_storage` (explicit `db_type` token →
    native-enum resolution → the `canonical_from_parts` cascade). The Alembic
@@ -430,18 +434,76 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 Python ORMs. The Rust core must populate model dicts directly via the bridge
 documented in `src/lib.rs` rather than calling `Model(**row)` from Rust.
 
-Hydrated instances must still be **observationally equivalent** to instances
-constructed through `BaseModel.__init__` for Pydantic’s own slot attributes:
-anything in `BaseModel.__slots__` that `__init__` assigns (notably
-`__pydantic_extra__` and `__pydantic_private__`, in addition to
-`__pydantic_fields_set__`) must be initialized on the Rust hydration path as
-well. Leaving a slot unset raises `AttributeError` on access (unlike a normal
-instance attribute defaulting to `None`).
+A fetched lamp reads as the lamp that was built:
 
-The same holds for field values: a `SecretStr` / `SecretBytes` field hydrates
-as that type, never as the plain `str` / `bytes` the column stores. A
-hydrated instance that shows a secret's value where a constructed one shows
-`**********` is an I-2 miss (#760; review I-38 in #786).
+```python
+class Shade(BaseModel):
+    width: int
+    color: str
+
+class Lamp(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    shade: Shade
+
+built = Lamp(id=1, title="desk", shade=Shade(width=3, color="amber"))
+await built.save()
+fetched = await Lamp.get(1)  # in a later session
+type(fetched.shade)          # Shade, not the dict the JSON column decodes to
+list(fetched.model_dump())   # ['id', 'title', 'shade'], as list(built.model_dump())
+```
+
+A complete hydrated instance must be **observationally equivalent** to one
+constructed through `BaseModel.__init__`, in three things:
+
+- **Slots.** Anything in `BaseModel.__slots__` that `__init__` assigns
+  (notably `__pydantic_extra__` and `__pydantic_private__`, in addition to
+  `__pydantic_fields_set__`) must be initialized on the Rust hydration path
+  as well. Leaving a slot unset raises `AttributeError` on access (unlike a
+  normal instance attribute defaulting to `None`).
+- **Field values.** A field hydrates as its declared type. A column whose
+  declared type is not what the decoder returns (an enum, a `SecretStr` /
+  `SecretBytes`, a JSON field such as `Shade`) registers one converter in
+  `_hydration_converters`, and `apply_decoded_fields` runs it on every
+  non-null value. A hydrated `dict` where a constructed instance holds a
+  model, or a secret's value where a constructed one shows `**********`, is
+  an I-2 miss (#737, #760; review I-38 in #786).
+- **Key order.** `__dict__` and `model_dump()` list the fields in
+  `model_fields` declaration order, whatever order the `SELECT` lists its
+  columns in (`FieldConverters::sort_in_declaration_order`). A key order that
+  follows the `SELECT` is an I-2 miss (#754; review in #841).
+
+An instance Ferro hydrates is **complete**, the whole row, or **unloaded**,
+and nothing between (ADR-0063; review I-44 in #910):
+
+```python
+player = await Player.get(1)   # nothing included
+player.team                    # Team(id=1, unloaded): a real Team, no query
+player.team.id                 # 1
+player.team.name               # InstanceNotLoaded: Team(id=1) is not loaded. Read it after
+                               # include(lambda player: player.team) or await player.team.load()
+```
+
+An unloaded instance is what a forward relation nothing loaded reads as.
+`hydrate_unloaded_instance` builds it as every hydrated instance is built
+(`cls.__new__`, the slots, the connection and persisted markers) with only
+its primary key in `__dict__`, plus the `__ferro_unloaded` marker that
+`ferro._unloaded` alone reads. Reading another column, assigning one,
+`save()`, `model_dump()` and `model_dump_json()` raise `InstanceNotLoaded`,
+naming `include()` and `.load()`. `.load()`, and in a session an include or
+any later fetch of its row, fill the same object in place. The equivalence
+above binds it for
+its slots and its key only: a column an unloaded instance does not hold is
+its state, not an I-2 miss. A third state, a stand-in that is not the model,
+an awaitable forward relation, or a hydrator that calls `__init__` to
+complete one is an I-2 miss.
+
+Pinned by `tests/test_hydration.py` (slots, and
+`test_hydrated_instances_list_fields_in_declaration_order`),
+`tests/test_json_field_hydration.py` and `tests/test_unloaded_instance.py`
+(`test_an_unloaded_instance_refuses_every_use_but_its_key_naming_the_fix`,
+`test_a_later_fetch_of_the_row_fills_the_unloaded_instance_in_place`,
+`test_one_module_owns_the_unloaded_marker`).
 
 If you find yourself wanting to call `__init__` from Rust to "make this easier",
 stop and read `.cursorrules` §3.B and the design notes under
@@ -519,6 +581,32 @@ What this means in practice:
   tracked-database refusal of `connect(auto_migrate=True)` and of Alembic
   autogenerate, and the edited-file refusals (`ferro migrate rerecord`,
   `--continue` / `--restart`).
+- **A relation or foreign-key refusal's fix is a list of edits.**
+
+  ```python
+  class Player(Model):
+      id: int | None = Field(default=None, primary_key=True)
+      team_id: int = Field(foreign_key=Team, on_delete="SET NULL")
+      team: Relation[Team] = Forward("team_id")
+  # TypeError: Player.team_id: on_delete="SET NULL" needs a nullable column.
+  # Fix it by hand: (1) on Player, replace team_id with `team_id: int | None =
+  # Field(default=None, foreign_key=Team, on_delete="SET NULL")`; (2) on
+  # Player, replace team with `team: Relation[Team | None] = Forward("team_id")`
+  ```
+
+  A refusal of a relation or foreign-key column declaration, at class
+  definition or when relations resolve, is a `DeclarationRefusal`
+  (`src/ferro/relations/fixes.py`): a `TypeError` that carries its fix as
+  `Edit`s, one tuple per way to fix it. Its message is `render_fix` of those
+  edits, the only place that writes `Write:` or `Fix it by hand:`, and which
+  of the two it writes follows from the edits. A new refusal there computes
+  its `Edit`s from the models and raises `DeclarationRefusal`; a fix line
+  formatted at the raise site is an I-6 miss (ADR-0064). Pinned in
+  `tests/test_declaration_fixes.py`:
+  `test_every_refusal_carries_a_fix_that_works` applies each refusal's edits
+  to the refused source and loads the result, and
+  `test_the_sweep_reaches_every_refusal` fails for a construction site no
+  case reaches.
 
 This rule binds human contributors and AI agents equally, and overrides any
 agent default that biases toward minimal or expedient changes.
@@ -832,6 +920,79 @@ One call is one statement, in the log and in a docs `sql` block. A column
 order that changes between processes or with the row's fetch is an I-16
 violation, the mutation-side twin of the rendered-statement pin in I-1
 (#776; review I-39 in #786).
+
+---
+
+## I-17: A text/bytes storage mismatch is refused, never written or read
+
+A model declares a `SecretBytes` column over a Postgres table whose column
+is still `varchar`:
+
+```python
+class Token(Model):
+    id: Annotated[int, FerroField(primary_key=True)]
+    secret: SecretBytes
+
+await Token(id=1, secret=SecretBytes(b"\xff\x00k")).save()
+# DataError: Token.secret is declared bytea but the live column is varchar;
+# Ferro will not write bytes into a text column (or read text as bytes).
+# Change the column's type with a migration (ferro migrate new) or connect
+# with migrate_updates=True.
+```
+
+Postgres would take the `bytea` bind into the `varchar` column and store its
+hex text, with no error. So on Postgres one function,
+`refuse_storage_mismatch` in `src/operations.rs`, compares each column's
+declared codec with the storage class the table catalog read for it, and
+raises that `DataError` before the statement is sent, in both directions
+(bytes over text, text over bytes):
+
+- a write that sets the column: `save()` as insert or update,
+  `bulk_create()` and a query `update()`;
+- a fetch that selects it: the root model's columns, a projected column
+  (through a relation too) and every included model's columns.
+
+A fetch that does not select the column runs. SQLite stores the bytes as
+written, so nothing is refused there.
+
+A new statement that binds or selects model columns calls
+`refuse_storage_mismatch` with those columns. A second comparison of declared
+and live storage, or a warning in place of the `DataError`, is an I-17
+violation (#785; review I-40 in #786). Pinned by
+`tests/test_storage_class_mismatch.py`.
+
+---
+
+## I-18: A field's database options live on the field, never in its JSON schema
+
+```python
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key=Team)
+    handle: str = Field(unique=True, min_length=2)
+
+Player.model_json_schema()["properties"]["handle"]
+# {"minLength": 2, "title": "Handle", "type": "string"}
+Player.__ferro_fields__["handle"].unique   # True
+```
+
+`Field()` and `FerroField()` each leave one `FerroField` in the field's
+`FieldInfo.metadata`. The metaclass collects them into
+`Model.__ferro_fields__`, and `build_column_specs` reads a field's options
+from there. `Field()` writes none of them into `json_schema_extra`, so
+`model_json_schema()` carries nothing of Ferro's and an option can hold a
+value JSON cannot, such as the class in `foreign_key=Team` (ADR-0061).
+
+A new option is a `Field()` parameter stored on `FerroField` and read from
+`__ferro_fields__`. A `json_schema_extra` key that once declared an option
+(`_SCHEMA_EXTRA_OPTIONS` and the old `ferro_field` dict, in
+`src/ferro/columns.py`) is a `TypeError` at class definition naming the
+`Field()` argument to pass. A `Field()` option written into the JSON schema,
+or read back out of it, is an I-18 violation (#875; review I-45 in #910).
+Pinned in
+`tests/test_field_wrapper.py` by
+`test_field_options_leave_the_json_schema_and_land_in_ferro_fields` and
+`test_every_option_key_in_json_schema_extra_is_refused`.
 
 ---
 
