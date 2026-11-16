@@ -339,7 +339,7 @@ TypeError: Player.team_id: no model named Teem is defined; define it, or import 
 
 Change any `except RuntimeError` around `connect()` that caught the old error.
 
-**`add()` and `remove()` on a many-to-many.** They take saved instances of the related model, and refuse anything else before a statement is sent: an instance not saved yet raises `ValueError`, and an instance of another model raises `TypeError`. `0.27` bound the unsaved instance's `None` and failed inside the database, and read another model's `id` and linked or unlinked the row with that key.
+**`add()` and `remove()` on a many-to-many.** They take saved instances of the related model, and refuse anything else before a statement is sent: an instance not saved yet raises `ValueError`, and an instance of another model raises `TypeError`. In `0.27`, `add()` bound the unsaved instance's `None` and failed inside the database, `remove()` matched no row and did nothing, and either read another model's `id` and linked or unlinked the row with that key.
 
 **A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused, naming the `db_type` to add: when the class is defined for a class target, as here, and at `connect()` for a target named by string:
 
