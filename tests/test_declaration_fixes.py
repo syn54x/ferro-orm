@@ -344,6 +344,40 @@ def _cases(storage: str) -> dict[str, dict]:
         Card=[f"team_id: {key} = {fk('Team')}"],
         Team=['players: Relation = Reverse("team_id")'],
     )
+    # A name no model answers: one spelled like Team is fixed by spelling it
+    # so, one nothing is close to is refused with no fix.
+    for spelled, close, local in (("Teem", "close", True), ("Zzyzx", "far", None)):
+
+        def undefined(a_kind, field, **models):
+            return _case(a_kind if local else "none", field, local=local, **models)
+
+        cases[f"a key column naming a model {close} to Team"] = undefined(
+            "key", "team_id", Player=[f"team_id: {key} = {fk(spelled)}"]
+        )
+        cases[f"a forward naming a model {close} to Team"] = undefined(
+            "forward",
+            "team",
+            Player=[
+                f"team_id: {key} = {fk('Team')}",
+                f'team: Relation["{spelled}"] = Forward("team_id")',
+            ],
+        )
+        cases[f"a reverse naming a model {close} to Team"] = undefined(
+            "reverse",
+            "teams",
+            owner="Tournament",
+            Team=[f"tournament_id: {key} = {fk('Tournament')}"],
+            Tournament=[
+                f'teams: Relation[list["{spelled}"]] = Reverse("tournament_id")'
+            ],
+        )
+        cases[f"a many-to-many naming a model {close} to Team"] = undefined(
+            "many-to-many",
+            "tags",
+            Player=[
+                f'tags: Relation[list["{spelled}"]] = ManyToMany(through="player_teams")'
+            ],
+        )
     # Refusals that can name no fix, and say what to do in words.
     cases["bare forward over a column with no foreign_key"] = _case(
         "none",
@@ -679,7 +713,7 @@ def _source(models: dict, case: dict, storage: str, order: str) -> str:
             f"class {model}({base}):\n" + "".join(f"    {line}\n" for line in body)
         )
     return (
-        "from ferro import Forward, Reverse\n\n"
+        "from ferro import Forward, ManyToMany, Reverse\n\n"
         + "\n".join(classes)
         + "".join(f"\n{line}\n" for line in case["after"])
     )
@@ -1088,3 +1122,17 @@ def test_a_primary_key_key_pointed_at_keeps_its_type_on_the_new_key(tmp_path):
             ("team_id: str = Field(foreign_key=Team, unique=True)",),
         ),
     )
+
+
+def test_a_name_no_model_answers_is_refused_at_its_declaration(tmp_path):
+    refusal = _player(
+        tmp_path,
+        "class Player(Model):\n"
+        "    id: int | None = Field(default=None, primary_key=True)\n"
+        '    team_id: int = Field(foreign_key="Ghost")\n'
+        '    team: Relation["Ghost"] = Forward("team_id")\n',
+    )
+
+    assert isinstance(refusal, TypeError)
+    assert (refusal.model, refusal.field) == ("Player", "team_id")
+    assert "no model named Ghost is defined" in str(refusal)

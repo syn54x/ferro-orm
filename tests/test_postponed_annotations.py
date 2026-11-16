@@ -167,10 +167,9 @@ class Post(Model):
 """,
         future=True,
     )
-    with pytest.raises(
-        RuntimeError, match="Relationship resolution failed: 'Nowhere' not found"
-    ):
+    with pytest.raises(DeclarationRefusal) as refusal:
         await ferro.connect(db_url, auto_migrate=True)
+    assert (refusal.value.model, refusal.value.field) == ("Post", "author_id")
 
 
 @pytest.mark.asyncio
