@@ -15,7 +15,7 @@ description: "What upgrading Ferro asks of your code, release by release, and ho
 
 # Upgrading between versions
 
-This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.26`; the [changelog](changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
+This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.28`; the [changelog](changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
 
 ```python {test=run prelude=upgrade}
 from ferro import engines
@@ -47,12 +47,12 @@ Sections run newest first. From version X, read every section for a release newe
 
 | You are on | Moving to | Read |
 | --- | --- | --- |
-| `0.25.x` | `0.26` | [Upgrading to 0.26](#upgrading-to-026) |
-| `0.24.x` | `0.26` | [Upgrading to 0.26](#upgrading-to-026) and [Upgrading to 0.25](#upgrading-to-025) |
-| `0.15.x` | `0.26` | Every `0.16` to `0.26` section, and the [no-action table](#releases-that-need-no-action) |
-| `0.14.x` | `0.26` | The `0.15` section as well |
-| `0.12.x` or `0.13.x` | `0.26` | The `0.14` section as well |
-| `0.11.x` or earlier | `0.26` | Every section |
+| `0.27.x` | `0.28` | [Upgrading to 0.28](#explicit-foreign-keys) |
+| `0.26.x` | `0.28` | [Upgrading to 0.28](#explicit-foreign-keys) and [Upgrading to 0.27](#upgrading-to-027) |
+| `0.15.x` | `0.28` | Every `0.16` to `0.28` section, and the [no-action table](#releases-that-need-no-action) |
+| `0.14.x` | `0.28` | The `0.15` section as well |
+| `0.12.x` or `0.13.x` | `0.28` | The `0.14` section as well |
+| `0.11.x` or earlier | `0.28` | Every section |
 | `0.11.x` or earlier | `0.13` | [Upgrading to 0.12](#upgrading-to-012) only |
 
 Each section with code to change includes a copy/paste prompt for a coding agent. If you cross more than one boundary, run the prompts **newest first, one at a time**, and run your tests between them.
@@ -69,9 +69,9 @@ The run catches every change a release announced with a `DeprecationWarning`. It
 
 If you are moving from `0.12` or earlier straight past `0.14`, the deprecated APIs are already removed there and fail with `AttributeError` or `RuntimeError`, not a warning, so the run above catches nothing. Run your suite on `0.13` first, or apply the prompts before you upgrade.
 
-## Upgrading to X.Y {#explicit-foreign-keys}
+## Upgrading to 0.28 {#explicit-foreign-keys}
 
-`X.Y` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and the other model needed a `BackRef()` whose name matched its `related_name`. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
+`0.28` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and the other model needed a `BackRef()` whose name matched its `related_name`. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
 
 A correct conversion leaves the schema as it was: the same columns, the same `fk_*` constraints, the same join tables. The [acceptance check](#explicit-foreign-keys-acceptance) at the end proves it.
 
@@ -102,9 +102,9 @@ The `through=` name is the one Ferro derived before, the owning table and the at
 
 ### The converted models
 
-Here are the relations of this section as they were declared before `X.Y`. Each relation line had one valid form, so there is one block:
+Here are the relations of this section as they were declared before `0.28`. Each relation line had one valid form, so there is one block:
 
-```python {test=compile reason="shows the declarations before X.Y, which X.Y refuses"}
+```python {test=compile reason="shows the declarations before 0.28, which 0.28 refuses"}
 class Account(Model):
     notes: Relation[list["Note"]] = BackRef()
 
@@ -128,7 +128,7 @@ class Tag(Model):
     notes: Relation[list[Note]] = ManyToMany(related_name="tags")
 ```
 
-The same models in `X.Y`, each key a column and each relation naming one:
+The same models in `0.28`, each key a column and each relation naming one:
 
 === "Assignment"
 
@@ -316,6 +316,8 @@ The old relation keywords, `back_ref`, `many_to_many`, `related_name`, `through`
 
 Write `Field(primary_key=True)`. A JSON schema no longer carries any Ferro option.
 
+**A relation that names a model nobody defines.** `team_id: int = Field(foreign_key="Teem")`, with no model named `Teem`, is refused at `connect()` with a `TypeError` that names the declaration: `Player.team_id: no model named Teem is defined; define it, or import the module that defines it, before relations resolve`. When one defined model has a close name, the refusal adds the corrected line to write. `0.27` raised `RuntimeError: Relationship resolution failed: 'Teem' not found`, so change any `except RuntimeError` around `connect()` that caught it.
+
 **A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused, naming the `db_type` to add: when the class is defined for a class target, as here, and at `connect()` for a target named by string:
 
 === "Assignment"
@@ -339,6 +341,15 @@ TypeError: Entry.ledger_id: Ledger.id is stored as bigint and this column as int
 
 Adding `db_type="bigint"` widens the column, the one schema change a conversion makes.
 
+### Changes outside relations {#changes-outside-relations}
+
+Four more changes in `0.28` reach code that runs today. None is about a foreign key:
+
+- **Bytes over a text column, on Postgres.** A `bytes` or `SecretBytes` field whose live column is `varchar`, or a `str` field whose live column is `bytea`, is refused. `0.27` stored the value as its hex text (`\xff006b` for `b"\xff\x00k"`). Now `save()`, `bulk_create()`, `update()` and every fetch that selects the field, `Model.all()` included, raise a `DataError` that names the field and the fix, before any statement is sent. Change the column to the type the model declares with a migration (`ferro migrate new` writes it) or with `connect(migrate_updates=True)`; the next operation on the same connection then succeeds. SQLite stores the bytes as written, so it never refuses.
+- **A JSON field loads as its declared type.** A field stored as JSON whose annotation is more than plain `dict` and `list` data, such as a nested Pydantic model, a `set`, a `tuple` or a `list[datetime]`, is fetched as that type. `0.27` handed back what the JSON decoder made: a `dict` for a nested model, a `list` for a `set`, a `str` for a `datetime`. Code that read `product.dimensions["width"]` on a fetched record now reads `product.dimensions.width`, as it always did on a record you constructed. A stored document the type rejects raises on fetch, naming the field.
+- **A fetched record lists its fields in declaration order.** `model_dump()` and `model_dump_json()` give a fetched record's keys in the order the model declares them, the order a constructed record has. `0.27` could give them in the order of the row. This matters only to text you compare.
+- **`Model.all()` sends the statement a query sends.** Its `SELECT` now ends in `WHERE TRUE`, as `Model.where(...)` with no filter does. This matters only to a test that matches logged SQL.
+
 ### The acceptance check {#explicit-foreign-keys-acceptance}
 
 A converted codebase declares the schema it had. Check it the way your project migrates:
@@ -351,16 +362,16 @@ A converted codebase declares the schema it had. Check it the way your project m
     assert report.statements == ()
     ```
 
-A key column that gained a `db_type` is the one change that plans a statement, its widening; review it and record it as a migration. Anything else in the plan, such as a dropped `fk_*` constraint, is a declaration the conversion missed.
+Two changes plan a statement, and you review and record each as a migration. One is the widening of a key column that gained a `db_type`. The other is a many-to-many join column whose key is stored as anything but a plain `int`, `str`, `UUID`, `float`, `bool` or `bytes`: a join column now takes its key's exact storage, so a key declared `db_type="varchar(36)"` moves the join column `0.27` created as `varchar` to `varchar(36)`. Auto-migrate alters it on Postgres; on SQLite it leaves the column and, where the type family differs, warns and points at `ferro migrate new`. Anything else in the plan, such as a dropped `fk_*` constraint, is a declaration the conversion missed.
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
     <!-- shows: a prompt to paste into a coding agent -->
     ```text
-    You are helping upgrade a Python codebase to Ferro ORM X.Y.
+    You are helping upgrade a Python codebase to Ferro ORM 0.28.
     Reference: https://ferro-orm.x54.sh/upgrading/#explicit-foreign-keys
 
-    X.Y makes a foreign key a column the model declares. A relation is an
+    0.28 makes a foreign key a column the model declares. A relation is an
     optional typed view that names that column. A correct conversion changes
     no schema: same columns, same fk_* constraints, same join tables.
 
@@ -454,18 +465,47 @@ A key column that gained a `db_type` is the one change that plans a statement, i
        - A key column whose storage differs from its target key's (an int
          column beside a bigint key) is refused, printing the line to write
          with its db_type. Add that db_type.
+       - A relation or key column that names a model nobody defines raises
+         TypeError at connect(), naming the declaration, where it raised
+         RuntimeError ("Relationship resolution failed"). Fix the name or
+         import the module that defines the model, and update any
+         `except RuntimeError` that caught it.
 
-    3. Report every key column you gave a db_type and every through= name you
+    3. Check the changes outside relations:
+       - Postgres only: a bytes or SecretBytes field whose live column is
+         varchar, or a str field whose live column is bytea, raises DataError
+         on save(), bulk_create(), update() and every fetch that selects it,
+         Model.all() included. Do not catch it: change the column with a
+         migration (`ferro migrate new`) or connect(migrate_updates=True).
+       - A JSON field annotated with a nested Pydantic model, set, tuple,
+         datetime, UUID, Decimal or enum is fetched as that type, not as the
+         dict, list or str the JSON decoder made. Change
+         `record.field["key"]` on a fetched record to `record.field.key`,
+         and drop any conversion the code did by hand after a fetch.
+       - model_dump() of a fetched record lists keys in field declaration
+         order, and Model.all() logs `SELECT ... WHERE TRUE`. Update tests
+         that compare that text.
+
+    4. Report every key column you gave a db_type and every through= name you
        wrote, as file:line.
 
-    4. Run the acceptance check last. With migrations: `ferro migrate check`
+    5. Run the acceptance check last. With migrations: `ferro migrate check`
        prints `ok: models match <head>` and `ferro migrate drift` prints
        `no drift against <head>`. On auto-migrate: `await ferro.migrate()`
-       returns a report whose statements are (). The only statement a correct
-       conversion plans is the widening of a key column that gained a
-       db_type. Anything else means a declaration is wrong: fix it, do not
-       record it.
+       returns a report whose statements are (). A correct conversion plans
+       two kinds of statement only: the widening of a key column that gained
+       a db_type, and the retyping of a many-to-many join column to its key's
+       exact storage (varchar to varchar(36), say). Anything else means a
+       declaration is wrong: fix it, do not record it.
     ```
+
+## Upgrading to 0.27
+
+`0.27` adds [generated columns](guide/models-and-fields.md#generated-columns), which ask nothing of you. Three other things can reach a project that runs today:
+
+- **PostgreSQL 17 or newer.** `connect()` refuses an older server with an `InterfaceError` that names its version. Upgrade the server before you upgrade Ferro. SQLite has no version floor.
+- **Schema snapshots.** Every snapshot `0.27` writes uses a newer snapshot format, as in [`0.25`](#upgrading-to-025). A `0.26` checkout refuses the first migration that carries one, so finish rolling out `0.27` before anyone runs `ferro migrate new`.
+- **Logged SQL on SQLite.** `save()` now ends an `INSERT` that has a value to read back in `RETURNING`. This matters only to a test that matches logged SQL.
 
 ## Upgrading to 0.26
 
@@ -475,7 +515,7 @@ Five changes in `0.26` can reach code that runs today. Two show up in a type che
 - The undocumented module `ferro.migrations.chunked` is now the private `ferro.migrations._chunk_loop`. `from ferro.migrations import chunked` still imports the [`chunked`](api/migrations.md#ferro.migrations.chunked) decorator, unchanged.
 - The `RuntimeError` an operation raises with no database route ends differently. It said "Implicit default-connection routing was removed in v0.13 (deprecated since v0.12); see the sessions migration guide." and now says "Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide." Code that matches the message on its old ending needs the new one; a match on its start, `No database route`, still holds.
 - `save()` of a new or fetched record, `save(only=...)`, `save(exclude=...)` and `bulk_create()` list their columns in the model's field order. Before, a `bytes` column came last, a fetched record's `save()` followed the order its `SELECT` returned, and `save(only=...)` or `save(exclude=...)` could change order from one run to the next. The order changes no value written; the statement text changes, so a test or a log check that compares captured SQL (the [statement log](guide/connections.md#logging) or `.sql()`) needs its expected text updated. `update()` is unchanged: it lists the columns in the order the call passes them, a `bytes` column included.
-- A `SecretStr` or `SecretBytes` field now stores its real value, and a fetched record loads it back as a `SecretStr` or `SecretBytes`. `0.25` wrote the mask `**********` in its place on `save()`, `bulk_create()` and `update()`, and loaded the `str` `**********` back. A row `0.25` saved holds the mask, and the real value cannot be recovered from it: write the value again from its source. A `SecretBytes` column is now binary (`BYTEA` on Postgres, `BLOB` on SQLite); `0.25` created it as `varchar`. Change such a column to the binary type with a migration (`ferro migrate new` writes it) before `0.26` uses it: on Postgres, `save()`, `bulk_create()`, `update()` and every fetch that selects a `SecretBytes` (or `bytes`) field whose live column is `varchar` raise a `DataError` that names the field and the fix, instead of storing the value as its hex text (`\xff006b` for `b"\xff\x00k"`). The same refusal covers a `str` field over a `bytea` column. `connect(migrate_updates=True)` changes the column; the next operation on the same connection then succeeds. SQLite stores the bytes as written, so it never refuses.
+- A `SecretStr` or `SecretBytes` field now stores its real value, and a fetched record loads it back as a `SecretStr` or `SecretBytes`. `0.25` wrote the mask `**********` in its place on `save()`, `bulk_create()` and `update()`, and loaded the `str` `**********` back. A row `0.25` saved holds the mask, and the real value cannot be recovered from it: write the value again from its source. A `SecretBytes` column is now binary (`BYTEA` on Postgres, `BLOB` on SQLite); `0.25` created it as `varchar`. Change such a column to the binary type with a migration (`ferro migrate new` writes it) before `0.26` uses it: on Postgres, `0.26` and `0.27` store a `SecretBytes` (or `bytes`) value in a `varchar` column as its hex text (`\xff006b` for `b"\xff\x00k"`), and [`0.28` refuses the operation](#changes-outside-relations) instead. `connect(migrate_updates=True)` changes the column too. SQLite stores the bytes as written.
 
 ## Upgrading to 0.25
 
@@ -677,6 +717,7 @@ These releases from `0.13` onward change nothing you have to do. Releases with a
 
 | Release | What it adds | Action |
 | --- | --- | --- |
+| `0.26.1` | The `ferro.sql` log masks a secret in every statement one operation sends | None |
 | `0.21.2` | Alembic revisions create enum types a revision only adds a column of | None |
 | `0.21.1` | Alembic downgrades drop the enum types their `create_table` made | None |
 | `0.20.0` | `order_by(..., nulls=)` | None; the default moved in `0.21` |
