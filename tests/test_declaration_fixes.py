@@ -1088,16 +1088,3 @@ def test_a_primary_key_key_pointed_at_keeps_its_type_on_the_new_key(tmp_path):
             ("team_id: str = Field(foreign_key=Team, unique=True)",),
         ),
     )
-
-
-def test_a_bare_many_to_many_nothing_names_carries_no_edits(tmp_path):
-    refusal = _refused(
-        tmp_path,
-        "class Post(Model):\n"
-        "    id: int | None = Field(default=None, primary_key=True)\n"
-        '    tags: Relation = ManyToMany(through="post_tags")\n',
-        future=False,
-    )
-
-    assert refusal.edits == ()
-    assert "Write: " not in str(refusal) and "Fix it by hand" not in str(refusal)

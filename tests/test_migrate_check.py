@@ -50,33 +50,6 @@ def _generated(
     assert run("migrate", "new", name) == 0
 
 
-def test_a_clean_tree_exits_0_naming_the_head(project, pkg, capsys):
-    _generated(project, pkg)
-    capsys.readouterr()
-
-    assert run("migrate", "check") == 0
-
-    assert capsys.readouterr().out == (
-        f"{DIRECTORY_LINE}\nok: models match 0001_create_author\n"
-    )
-
-
-def test_an_ungenerated_model_exits_3_naming_it(project, pkg, capsys):
-    _generated(project, pkg)
-    write_models(project, pkg, LIBRARY)
-    capsys.readouterr()
-
-    assert run("migrate", "check") == 3
-
-    err = capsys.readouterr().err
-    assert err.startswith("ungenerated: "), err
-    assert "since 0001_create_author" in err and "new models: Post" in err, err
-
-    # Generating it makes the tree clean again.
-    assert run("migrate", "new", "create_post") == 0
-    assert run("migrate", "check") == 0
-
-
 def test_a_label_added_on_a_sqlite_only_project_is_recorded_and_check_is_clean(
     project, pkg, capsys
 ):

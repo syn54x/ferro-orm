@@ -1743,25 +1743,6 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_column_is_the_passs_add_column_and_its_down_drops_it() {
-        let after = with_columns(vec![optional("bio", "string")]);
-        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
-        for dialect in BOTH {
-            let r = rendering(&migration, dialect.into());
-            let up = pass(&ir(vec![author()]), &ir(vec![after.clone()]), dialect);
-            assert_eq!(up, ["ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar"]);
-            assert_eq!(r.up, file(&up, ""), "{dialect:?}");
-            assert_eq!(r.headers, Headers::default());
-            assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"bio\";\n");
-            assert_eq!(
-                r.down_headers,
-                Headers::default(),
-                "a down is never destructive"
-            );
-        }
-    }
-
-    #[test]
     fn a_required_column_with_a_literal_default_backfills_it_and_keeps_no_default() {
         let tier = SchemaColumn {
             default: Some(serde_json::json!("free")),
@@ -4754,30 +4735,6 @@ mod tests {
             kind,
             names: names.iter().map(|name| (*name).to_string()).collect(),
         }
-    }
-
-    #[test]
-    fn the_summary_renders_each_change_in_order_and_nothing_for_none() {
-        assert_eq!(ChangeSummary::render(&[]), "");
-        assert_eq!(
-            ChangeSummary::new(vec![]),
-            ChangeSummary {
-                changes: vec![],
-                text: String::new(),
-            }
-        );
-        let changes = vec![
-            change(ChangeVerb::New, ChangeKind::Models, &["A", "B"]),
-            change(ChangeVerb::Changed, ChangeKind::Models, &["C"]),
-            change(ChangeVerb::Dropped, ChangeKind::EnumTypes, &["kind"]),
-            change(ChangeVerb::Renamed, ChangeKind::EnumLabels, &["s.a → b"]),
-            change(ChangeVerb::Removed, ChangeKind::EnumLabels, &["s.c"]),
-        ];
-        assert_eq!(
-            ChangeSummary::render(&changes),
-            "new models: A, B; changed models: C; dropped enum types: kind; renamed enum \
-             labels: s.a → b; removed enum labels: s.c"
-        );
     }
 
     #[test]

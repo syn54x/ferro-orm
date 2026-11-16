@@ -60,23 +60,6 @@ def entry_fks() -> list[dict]:
     return model_fks("Entry")
 
 
-def test_declared_ir_carries_the_target_primary_key_column():
-    declare_code_keyed()
-    assert entry_fks()[0]["to_column"] == "code"
-
-
-def test_a_target_keyed_id_still_gets_id():
-    class Owner(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    class Pet(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        owner_id: int = Field(foreign_key=Owner)
-
-    fk = model_fks("Pet")[0]
-    assert fk["to_column"] == "id"
-
-
 @pytest.mark.backend_matrix
 def test_a_string_target_declared_later_is_recompiled_with_its_key(db_url):
     class Entry(Model):

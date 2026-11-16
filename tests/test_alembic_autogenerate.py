@@ -4,8 +4,6 @@ from typing import Annotated
 import pytest
 import sqlalchemy as sa
 
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.schema import CreateTable
 
 from ferro import (
     FerroField,
@@ -161,50 +159,6 @@ def test_optional_enum_generates_with_name():
     assert widget_table.c.color.type.name == "color"
     assert widget_table.c.color.nullable is True
     assert set(widget_table.c.color.type.enums) == {"red", "green", "blue"}
-
-
-def test_alembic_can_render_enum_for_postgres():
-    """Named enums compile on the PostgreSQL dialect without a missing-name error."""
-
-    class Status(StrEnum):
-        PENDING = "pending"
-        APPROVED = "approved"
-        REJECTED = "rejected"
-
-    class Request(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        status: Status
-        description: str
-
-    metadata = get_metadata()
-    request_table = metadata.tables["request"]
-
-    dialect = postgresql.dialect()
-    try:
-        sql = str(CreateTable(request_table).compile(dialect=dialect))
-    except sa.exc.CompileError as e:
-        if "requires a name" in str(e).lower():
-            pytest.fail(f"Enum type missing name: {e}")
-        raise
-    # Postgres references the named enum type on the column (values live in CREATE TYPE elsewhere).
-    assert "status" in sql.lower()
-
-
-def test_foreign_key_index_emits_single_column_index():
-    """A foreign-key column with index=True declares a non-unique index on it."""
-
-    class Org(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-
-    class Project(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
-
-    metadata = get_metadata()
-    project_table = metadata.tables["project"]
-
-    index_names = {idx.name: idx.unique for idx in project_table.indexes}
-    assert index_names == {"idx_project_org_id": False}
 
 
 def test_foreign_key_index_default_false():

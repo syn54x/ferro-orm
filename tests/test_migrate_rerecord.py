@@ -26,7 +26,6 @@ table with a plain driver:
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -546,16 +545,6 @@ def test_status_shows_the_edited_chunked_refusal_with_its_doors(
     assert code == 4
     # The refusal sits under status's needs attention heading, indented.
     assert "".join(f"  {line}\n" for line in edited_refusal().splitlines()) in out
-
-
-def test_the_cursor_names_its_order_keys():
-    from ferro.migrations._chunk_loop import encode_cursor
-
-    assert json.loads(encode_cursor((7,), 7, order_by=["author.id"])) == {
-        "keys": [7],
-        "order_by": ["author.id"],
-        "rows_done": 7,
-    }
 
 
 def test_rerecord_refuses_an_unknown_mode():

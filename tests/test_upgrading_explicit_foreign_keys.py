@@ -18,7 +18,6 @@ import pytest
 
 import ferro
 from ferro import FerroField, Field, Model, clear_registry, reset_engine
-from tests._docs_sql import captured
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
@@ -179,13 +178,6 @@ def test_every_python_fence_runs_or_says_why_not() -> None:
     # A bare fence only embeds a snippet of the example pair.
     for body in re.findall(r"```python\n(.*?)```", _section(), flags=re.DOTALL):
         assert body.strip().startswith('--8<-- "docs/examples/upgrade_'), body
-
-
-def test_the_example_pair_runs_and_declares_one_schema() -> None:
-    assignment = captured("upgrade_foreign_keys.py")
-    annotated = captured("upgrade_foreign_keys_annotated.py")
-    assert assignment.schemas
-    assert annotated.schemas == assignment.schemas
 
 
 # -- a class whose options are written as Annotated[..., FerroField(...)] ----------

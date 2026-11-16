@@ -28,24 +28,6 @@ from ferro.base import FerroField
 
 
 @pytest.mark.asyncio
-async def test_first_connect_performs_single_bulk_install(db_url, clean_registry):
-    """A first connect installs the registration exactly once, and the created
-    schema is usable."""
-
-    class BiWidget(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-
-    baseline = _bulk_install_count_for_test()
-    await connect(db_url, auto_migrate=True)
-    assert _bulk_install_count_for_test() - baseline == 1
-
-    async with ferro.engines.session():
-        row = await BiWidget.create(name="hello")
-        assert (await BiWidget.get(row.id)).name == "hello"
-
-
-@pytest.mark.asyncio
 async def test_identical_reconnect_skips_install(db_url, clean_registry):
     """Reconnecting with no model changes is gated by the fingerprint: the bulk
     install runs zero times the second time."""

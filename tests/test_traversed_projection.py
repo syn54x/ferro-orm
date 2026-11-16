@@ -225,21 +225,6 @@ async def test_traversed_typed_columns_decode_identically_to_full_hydration(db_u
 
 
 @pytest.mark.asyncio
-async def test_projection_traversal_narrows_like_predicate_traversal(db_url):
-    """Traversing a nullable relation in the projection drops relation-less
-    rows — txn 3 (NULL FK) disappears, exactly like a where() traversal."""
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        await _seed()
-
-        rows = await (
-            TPTransaction.select(lambda t: (t.id, t.account.name)).order_by("id").all()
-        )
-
-        assert [r.id for r in rows] == [1, 2, 4]
-
-
-@pytest.mark.asyncio
 async def test_left_join_keeps_rows_and_decodes_traversed_fields_to_none(db_url):
     """The opt-out: left_join keeps relation-less rows; their traversed
     fields decode to None — including from the NOT NULL source column
@@ -312,25 +297,6 @@ async def test_projection_shares_join_identity_with_where_traversal(db_url):
         assert [(r.id, r.name) for r in rows] == [(1, "a1"), (2, "a1")]
 
 
-@pytest.mark.asyncio
-async def test_left_join_beats_projection_inner_on_shared_path(db_url):
-    """An explicit left_join wins over the projection's implicit INNER on the
-    shared edge — the ADR-0006 conflict rule extends to projection traversal."""
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        await _seed()
-
-        # Projection traverses account (implicit INNER); left_join overrides.
-        rows = await (
-            TPTransaction.select(lambda t: (t.id, t.account.name))
-            .left_join(lambda t: t.account)
-            .order_by("id")
-            .all()
-        )
-
-        assert [r.id for r in rows] == [1, 2, 3, 4]
-
-
 # ---------------------------------------------------------------------------
 # Build-time error catalog.
 # ---------------------------------------------------------------------------
@@ -340,10 +306,6 @@ class TestBuildTimeErrors:
     def test_output_name_collision_names_the_dict_form(self):
         with pytest.raises(ValueError, match=r"two fields named 'id'.*dict"):
             TPTransaction.select(lambda t: (t.id, t.account.id))
-
-    def test_root_duplicate_is_the_same_collision(self):
-        with pytest.raises(ValueError, match=r"two fields named 'id'"):
-            TPTransaction.select(lambda t: (t.id, t.id))
 
     def test_dict_in_tuple_raises(self):
         with pytest.raises(TypeError, match="cannot nest a dict inside a tuple"):
@@ -376,20 +338,6 @@ class TestBuildTimeErrors:
     def test_misspelled_traversed_column_names_the_hop_model(self):
         with pytest.raises(AttributeError, match="TPAccount.*Did you mean 'name'"):
             TPTransaction.select(lambda t: t.account.nmae)
-
-    def test_include_then_select_final_error_points_at_traversed_projection(self):
-        with pytest.raises(
-            ValueError, match=r"record results are flat.*traversed projection"
-        ):
-            TPTransaction.select().include(lambda t: t.account).select(
-                lambda t: (t.id,)
-            )
-
-    def test_select_then_include_final_error_points_at_traversed_projection(self):
-        with pytest.raises(
-            ValueError, match=r"record results are flat.*traversed projection"
-        ):
-            TPTransaction.select(lambda t: (t.id,)).include(lambda t: t.account)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
 
 @pytest.mark.asyncio

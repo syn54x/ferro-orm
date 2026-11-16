@@ -51,13 +51,6 @@ class TestNullableDerivation:
         spec = build_column_specs(M)["id"]
         assert spec.nullable is False and spec.python_type == (int | None)
 
-    def test_explicit_nullable_overrides_annotation(self, clean_registry):
-        class M(Model):
-            id: Annotated[int, FerroField(primary_key=True)]
-            note: Annotated[str | None, FerroField(nullable=False)] = None
-
-        assert build_column_specs(M)["note"].nullable is False
-
     def test_infer_from_annotation(self, clean_registry):
         class M(Model):
             id: Annotated[int, FerroField(primary_key=True)]

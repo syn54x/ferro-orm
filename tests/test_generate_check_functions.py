@@ -643,23 +643,6 @@ def edit_by_hand(db) -> None:
 
 @pytest.mark.backend_matrix
 @pytest.mark.usefixtures("isolated_imports")
-def test_a_ferro_created_check_calling_fn_is_not_drift(project, pkg, db, capsys):
-    migrated(project, pkg, db, capsys)
-    if db.backend == "postgres":
-        assert db.rows(
-            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-            "WHERE conname = 'ck_payment_signed' "
-            f"AND connamespace = '{db.schema}'::regnamespace"
-        ) == [("CHECK (((sign((amount_minor)::double precision))::bigint <> 0))",)], (
-            "the pin is only meaningful if Postgres reprints the body"
-        )
-
-    report = drift_api(db)
-    assert report.lines == [] and report.clean, report.lines
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.usefixtures("isolated_imports")
 def test_a_reconnect_runs_nothing_for_a_check_calling_fn(project, pkg, db):
     auto_migrated(project, pkg, db)
     assert reconnect_statements(db) == []

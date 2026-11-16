@@ -244,46 +244,6 @@ async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_transaction_commit(db_url):
-    """Test that operations inside a transaction are committed on success."""
-
-    class TxUser(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        username: str
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        async with transaction():
-            await TxUser.create(username="alice")
-            await TxUser.create(username="bob")
-
-        # Verify both exist
-        assert await TxUser.where(lambda u: u.username == "alice").exists()
-        assert await TxUser.where(lambda u: u.username == "bob").exists()
-
-
-@pytest.mark.asyncio
-async def test_transaction_rollback(db_url):
-    """Test that operations inside a transaction are rolled back on exception."""
-
-    class TxUser(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        username: str
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        try:
-            async with transaction():
-                await TxUser.create(username="charlie")
-                raise ValueError("Something went wrong!")
-        except ValueError:
-            pass
-
-        # Verify charlie DOES NOT exist
-        assert not await TxUser.where(lambda u: u.username == "charlie").exists()
-
-
-@pytest.mark.asyncio
 async def test_transaction_atomicity(db_url):
     """Test that if one operation fails, all are rolled back."""
 

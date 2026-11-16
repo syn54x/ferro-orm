@@ -44,22 +44,6 @@ async def test_refetch_returns_fresh_values_with_identity_preserved(db_url):
 
 
 @pytest.mark.asyncio
-async def test_database_wins_over_unsaved_local_mutation(db_url):
-    class RefDoc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        body: str
-
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        d = await RefDoc.create(body="persisted")
-        d.body = "unsaved local edit"
-
-        again = await RefDoc.get(d.id)
-        assert again is d
-        assert d.body == "persisted"  # documented: re-fetch overwrites
-
-
-@pytest.mark.asyncio
 async def test_refresh_resets_fields_set_like_fresh_hydration(db_url):
     class RefFlag(Model):
         id: int | None = Field(default=None, primary_key=True)

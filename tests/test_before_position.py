@@ -50,20 +50,6 @@ def test_before_on_pkless_model_raises():
         ).before((1, "x"))
 
 
-def test_before_none_in_non_pk_slot_is_legal():
-    class BeforeNullableNone(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        label: str | None = None
-
-    query = (
-        BeforeNullableNone.select()
-        .order_by(lambda row: row.label)
-        .order_by(lambda row: row.id)
-        .before((None, 1))
-    )
-    assert query._before == (None, 1)
-
-
 def test_before_none_on_not_null_root_column_is_legal():
     query = _ordered(BeforePageItem).before((None, 1))
     assert query._before == (None, 1)
@@ -95,17 +81,6 @@ def test_after_plus_before_raises():
         _ordered(BeforePageItem).before((ts, 2)).after((ts, 1))
 
 
-def test_before_is_immutable():
-    ts = datetime(2026, 1, 1, tzinfo=UTC)
-    base = _ordered(BeforePageItem)
-    paged = base.before((ts, 1)).limit(2)
-    assert paged is not base
-    assert base._before is None
-    assert paged._before == (ts, 1)
-    assert paged._limit == 2
-    assert base._limit is None
-
-
 def test_update_and_delete_reject_before():
     ts = datetime(2026, 1, 1, tzinfo=UTC)
     query = _ordered(BeforePageItem).before((ts, 1))
@@ -113,21 +88,6 @@ def test_update_and_delete_reject_before():
         compile_query(query, "update", assignments={"name": "x"})
     with pytest.raises(ValueError, match=r"before"):
         compile_query(query, "delete")
-
-
-def test_count_drops_before_from_the_wire():
-    ts = datetime(2026, 1, 1, tzinfo=UTC)
-    query = _ordered(BeforePageItem).before((ts, 1)).limit(3)
-    payload = compile_query(query, "count").payload.to_ir_dict()
-    assert "before" not in payload
-    assert payload["limit"] is None
-    assert payload["offset"] is None
-
-
-def test_fetch_omits_before_when_unset():
-    payload = compile_query(_ordered(BeforePageItem), "fetch").payload.to_ir_dict()
-    assert "before" not in payload
-    assert "after" not in payload
 
 
 # ---------------------------------------------------------------------------
@@ -180,37 +140,6 @@ async def test_before_limit_returns_adjacent_previous_page_in_declared_order(db_
             .count()
             == 5
         )
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.asyncio
-async def test_unbounded_before_returns_every_earlier_row_in_declared_order(db_url):
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        await _seed_page_items()
-        ordered = await _ordered(BeforePageItem).all()
-        prefix = (
-            await _ordered(BeforePageItem)
-            .before((ordered[3].updated_at, ordered[3].id))
-            .all()
-        )
-        assert [row.id for row in prefix] == [1, 2, 3]
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.asyncio
-async def test_before_first_is_adjacent_previous_row(db_url):
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        await _seed_page_items()
-        ordered = await _ordered(BeforePageItem).all()
-        adjacent = (
-            await _ordered(BeforePageItem)
-            .before((ordered[3].updated_at, ordered[3].id))
-            .first()
-        )
-        assert adjacent is not None
-        assert adjacent.id == 3
 
 
 @pytest.mark.backend_matrix

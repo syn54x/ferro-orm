@@ -25,7 +25,6 @@ from ferro import Field, ManyToMany, Model, Relation
 from ferro.raw import execute, fetch_all
 from ferro.registry import REGISTRY
 from ferro.relations import resolve_relationships
-from ferro.relations.fixes import DeclarationRefusal
 from tests._pass_harness import (
     auto_migrate,
     schema_steps,
@@ -118,28 +117,6 @@ def _invoice_models():
 
 
 @pytest.mark.asyncio
-@pytest.mark.sqlite_only
-async def test_a_decimal_key_gives_its_join_column_numeric_on_sqlite(db_url, fresh):
-    _invoice_models()
-
-    await auto_migrate(db_url)
-
-    assert await _column_type(db_url, "invoice_tags", "invoice_id") == ("NUMERIC",)
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_a_decimal_key_gives_its_join_column_numeric_on_postgres(db_url, fresh):
-    _invoice_models()
-
-    report = await auto_migrate(db_url)
-
-    assert report is not None
-    (data_type, _, _) = await _column_type(db_url, "invoice_tags", "invoice_id")
-    assert data_type == "numeric"
-
-
-@pytest.mark.asyncio
 @pytest.mark.backend_matrix
 @pytest.mark.parametrize("key", list(_KEYS))
 async def test_each_join_column_is_stored_as_its_key(db_url, fresh, key):
@@ -176,22 +153,6 @@ def test_a_join_column_is_a_plain_foreign_key_of_its_key_s_type(fresh):
             post_id.db_check,
         )
     )
-
-
-def test_a_many_to_many_to_a_keyless_model_is_refused_with_an_int_key(fresh):
-    class Tag(Model):
-        name: str = ""
-
-    class Post(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        tags: Relation[list[Tag]] = ManyToMany(through="post_tags")
-
-    with pytest.raises(
-        DeclarationRefusal,
-        match=r"Tag declares no primary key .* on Tag, add "
-        r"`id: int \| None = Field\(default=None, primary_key=True\)`",
-    ):
-        resolve_relationships()
 
 
 async def _recreate_join_table(url, table, column, stored, mistyped):

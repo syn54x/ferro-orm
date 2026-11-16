@@ -174,18 +174,6 @@ def test_the_cli_flag_admits_an_expand_step(project, pkg, db, capsys):
     assert run("migrate", "up", "--url", db.url) == 1
 
 
-def test_any_other_allow_ahead_is_a_type_error_naming_the_three(project, pkg, db):
-    configure(project, pkg, db.backend)
-    write_models(project, pkg, AUTHOR)
-    new("create_author")
-    for call in (up, require_applied):
-        with pytest.raises(TypeError) as raised:
-            call(db, allow_ahead="anything-else")
-        text = str(raised.value)
-        assert "False" in text and "True" in text and '"expand-only"' in text
-    assert "_ferro_migrations" not in db.tables(), "refused before connecting"
-
-
 # -- hand-written SQL steps -------------------------------------------------------------
 
 

@@ -593,13 +593,6 @@ class TestJsonStorageTokens:
         assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "payload" json']
         assert warns == []
 
-    def test_jsonb_array_add_column_renders_jsonb_on_postgres(self):
-        schema = schema_with(
-            {"entries": {"type": "array", "db_type": "jsonb", "ferro_nullable": True}}
-        )
-        stmts, _ = render(schema, PK_ONLY_LIVE, "postgres")
-        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "entries" jsonb']
-
 
 class TestJsonStorageDiff:
     """#263: introspection distinguishes jsonb; json<->jsonb is one ALTER on

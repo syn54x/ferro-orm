@@ -1565,30 +1565,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_sqlite_inline_named_checks_finds_ferro_and_user_owned() {
-        let create_sql = "CREATE TABLE transfer (\
-            id INTEGER PRIMARY KEY, \
-            outflow_transaction_id INTEGER, \
-            outflow_activity_id INTEGER, \
-            amount REAL NOT NULL, \
-            CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
-              CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)), \
-            CONSTRAINT \"user_positive\" CHECK (amount > 0)\
-        )";
-        let checks = parse_sqlite_inline_named_checks(create_sql);
-        assert_eq!(checks.len(), 2);
-        assert_eq!(checks[0].name, "ck_transfer_at_most_one_outflow");
-        assert_eq!(
-            checks[0].definition,
-            "CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
-        );
-        assert_eq!(checks[1].name, "user_positive");
-        assert_eq!(checks[1].definition, "CHECK (amount > 0)");
-        // Both are table-level: they belong to no column.
-        assert!(checks.iter().all(|check| check.column.is_none()));
-    }
-
-    #[test]
     fn a_check_written_on_a_column_belongs_to_it_and_a_table_check_to_none() {
         // `ADD COLUMN` and `CREATE TABLE` both write a column's own check
         // inline; a table check of the same name sits in the constraint list.

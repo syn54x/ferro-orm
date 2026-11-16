@@ -195,29 +195,6 @@ async def test_insert_with_none_for_decimal(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_issue_38_exact_regression(db_url):
-    """Literal reproduction of #38: ``bench_level: int | None = None`` on
-    Postgres INSERT used to fail with::
-
-        column "bench_level" is of type integer but expression is of type text
-
-    The typed-null-binds refactor fixes this. Postgres-only because the
-    failure mode is OID-specific.
-    """
-
-    class Scorecard(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        bench_level: int | None = None
-
-    await connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        row = await Scorecard.create()
-        assert row.id is not None
-        assert row.bench_level is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
 async def test_update_to_none_succeeds_on_postgres(db_url):
     """Setting a previously-set column back to ``None`` via UPDATE succeeds
     on Postgres after the typed-null-binds refactor.

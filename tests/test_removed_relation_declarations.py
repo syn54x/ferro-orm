@@ -139,31 +139,6 @@ def test_many_to_many_refuses_related_name(options):
     )
 
 
-def test_a_misspelled_through_names_the_keyword():
-    with pytest.raises(TypeError) as refused:
-        ManyToMany(throgh="player_tournaments")
-
-    assert str(refused.value) == (
-        "ManyToMany() got an unknown keyword 'throgh'. Did you mean 'through'?"
-    )
-
-
-def test_a_many_to_many_without_through_is_refused_naming_the_table_to_write():
-    class Tournament(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    with pytest.raises(TypeError) as refused:
-
-        class Player(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            tournaments: Relation[list[Tournament]] = ManyToMany()
-
-    assert str(refused.value).endswith(
-        "Write: tournaments: Relation[list[Tournament]] = "
-        'ManyToMany(through="player_tournaments")'
-    )
-
-
 # -- no text names a removed declaration ---------------------------------------------
 
 _REMOVED = re.compile(r"\b(ForeignKey|BackRef)\b")

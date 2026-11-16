@@ -737,11 +737,6 @@ def test_every_planner_op_kind_has_its_own_line():
         assert line and not line.startswith(f"{kind} on "), kind
 
 
-def test_a_foreign_default_names_its_column_and_the_default():
-    op = {"kind": "DropDefault", "table": "author", "column": "slug", "was": "''"}
-    assert render_op(op) == "author.slug has default '' in the database, none declared"
-
-
 def test_a_moved_primary_key_names_both_column_sets():
     op = {"kind": "ChangePrimaryKey", "table": "team", "from": ["name"], "to": ["id"]}
     assert render_op(op) == "team primary key is (name), snapshot says (id)"

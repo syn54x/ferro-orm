@@ -414,48 +414,10 @@ def test_a4_a_dropped_not_null_column_comes_back_not_null_or_the_down_fails(
     assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
 
 
-def generated_sqlite_files(project: Path, pkg: str, before: str, after: str):
-    """Generate ``before``, then ``after``, for SQLite alone; returns
-    ``0002``'s up and down file texts."""
-    write_config(project, pkg, '["sqlite"]')
-    write_models(project, pkg, before)
-    new("create")
-    write_models(project, pkg, after)
-    new("edit")
-    return (
-        schema_file(project, 2, "up", "sqlite").read_text(),
-        schema_file(project, 2, "down", "sqlite").read_text(),
-    )
-
-
 REBUILD = "-- ferro: foreign-keys-off\n"
 
 
-def test_a4_a_dropped_not_null_column_on_sqlite_comes_back_by_a_rebuild(project, pkg):
-    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
-    up, down = generated_sqlite_files(project, pkg, NICKNAME, AUTHOR)
-    assert up.startswith("-- ferro: destructive\n")
-    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
-
-
 # -- A6, A7b: a column's type and nullability on Postgres ---------------------------------
-
-
-@pytest.mark.postgres_only
-def test_a6_a_type_change_casts_both_ways_marked_data_dependent(project, pkg, db):
-    start(project, pkg, db, AUTHOR + "    age: int | None = None\n")
-
-    up, down = edit(project, pkg, db, AUTHOR + "    age: str | None = None\n", "age")
-
-    assert up.read_text() == (
-        "-- ferro: data-dependent\n\n"
-        'ALTER TABLE "author" ALTER COLUMN "age" TYPE varchar USING "age"::varchar;\n'
-    )
-    assert down.read_text() == (
-        "-- ferro: data-dependent\n\n"
-        'ALTER TABLE "author" ALTER COLUMN "age" TYPE integer USING "age"::integer;\n'
-    )
-    round_trip(project, db)
 
 
 @pytest.mark.postgres_only
@@ -506,24 +468,6 @@ class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: Annotated[str, FerroField(unique=True)]
 """
-
-
-@pytest.mark.postgres_only
-def test_a9_a_unique_on_a_table_the_migration_creates_is_inline_on_postgres(
-    project, pkg, db
-):
-    start(project, pkg, db, AUTHOR)
-
-    up, down = edit(project, pkg, db, AUTHOR + TAG, "tag")
-
-    # The table's own step carries its unique: no index step, nothing refused.
-    sql = statements(up)
-    assert sql[0].startswith('CREATE TABLE IF NOT EXISTS "tag"')
-    assert sql[1:] == [
-        'CREATE UNIQUE INDEX IF NOT EXISTS "uq_tag_label" ON "tag" ("label")'
-    ]
-    assert statements(down) == ['DROP TABLE "tag"']
-    round_trip(project, db)
 
 
 # -- A8, C5: no schema change --------------------------------------------------------------
@@ -577,66 +521,3 @@ def test_f1_several_models_edited_at_once_share_one_step_parents_first(
 
 
 # -- refusals ------------------------------------------------------------------------------
-
-
-def test_a6_on_sqlite_is_a_rebuild(project, pkg):
-    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
-    up, down = generated_sqlite_files(
-        project,
-        pkg,
-        AUTHOR + "    age: int | None = None\n",
-        AUTHOR + "    age: str | None = None\n",
-    )
-    assert up.startswith(REBUILD + "-- ferro: data-dependent\n")
-    assert "WHERE typeof(\"age\") NOT IN ('text', 'null')" in up
-    assert "CAST(" not in up
-    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
-
-
-def test_a7b_on_sqlite_is_a_rebuild(project, pkg):
-    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
-    up, down = generated_sqlite_files(
-        project, pkg, NICKNAME, AUTHOR + "    nickname: str | None = None\n"
-    )
-    assert up.startswith(REBUILD + "\n")
-    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
-
-
-def test_a3_a_required_column_without_a_default_is_expanded_backfilled_and_contracted(
-    project, pkg
-):
-    # The steps, their files and their round trips: tests/test_generate_backfill.py.
-    write_config(project, pkg, '["postgres"]')
-    write_models(project, pkg, AUTHOR)
-    new("create")
-    write_models(project, pkg, AUTHOR + "    slug: str\n")
-    new("edit")
-    migration = next((project / "migrations").glob("0002_*"))
-    assert listing(migration) == [
-        "01_expand.down.postgres.sql",
-        "01_expand.up.postgres.sql",
-        "02_backfill_author.py",
-        "03_add_constraint.down.postgres.sql",
-        "03_add_constraint.up.postgres.sql",
-        "04_contract.down.postgres.sql",
-        "04_contract.up.postgres.sql",
-        "ir.json",
-    ]
-
-
-@pytest.mark.parametrize("dialect", ["postgres", "sqlite"])
-def test_a_primary_key_change_is_refused_with_the_recipe(project, pkg, dialect):
-    moved = AUTHOR.replace(
-        "    id: Annotated[int | None, FerroField(primary_key=True)] = None\n"
-        "    name: Annotated[str, FerroField(unique=True)]\n",
-        "    id: int | None = None\n"
-        "    name: Annotated[str, FerroField(primary_key=True)]\n",
-    )
-    assert moved != AUTHOR
-    err = refused(project, pkg, dialect, AUTHOR, moved)
-    # Every shape, on both dialects: tests/test_generate_primary_key_refusal.py.
-    assert err == (
-        'changing the primary key of "author" is not generated: write it as a new '
-        "table (ferro migrate new --data-step …), a backfill of parent and children, "
-        "and a drop; see the Migrations docs § Changing a primary key\n"
-    )

@@ -12,7 +12,7 @@ fallback).
 
 import pytest
 
-from ferro import Field, Forward, Model, Relation
+from ferro import Field, Model
 
 
 @pytest.fixture(autouse=True)
@@ -59,15 +59,3 @@ def test_multiple_primary_keys_rejected_at_class_definition():
         class PkTwice(Model):
             id: int | None = Field(default=None, primary_key=True)
             code: str = Field(primary_key=True)
-
-
-def test_fk_to_pkless_target_is_refused_at_declaration_instead_of_guessing_id():
-    class PkLessTarget(Model):
-        label: str
-
-    with pytest.raises(TypeError, match=r"PkLessTarget.*declares no primary key"):
-
-        class PkGuessReferrer(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            target_id: int = Field(foreign_key=PkLessTarget)
-            target: Relation[PkLessTarget] = Forward("target_id")

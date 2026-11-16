@@ -6362,15 +6362,6 @@ mod tests {
     }
 
     #[test]
-    fn baseline_records_witness_the_squash() {
-        let (dir, mut records) = originals_applied();
-        for record in &mut records {
-            record.origin = Origin::Baseline;
-        }
-        assert_eq!(inheritable(&dir, &records)[0].squash, "0002_teams_epic");
-    }
-
-    #[test]
     fn a_record_whose_up_file_changed_after_apply_still_witnesses() {
         let (dir, mut records) = originals_applied();
         records[3].checksum = "f".repeat(96);

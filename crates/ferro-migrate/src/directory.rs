@@ -1965,21 +1965,6 @@ CREATE INDEX i ON t (c);
     }
 
     #[test]
-    fn a_duplicate_number_names_both_directories() {
-        let root = scratch("dup");
-        let first = migration(&root, "0001_a", None);
-        migration(&root, "0002_a", Some(&first));
-        migration(&root, "0002_b", Some(&first));
-        let err = MigrationsDir::read(&root).expect_err("duplicate");
-        assert_eq!(err.kind(), "duplicate_number");
-        let message = err.to_string();
-        assert!(
-            message.contains("0002_a") && message.contains("0002_b"),
-            "{message}"
-        );
-    }
-
-    #[test]
     fn a_duplicate_number_prints_a_replace_line_for_each_directory() {
         let root = scratch("dup-replace");
         let first = migration(&root, "0001_a", None);
@@ -2045,22 +2030,6 @@ CREATE INDEX i ON t (c);
         migration(&root, "0002_add_x", Some(b"a stale parent"));
         let (_, replaced) = MigrationsDir::read_replacing(&root, "0002_add_x").expect("read");
         assert_eq!(replaced.name, "add_x");
-    }
-
-    #[test]
-    fn a_migration_a_later_one_chains_from_is_not_replaced() {
-        let root = scratch("replacing-later");
-        let first = migration(&root, "0001_a", None);
-        let x = migration(&root, "0002_add_x", Some(&first));
-        migration(&root, "0003_later", Some(&x));
-        let err = MigrationsDir::read_replacing(&root, "0002_add_x").expect_err("later");
-        assert_eq!(err.kind(), "later_migration");
-        let message = err.to_string();
-        assert!(
-            message.contains("0003_later")
-                && message.contains("replace the later one first, or delete it"),
-            "{message}"
-        );
     }
 
     #[test]

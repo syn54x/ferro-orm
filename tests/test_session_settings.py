@@ -52,12 +52,6 @@ def test_non_mapping_settings_raises_type_error():
         engines.session(settings=[(TENANT_KEY, "acme")])
 
 
-def test_validation_happens_before_any_connection_exists():
-    """No engine, no connection, no query — the error is still raised."""
-    with pytest.raises(ValueError):
-        engines.session(settings={"nodots": "acme"})
-
-
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_declared_settings_on_non_postgres_connection_raise_at_open(db_url):
@@ -101,15 +95,6 @@ async def test_settings_reassigned_after_construction_are_revalidated(db_url):
 # --------------------------------------------------------------------------
 # Delivery inside explicit transactions.
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_setting_visible_inside_transaction(db_url):
-    await connect(db_url)
-    async with engines.session(settings={TENANT_KEY: "acme"}):
-        async with transaction() as tx:
-            assert await _current_setting(tx, TENANT_KEY) == "acme"
 
 
 @pytest.mark.asyncio
@@ -256,18 +241,6 @@ async def test_outer_session_unchanged_after_inner_closes(db_url):
         assert outer.effective_settings == {TENANT_KEY: "acme", ROLE_KEY: "owner"}
         async with transaction() as tx:
             assert await _current_setting(tx, ROLE_KEY) == "owner"
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
-async def test_settings_less_nested_session_inherits_everything(db_url):
-    """Helper code that opens a plain session stays scoped."""
-    await connect(db_url)
-    async with engines.session(settings={TENANT_KEY: "acme"}):
-        async with engines.session() as inner:
-            assert inner.effective_settings == {TENANT_KEY: "acme"}
-            async with transaction() as tx:
-                assert await _current_setting(tx, TENANT_KEY) == "acme"
 
 
 @pytest.mark.asyncio

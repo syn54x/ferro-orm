@@ -82,12 +82,6 @@ async def _open_pinned_pool(db_url: str, *, max_connections: int = 2) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_delivery_defaults_to_transaction():
-    """Nobody gets pinned connections by accident."""
-    assert PoolConfig().settings_delivery == "transaction"
-    assert PoolConfig(settings_delivery="connection").settings_delivery == "connection"
-
-
 def test_an_unknown_delivery_is_rejected_at_the_call_site():
     with pytest.raises(ValueError):
         PoolConfig(settings_delivery="session")

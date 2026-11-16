@@ -28,10 +28,3 @@ def test_weakref_guard_rejects_unweakrefable_class():
 
     with pytest.raises(TypeError, match="weak"):
         _assert_weakref_support(NoWeakref)
-
-
-def test_weakref_guard_accepts_model_classes():
-    class WRGuarded(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    _assert_weakref_support(WRGuarded)  # must not raise

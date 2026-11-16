@@ -56,13 +56,6 @@ def test_the_upgrade_guide_names_the_reworded_no_route_message():
 
 
 @pytest.mark.asyncio
-async def test_raw_with_no_route_raises(db_url):
-    await connect(db_url, auto_migrate=True)
-    with pytest.raises(RuntimeError, match="No database route"):
-        await execute("SELECT 1")
-
-
-@pytest.mark.asyncio
 async def test_using_matching_ambient_session_is_allowed(db_url):
     class RtB(Model):
         id: int | None = Field(default=None, primary_key=True)

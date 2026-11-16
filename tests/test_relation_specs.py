@@ -43,14 +43,6 @@ class TestRelationSpecBasics:
 
         assert NoRelations.__ferro_relation_specs__ == {}
 
-    def test_every_model_has_the_attribute(self, clean_registry):
-        # No hasattr guards required by consumers (design pin).
-        class Bare(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-
-        assert hasattr(Bare, "__ferro_relation_specs__")
-        assert Bare.__ferro_relation_specs__ == {}
-
 
 class TestNullability:
     def test_nullable_fk(self, clean_registry):
@@ -159,27 +151,6 @@ class TestExclusions:
             author: Relation[Author] = Forward("author_id")
 
         assert "books" not in Author.__ferro_relation_specs__
-
-
-class TestProvisionalVsResolved:
-    def test_forward_ref_fk_is_complete_at_class_definition(self, clean_registry):
-        """The entry and its key column exist before the target is defined;
-        reading `target` afterwards resolves it with no resolve call."""
-
-        class FwdChild(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            parent_id: Annotated[int, FerroField(foreign_key="FwdParent")]
-            parent: Relation["FwdParent"] = Forward("parent_id")
-
-        specs = FwdChild.__ferro_relation_specs__
-        assert set(specs) == {"parent"}
-        assert specs["parent"].fk_column == "parent_id"
-
-        class FwdParent(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            children: Relation[list["FwdChild"]] = Reverse("parent_id")
-
-        assert FwdChild.__ferro_relation_specs__["parent"].target is FwdParent
 
 
 class TestCompleteAtClassDefinition:

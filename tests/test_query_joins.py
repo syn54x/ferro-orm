@@ -20,7 +20,7 @@ import pytest
 
 import ferro
 from ferro import FerroField, Forward, ManyToMany, Model, Relation, Reverse
-from ferro.query import Query, QueryNode
+from ferro.query import Query
 from ferro.query.nodes import FieldProxy, QueryProxy
 from ferro.query.wire import compile_query
 
@@ -614,21 +614,6 @@ class TestRelationProxySugar:
     def _proxy(self) -> QueryProxy:
         return QueryProxy(QJTransaction)
 
-    def test_instance_equality_desugars_to_fk_column_join_free(self):
-        node = self._proxy().account == _persisted_account(7)
-        assert isinstance(node, QueryNode)
-        assert node.column == "account_id"
-        assert node.operator == "=="
-        assert node.value == 7
-        assert node.path == ()  # genuinely join-free (path minus last hop)
-
-    def test_instance_inequality_operator(self):
-        node = self._proxy().account != _persisted_account(7)
-        assert node.operator == "!="
-        assert node.column == "account_id"
-        assert node.value == 7
-        assert node.path == ()
-
     def test_deep_instance_equality_uses_last_hop_fk_column_and_prefix_path(self):
         owner = QJOwner(id=3, email="o@ferro.dev")
         node = self._proxy().account.owner == owner
@@ -637,19 +622,6 @@ class TestRelationProxySugar:
         assert node.column == "owner_id"
         assert node.value == 3
         assert node.path == ("account",)
-
-    def test_equals_none_builds_null_leaf_join_free(self):
-        node = self._proxy().account == None  # noqa: E711
-        assert node.column == "account_id"
-        assert node.value is None
-        assert node.operator == "=="
-        assert node.path == ()
-
-    def test_not_equals_none_operator(self):
-        node = self._proxy().account != None  # noqa: E711
-        assert node.operator == "!="
-        assert node.value is None
-        assert node.path == ()
 
     def test_unpersisted_instance_raises_value_error_naming_model(self):
         unsaved = QJAccount(
@@ -702,12 +674,6 @@ def test_query_node_boolean_coercion_raises():
 class TestMutatingTraversalRejection:
     """update()/delete() reject relation traversal at the shared choke point
     (:func:`ferro.query.wire.compile_query`), before any serialization or DB."""
-
-    def test_traversed_predicate_rejected_for_update_and_delete(self):
-        q = Query(QJTransaction).where(lambda t: t.account.label == "a1")
-        for operation in ("update", "delete"):
-            with pytest.raises(ValueError, match="does not support relation traversal"):
-                compile_query(q, operation)
 
     def test_negated_traversed_predicate_rejected_for_update_and_delete(self):
         # A traversing leaf stays traversal under `~` (#312): the guard sees

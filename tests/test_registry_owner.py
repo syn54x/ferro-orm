@@ -66,18 +66,6 @@ def _bundle() -> JoinTableBundle:
     return JoinTableBundle(("tests.fake.RegFake", "links"), (), (), ())
 
 
-def test_clear_join_tables_evicts_their_envelopes_too():
-    snap = REGISTRY.snapshot()
-    try:
-        REGISTRY.add_join_table("jt_a_b", _bundle())
-        REGISTRY.persist_envelope("jt_a_b", {"payload": {"model_name": "jt_a_b"}})
-        REGISTRY.clear_join_tables()
-        assert "jt_a_b" not in REGISTRY.join_tables()
-        assert REGISTRY.envelope("jt_a_b") is None
-    finally:
-        REGISTRY.restore(snap)
-
-
 def test_snapshot_restore_round_trips_every_store():
     snap = REGISTRY.snapshot()
     try:

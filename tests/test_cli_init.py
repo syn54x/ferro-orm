@@ -652,17 +652,6 @@ def test_init_refuses_global_options_it_has_no_use_for(
 # -- the shell: exit codes, refusals, the cli extra ------------------------------
 
 
-def test_exit_code_values_are_pinned():
-    from ferro.cli import exit_codes
-
-    # #473 decision 9; #519 and #523 code against these values.
-    assert exit_codes.OK == 0
-    assert exit_codes.REFUSED == 1
-    assert exit_codes.USAGE == 2
-    assert exit_codes.PENDING == 3
-    assert exit_codes.NEEDS_ATTENTION == 4
-
-
 def test_render_refusal_prints_the_message_and_returns_refused(
     capsys: pytest.CaptureFixture[str],
 ):

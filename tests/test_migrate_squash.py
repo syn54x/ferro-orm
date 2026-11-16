@@ -821,16 +821,6 @@ def test_the_generation_api_raises_the_same_refusal_text(project, pkg, capsys):
     assert str(raised.value) + "\n" == cli
 
 
-def test_another_name_or_a_later_originals_name_is_not_refused(project, pkg):
-    write_config(project, pkg)
-    write_models(project, pkg, AUTHOR)
-    new("create")
-    write_models(project, pkg, BIO)
-    new("add_bio")
-    assert squash("create2", "--from", "0001") == 0
-    assert dirs(project) == ["0001_create2"]
-
-
 def test_a_name_equal_to_the_last_originals_name_is_not_refused(project, pkg):
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)

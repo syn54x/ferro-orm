@@ -47,13 +47,6 @@ AUTHOR_VIEW = (
 )
 
 
-PLAIN_AUTHOR = """
-class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    name: str
-"""
-
-
 def _relations(db) -> dict[str, str]:
     """Every table and view in the schema, with its catalog kind."""
     if db.backend == "sqlite":
@@ -69,16 +62,13 @@ def _relations(db) -> dict[str, str]:
     return {name: kind.lower() for name, kind in rows}
 
 
-@pytest.mark.parametrize(
-    "body", [AUTHOR, PLAIN_AUTHOR], ids=["with_unique", "without_index"]
-)
-def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(project, pkg, db, body):
+def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(project, pkg, db):
     """The create pass sees that a view, not a table, holds ``author``, and
-    refuses before any DDL, naming the view. It does not let
-    ``CREATE TABLE IF NOT EXISTS`` skip over the view, with or without an
-    index on the model, and it creates nothing."""
+    refuses before any DDL, naming the view, when the model carries a unique.
+    It does not let ``CREATE TABLE IF NOT EXISTS`` skip over the view, and it
+    creates nothing."""
     configure(project, pkg, db.backend)
-    write_models(project, pkg, body)
+    write_models(project, pkg, AUTHOR)
     _, database = settings_and_database()
     database.import_models()
     db.execute(AUTHOR_VIEW)

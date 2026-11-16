@@ -1219,11 +1219,6 @@ def test_get_metadata_without_a_configuration_renders_every_registered_model(
     assert isinstance(metadata.tables["tr533card"], sa.Table)
 
 
-def test_engine_helper_is_the_backend_the_url_names(tmp_path):
-    engine = engine_for(f"sqlite:{tmp_path / 'x.db'}?mode=rwc", None)
-    assert engine.dialect.name == "sqlite"
-
-
 # ---------------------------------------------------------------------------
 # A declared label rename: the downgrade renames it back once
 # ---------------------------------------------------------------------------

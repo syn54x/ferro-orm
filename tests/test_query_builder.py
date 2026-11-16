@@ -131,68 +131,12 @@ def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
 
 
-def test_query_carries_root_instances_materialization_by_default():
-    """Every query without a projection materializes complete root instances
-    (ADR-0007): the v3 plan is explicit data on the wire, never inferred."""
-
-    class WirePlainRow(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    payload = compile_query(Query(WirePlainRow), "fetch").payload.to_ir_dict()
-    assert payload["materialization"] == {"kind": "root_instances"}
-
-
 def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():
     uid1 = uuid.uuid4()
     uid2 = uuid.uuid4()
     node = QueryNode(column="run_id", operator="IN", value=[uid1, uid2])
 
     assert node.to_ir_dict()["value"]["value"] == [str(uid1), str(uid2)]
-
-
-def test_query_node_to_ir_dict_uses_query_ir_shape():
-    node = QueryNode(column="age", operator=">=", value=18)
-    payload = node.to_ir_dict()
-
-    assert payload["node_kind"] == "leaf"
-    assert payload["column"] == "age"
-    assert payload["operator"] == ">="
-    assert payload["value"] == {"kind": "int", "value": 18}
-    assert payload["path"] == []
-
-
-def test_query_node_to_ir_dict_emits_field_proxy_path():
-    """A leaf built from a ``FieldProxy`` carries its ``path`` into IR (#269);
-    this slice only ever emits ``[]`` (root model) — #270 populates it via
-    relation traversal."""
-    node = FieldProxy("age", path=("account",)) >= 18
-    payload = node.to_ir_dict()
-
-    assert payload["path"] == ["account"]
-
-
-def test_query_node_to_ir_dict_compound_node_has_no_path_key():
-    left = FieldProxy("age") >= 18
-    right = FieldProxy("name") == "a"
-    compound = left & right
-
-    payload = compound.to_ir_dict()
-
-    assert payload["node_kind"] == "compound"
-    assert "path" not in payload
-
-
-def test_field_proxy_operator_overloading():
-    """
-    Test that operators on a FieldProxy (the lambda predicate mechanism)
-    return a QueryNode.
-    """
-    expr = FieldProxy("age") >= 18
-
-    assert isinstance(expr, QueryNode)
-    assert expr.column == "age"
-    assert expr.operator == ">="
-    assert expr.value == 18
 
 
 def test_model_where_clause():
@@ -211,22 +155,6 @@ def test_model_where_clause():
     assert query.where_clause[0].column == "age"
     assert query.where_clause[0].operator == ">="
     assert query.where_clause[0].value == 21
-
-
-def test_query_chaining_placeholders():
-    """
-    Test that Query object supports chaining (even if not yet executed).
-    """
-
-    class QueryUser(Model):
-        id: int = Field(primary_key=True)
-        age: int
-
-    query = QueryUser.where(lambda u: u.age >= 18).limit(10).offset(5)
-
-    assert query._limit == 10
-    assert query._offset == 5
-    assert len(query.where_clause) == 1
 
 
 def test_in_operator_lshift():

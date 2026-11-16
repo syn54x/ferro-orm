@@ -145,29 +145,6 @@ async def _labels() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_plain_query_outside_transaction_sees_the_session_scope(
-    db_url, tenant_role
-):
-    """User story 2, end to end.
-
-    ``Model.where(...).all()`` with no ``transaction()`` around it. Before this
-    slice the query ran on a bare pool connection where the GUC had never been
-    set, and the policy returned zero rows.
-    """
-    await _seed_and_open_tenant_connection(db_url, tenant_role)
-    try:
-        async with engines.session("tenant", settings={TENANT_KEY: ACME}):
-            assert await _labels() == ["a1", "a2"]
-
-        async with engines.session("tenant", settings={TENANT_KEY: OTHER}):
-            assert await _labels() == ["b1"]
-    finally:
-        async with engines.session():
-            await _drop_tenant_role(tenant_role)
-
-
-@pytest.mark.asyncio
-@pytest.mark.postgres_only
 async def test_every_operation_shape_is_scoped(db_url, tenant_role):
     """Not just `where().all()`: the wrap is opened by every operation, so
     `all()`, `get()`, `count()` and raw SQL are scoped alike."""

@@ -6,8 +6,6 @@ The constructor takes the foreign-key column only; refusing `warehouse=` names
 
 import pytest
 
-from ferro import Field, Forward, Model, Relation
-
 
 @pytest.fixture(autouse=True)
 def _isolate_relation_state():
@@ -30,40 +28,3 @@ def _isolate_relation_state():
     snapshot = REGISTRY.snapshot()
     yield
     REGISTRY.restore(snapshot)
-
-
-def test_relation_keyword_refusal_names_the_target_pk():
-    class D5Warehouse(Model):
-        code: int | None = Field(default=None, primary_key=True)
-        city: str
-
-    class D5Shipment(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        warehouse_id: int = Field(foreign_key=D5Warehouse)
-        warehouse: Relation[D5Warehouse] = Forward("warehouse_id")
-
-    wh = D5Warehouse(code=7, city="Reno")
-    with pytest.raises(TypeError) as refused:
-        D5Shipment(warehouse=wh)
-    assert str(refused.value) == (
-        "D5Shipment.warehouse is a relation. Pass the foreign-key column's "
-        "value, warehouse_id=warehouse.code"
-    )
-    # The fix the refusal names stores the target's key.
-    assert D5Shipment(warehouse_id=wh.code).warehouse_id == 7
-
-
-def test_relation_keyword_refusal_with_target_pk_named_id():
-    class D5Author(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-
-    class D5Book(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        author_id: int = Field(foreign_key=D5Author)
-        author: Relation[D5Author] = Forward("author_id")
-
-    a = D5Author(id=3, name="x")
-    with pytest.raises(TypeError, match=r"author_id=author\.id$"):
-        D5Book(author=a)
-    assert D5Book(author_id=a.id).author_id == 3

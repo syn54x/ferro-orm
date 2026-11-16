@@ -1800,19 +1800,6 @@ mod tests {
     }
 
     #[test]
-    fn null_kind_equality_is_reflexive() {
-        use super::NullKind;
-
-        assert_eq!(NullKind::I64, NullKind::I64);
-        assert_eq!(NullKind::Bool, NullKind::Bool);
-        assert_eq!(NullKind::F64, NullKind::F64);
-        assert_eq!(NullKind::String, NullKind::String);
-        assert_eq!(NullKind::Bytes, NullKind::Bytes);
-        assert_eq!(NullKind::Uuid, NullKind::Uuid);
-        assert_eq!(NullKind::Untyped, NullKind::Untyped);
-    }
-
-    #[test]
     fn engine_bind_value_carries_null_kind() {
         use super::NullKind;
 

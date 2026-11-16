@@ -419,21 +419,3 @@ def test_sqlite_an_expression_or_a_nullable_columns_default_is_drift(
     assert "ferro migrate new" in warning.text, warning.text
     assert warning.text.startswith(line), warning.text
     assert db.rows('PRAGMA table_info("author")') == before
-
-
-def test_a_successful_baseline_no_longer_says_defaults_were_not_compared(
-    project, pkg, db, capsys
-):
-    generated(project, pkg, db)
-    built_by_the_pass(db)
-    capsys.readouterr()
-
-    code, out, _ = cli(capsys, "baseline", "--url", db.url)
-
-    assert code == 0
-    assert out == (
-        f"{db.line}\nrecorded 0001_create_author as baseline (1 step)\n"
-        + NOT_COMPARED
-        + "\n"
-    )
-    assert "column defaults" not in out

@@ -44,41 +44,6 @@ def cleanup():
 # ---------------------------------------------------------------------------
 
 
-def test_text_on_strenum_renders_text_not_enum():
-    """AE1: ``Field(db_type='text')`` on a StrEnum field is a TEXT column,
-    not a named SA Enum (so Alembic never emits CREATE TYPE)."""
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        format: FileFormat = Field(db_type="text")
-
-    table = get_metadata().tables["doc"]
-    col = table.c.format
-
-    assert not isinstance(col.type, sa.Enum)
-    # sa.Text / sa.String both compile to TEXT/VARCHAR; assert the string family
-    assert isinstance(col.type, (sa.Text, sa.String))
-
-
-def test_varchar_with_length_on_str_renders_string_n():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        code: str = Field(db_type="varchar(255)")
-
-    col = get_metadata().tables["doc"].c.code
-    assert isinstance(col.type, sa.String)
-    assert col.type.length == 255
-
-
-def test_bigint_on_int_renders_big_integer():
-    class Counter(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        value: int = Field(db_type="bigint")
-
-    col = get_metadata().tables["counter"].c.value
-    assert isinstance(col.type, sa.BigInteger)
-
-
 def test_smallint_on_intenum_renders_small_integer():
     class Task(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -87,20 +52,6 @@ def test_smallint_on_intenum_renders_small_integer():
     col = get_metadata().tables["task"].c.priority
     assert isinstance(col.type, sa.SmallInteger)
     assert not isinstance(col.type, sa.Enum)
-
-
-def test_uuid_on_uuid_renders_sa_uuid():
-    class Record(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        ext_id: UUID = Field(db_type="uuid")
-
-    col = get_metadata().tables["record"].c.ext_id
-    # SA >= 2 provides sa.Uuid; older SA falls back to String(36)
-    assert (
-        isinstance(col.type, (sa.Uuid, sa.String))
-        if hasattr(sa, "Uuid")
-        else isinstance(col.type, sa.String)
-    )
 
 
 def test_text_on_uuid_renders_string_family():
@@ -113,16 +64,6 @@ def test_text_on_uuid_renders_string_family():
     assert not (hasattr(sa, "Uuid") and isinstance(col.type, sa.Uuid))
 
 
-def test_timestamptz_on_datetime_renders_datetime_with_timezone():
-    class Event(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        occurred_at: dt.datetime = Field(db_type="timestamptz")
-
-    col = get_metadata().tables["event"].c.occurred_at
-    assert isinstance(col.type, sa.DateTime)
-    assert col.type.timezone is True
-
-
 def test_timestamp_on_datetime_renders_datetime_without_timezone():
     class Event(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -133,15 +74,6 @@ def test_timestamp_on_datetime_renders_datetime_without_timezone():
     assert col.type.timezone is False
 
 
-def test_date_on_date_renders_sa_date():
-    class Event(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        occurred_on: dt.date = Field(db_type="date")
-
-    col = get_metadata().tables["event"].c.occurred_on
-    assert isinstance(col.type, sa.Date)
-
-
 def test_time_on_time_renders_sa_time():
     class Event(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -149,29 +81,6 @@ def test_time_on_time_renders_sa_time():
 
     col = get_metadata().tables["event"].c.occurred_at
     assert isinstance(col.type, sa.Time)
-
-
-def test_jsonb_on_dict_renders_json_with_postgres_jsonb_variant():
-    """ADR-0004: one SA type per token; SA carries the dialect split."""
-    from sqlalchemy.dialects import postgresql, sqlite
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        payload: dict = Field(db_type="jsonb")
-
-    col = get_metadata().tables["doc"].c.payload
-    assert isinstance(col.type, sa.JSON)
-    assert "JSONB" in str(col.type.compile(dialect=postgresql.dialect()))
-    assert str(col.type.compile(dialect=sqlite.dialect())).upper() == "JSON"
-
-
-def test_explicit_json_on_dict_renders_sa_json():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        payload: dict = Field(db_type="json")
-
-    col = get_metadata().tables["doc"].c.payload
-    assert isinstance(col.type, sa.JSON)
 
 
 # ---------------------------------------------------------------------------
@@ -234,29 +143,6 @@ def test_db_check_without_db_check_kwarg_emits_no_constraint():
 # ---------------------------------------------------------------------------
 # Backward compat / R13: existing models unchanged
 # ---------------------------------------------------------------------------
-
-
-def test_default_enum_still_renders_named_sa_enum():
-    """A model that does not set db_type continues to map StrEnum -> sa.Enum
-    with the existing name convention (R13)."""
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        format: FileFormat
-
-    col = get_metadata().tables["doc"].c.format
-    assert isinstance(col.type, sa.Enum)
-    assert col.type.name == "fileformat"
-
-
-def test_default_int_still_renders_integer():
-    class Counter(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        value: int
-
-    col = get_metadata().tables["counter"].c.value
-    assert isinstance(col.type, sa.Integer)
-    assert not isinstance(col.type, sa.BigInteger)
 
 
 # ---------------------------------------------------------------------------

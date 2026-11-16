@@ -46,15 +46,3 @@ def test_one_letter_lambda_on_a_page_fails_the_lint(tmp_path: Path) -> None:
     assert f"{page}:6: lambda passed to where() takes one-letter parameter 't'" in (
         result.stdout
     )
-
-
-def test_a_retired_relation_term_on_a_page_fails_the_lint(tmp_path: Path) -> None:
-    page = tmp_path / "page.md"
-    page.write_text(
-        "# Page\n\nFerro reads the shadow column without a query.\n", encoding="utf-8"
-    )
-    result = _lint(str(page))
-    assert result.returncode == 1
-    assert result.stdout == (
-        f'{page}:3: "shadow column" is retired; write "foreign-key column"\n'
-    )

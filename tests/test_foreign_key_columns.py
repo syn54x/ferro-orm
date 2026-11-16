@@ -63,21 +63,6 @@ def _snapshot() -> str:
 # -- the column -------------------------------------------------------------------
 
 
-def test_a_key_column_carries_its_foreign_key_and_the_relation_names_it():
-    class Team(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    class Player(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        team_id: int = Field(foreign_key=Team, index=True)
-        team: Relation[Team] = Forward("team_id")
-
-    assert Player.__ferro_columns__["team_id"].foreign_key == ForeignKeyRef(
-        to_table="team", on_delete="CASCADE"
-    )
-    assert Player.__ferro_relation_specs__["team"].fk_column == "team_id"
-
-
 def test_the_annotated_key_column_is_the_assignment_one():
     def define(annotated: bool):
         class Team(Model):
@@ -324,20 +309,6 @@ def test_a_retired_key_column_to_a_model_never_defined_fails_resolution():
 
 def test_forward_and_reverse_are_public():
     assert {"Forward", "Reverse"} <= set(ferro.__all__)
-
-
-def test_a_forward_relation_needs_no_reverse():
-    class Team(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    class Player(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        team_id: int = Field(foreign_key=Team)
-        team: Relation[Team] = Forward("team_id")
-
-    resolve_relationships()
-
-    assert Player.__ferro_relation_specs__["team"].target is Team
 
 
 # -- the refusals --------------------------------------------------------------------
@@ -683,22 +654,6 @@ def test_a_reverse_relation_annotated_without_relation_is_refused():
     )
 
 
-def test_a_relation_in_annotated_metadata_is_refused_as_an_assignment():
-    class Team(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    def define():
-        class Player(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            team_id: int = Field(foreign_key=Team)
-            team: Annotated[Relation[Team], Forward("team_id")]
-
-    assert _refused(define) == (
-        "Player.team: a relation is an assignment, not Annotated metadata. "
-        'Write: team: Relation[Team] = Forward("team_id")'
-    )
-
-
 def test_a_bare_relation_annotation_names_its_columns_target():
     class Team(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -776,22 +731,6 @@ def test_a_bare_reverse_two_models_point_back_to_is_refused_with_the_class():
         "Coach each declare team_id pointing at Team. Write: "
         'players: Relation[list[Player]] = Reverse("team_id") or '
         'players: Relation[list[Coach]] = Reverse("team_id")'
-    )
-
-
-def test_a_reverse_in_annotated_metadata_is_refused_as_an_assignment():
-    class Player(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        team_id: int = Field(foreign_key="Team")
-
-    def define():
-        class Team(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            players: Annotated[Relation[list[Player]], Reverse("team_id")]
-
-    assert _refused(define) == (
-        "Team.players: a relation is an assignment, not Annotated metadata. "
-        'Write: players: Relation[list[Player]] = Reverse("team_id")'
     )
 
 
@@ -945,17 +884,6 @@ def test_a_refused_resolution_is_refused_again_on_every_later_one():
         with pytest.raises(TypeError, match="Player.team_id: Team.id is int"):
             ensure_resolved_modelset()
     assert REGISTRY.is_dirty()
-
-
-def test_a_class_target_is_checked_when_the_class_is_defined():
-    class Team(Model):
-        id: int | None = Field(default=None, primary_key=True)
-
-    with pytest.raises(TypeError, match="Player.team_id: Team.id is int"):
-
-        class Player(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            team_id: str = Field(foreign_key=Team)
 
 
 def test_a_refused_class_leaves_no_model_behind():

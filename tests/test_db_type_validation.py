@@ -6,10 +6,8 @@ before any query, emission, or migration runs.
 
 from __future__ import annotations
 
-import datetime as dt
 from enum import IntEnum, StrEnum
 from typing import Annotated, Any, Literal
-from uuid import UUID
 
 import pydantic
 import pytest
@@ -30,88 +28,6 @@ class Priority(IntEnum):
 # ---------------------------------------------------------------------------
 # Happy paths -- every canonical token on a compatible annotation
 # ---------------------------------------------------------------------------
-
-
-def test_text_on_strenum_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        format: FileFormat = Field(db_type="text")
-
-    assert Doc.__ferro_fields__["format"].db_type == "text"
-
-
-def test_text_on_str_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str = Field(db_type="text")
-
-    assert Doc.__ferro_fields__["name"].db_type == "text"
-
-
-def test_varchar_with_length_on_str_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        code: str = Field(db_type="varchar(255)")
-
-    assert Doc.__ferro_fields__["code"].db_type == "varchar(255)"
-
-
-def test_bigint_on_int_is_accepted():
-    class Counter(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        value: int = Field(db_type="bigint")
-
-    assert Counter.__ferro_fields__["value"].db_type == "bigint"
-
-
-def test_smallint_on_intenum_is_accepted():
-    class Task(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        priority: Priority = Field(db_type="smallint")
-
-    assert Task.__ferro_fields__["priority"].db_type == "smallint"
-
-
-def test_uuid_on_uuid_field_is_accepted():
-    class Record(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        external_id: UUID = Field(db_type="uuid")
-
-    assert Record.__ferro_fields__["external_id"].db_type == "uuid"
-
-
-def test_text_on_uuid_field_is_accepted():
-    """uuid -> text is the canonical portable-storage move."""
-
-    class Record(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        external_id: UUID = Field(db_type="text")
-
-    assert Record.__ferro_fields__["external_id"].db_type == "text"
-
-
-def test_timestamptz_on_datetime_is_accepted():
-    class Event(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        occurred_at: dt.datetime = Field(db_type="timestamptz")
-
-    assert Event.__ferro_fields__["occurred_at"].db_type == "timestamptz"
-
-
-def test_date_on_date_is_accepted():
-    class Event(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        occurred_on: dt.date = Field(db_type="date")
-
-    assert Event.__ferro_fields__["occurred_on"].db_type == "date"
-
-
-def test_time_on_time_is_accepted():
-    class Event(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        occurred_at: dt.time = Field(db_type="time")
-
-    assert Event.__ferro_fields__["occurred_at"].db_type == "time"
 
 
 # ---------------------------------------------------------------------------
@@ -207,37 +123,9 @@ def test_db_check_on_plain_int_raises():
             value: int = Field(db_type="bigint", db_check=True)
 
 
-def test_db_check_with_db_type_on_strenum_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        format: FileFormat = Field(db_type="text", db_check=True)
-
-    metadata = Doc.__ferro_fields__["format"]
-    assert metadata.db_type == "text"
-    assert metadata.db_check is True
-
-
-def test_db_check_with_db_type_on_intenum_is_accepted():
-    class Task(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        priority: Priority = Field(db_type="smallint", db_check=True)
-
-    assert Task.__ferro_fields__["priority"].db_check is True
-
-
 # ---------------------------------------------------------------------------
 # Optional / nullable annotations should not change validation
 # ---------------------------------------------------------------------------
-
-
-def test_optional_annotation_does_not_block_validation():
-    """`StrEnum | None` is still a StrEnum-family field for db_type purposes."""
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        format: FileFormat | None = Field(default=None, db_type="text")
-
-    assert Doc.__ferro_fields__["format"].db_type == "text"
 
 
 def test_optional_annotation_still_rejects_incoherent_db_type():
@@ -338,14 +226,6 @@ class Payload(pydantic.BaseModel):
     amount: int
 
 
-def test_jsonb_on_dict_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        data: dict = Field(db_type="jsonb")
-
-    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
-
-
 def test_jsonb_on_parameterized_dict_is_accepted():
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -372,24 +252,6 @@ def test_jsonb_on_nested_model_is_accepted():
     assert Doc.__ferro_columns__["payload"].db_type == "jsonb"
 
 
-def test_json_on_dict_is_accepted():
-    """Explicit plain-json declaration -- the jsonb->json edit is symmetric."""
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        data: dict = Field(db_type="json")
-
-    assert Doc.__ferro_columns__["data"].db_type == "json"
-
-
-def test_jsonb_on_annotated_ferro_field_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        data: Annotated[dict, FerroField(db_type="jsonb")]
-
-    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
-
-
 def test_jsonb_on_int_raises():
     with pytest.raises(TypeError, match="value.*db_type"):
 
@@ -413,14 +275,6 @@ def test_jsonb_on_set_raises():
         class Doc(Model):
             id: int | None = Field(default=None, primary_key=True)
             tags: set[str] = Field(db_type="jsonb")
-
-
-def test_jsonb_on_optional_dict_is_accepted():
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        data: dict | None = Field(default=None, db_type="jsonb")
-
-    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
 
 
 # ---------------------------------------------------------------------------

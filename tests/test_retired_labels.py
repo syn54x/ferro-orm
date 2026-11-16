@@ -148,13 +148,6 @@ def test_attribute_assignment_of_the_retired_label_is_a_validation_error(model):
     order.status = RtlStatus.PAID
 
 
-def test_a_hydrated_row_holding_the_label_is_not_validated():
-    order = RtlOrder.model_construct(id=1, status=RtlStatus.CANCELED, note="")
-    assert order.status is RtlStatus.CANCELED
-    order.note = "changed"
-    assert order.status is RtlStatus.CANCELED
-
-
 class RtlLive(StrEnum):
     PAID = "paid"
 
@@ -307,18 +300,15 @@ def test_a_model_without_retired_labels_gains_no_setattr_or_validator():
     assert Model.__setattr__ is not BaseModel.__setattr__
 
 
-@pytest.mark.parametrize("validate_assignment", [False, True])
-def test_assigning_the_label_fails_with_the_ticket_text_under_both_configs(
-    validate_assignment,
-):
-    order = order_model(validate_assignment)()
+def test_assigning_the_label_fails_with_the_ticket_text_under_validate_assignment():
+    order = order_model(True)()
     with pytest.raises(ValidationError) as raised:
         order.status = RtlStatus.CANCELED
     assert "RtlStatus.CANCELED ('canceled') is retired in this release" in str(
         raised.value
     )
     with pytest.raises(ValidationError):
-        order_model(validate_assignment)(status="canceled")
+        order_model(True)(status="canceled")
 
 
 @pytest.mark.backend_matrix

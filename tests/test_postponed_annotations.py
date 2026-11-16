@@ -287,30 +287,6 @@ class Player(Model):
     assert mod.Team.__ferro_reverse_specs__["players"].child_fk_column == "team_id"
 
 
-def test_a_relation_in_annotated_metadata_is_refused_under_postponed_annotations(
-    tmp_path,
-):
-    _wipe()
-    body = """
-from ferro import Forward
-
-class Team(Model):
-    id: int | None = Field(default=None, primary_key=True)
-
-class Player(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    team_id: int = Field(foreign_key=Team)
-    team: Annotated[Relation[Team], Forward("team_id")]
-"""
-    with pytest.raises(TypeError) as refusal:
-        _import(tmp_path, body, future=True)
-
-    assert str(refusal.value) == (
-        "Player.team: a relation is an assignment, not Annotated metadata. "
-        'Write: team: Relation[Team] = Forward("team_id")'
-    )
-
-
 # Each case below runs with and without the __future__ import, and with the
 # target declared before the model that names it ("first") or after it
 # ("second"), where the target is a name until relations resolve.

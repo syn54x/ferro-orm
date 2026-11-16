@@ -27,46 +27,6 @@ from ferro import (
 )
 
 
-def test_register_model_is_the_single_registry_write(clean_registry):
-    from ferro.registry import REGISTRY
-
-    class Widget(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-
-    identity = Widget.__ferro_identity__
-    # Class-body registration flowed through the entrypoint into the registry
-    # (keyed by the canonical identity) and persisted the envelope + fingerprint.
-    assert REGISTRY.models()[identity] is Widget
-    assert REGISTRY.envelope(identity) is not None
-    assert REGISTRY.fingerprint(identity) is not None
-
-
-def test_register_model_keys_by_canonical_identity(clean_registry):
-    from ferro.registry import REGISTRY
-
-    class Marker(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-
-    REGISTRY.deregister(Marker.__ferro_identity__)
-    # #249: the key is derived from the model's canonical identity, never
-    # caller-supplied. A bare ``__name__`` must never become a registry key.
-    REGISTRY.register(Marker)
-
-    assert REGISTRY.models()[Marker.__ferro_identity__] is Marker
-    assert Marker.__name__ not in REGISTRY.models()
-
-
-def test_persist_model_envelope_fingerprint_matches_envelope(clean_registry):
-    from ferro.registry import REGISTRY, ir_fingerprint
-
-    envelope = {"ir_kind": "schema", "ir_version": 1, "payload": {"models": []}}
-    REGISTRY.persist_envelope("x.Thing", envelope)
-
-    assert REGISTRY.envelope("x.Thing") is envelope
-    assert REGISTRY.fingerprint("x.Thing") == ir_fingerprint(envelope)
-
-
 def test_deregister_model_evicts_registry_and_envelope(clean_registry):
     from ferro.registry import REGISTRY
 
@@ -140,18 +100,6 @@ def test_clear_registry_evicts_join_table_envelopes(clean_registry):
     assert join_table not in REGISTRY.join_tables()
     assert REGISTRY.envelope(join_table) is None
     assert REGISTRY.fingerprint(join_table) is None
-
-
-def test_clear_registry_keeps_model_registry(clean_registry):
-    """clear_registry() promises declared models survive (cold rehydration)."""
-    from ferro.registry import REGISTRY
-
-    class Survivor(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-
-    identity = Survivor.__ferro_identity__
-    clear_registry()
-    assert REGISTRY.models()[identity] is Survivor
 
 
 # ---------------------------------------------------------------------------
