@@ -29,7 +29,7 @@ import pytest_asyncio
 from pydantic import SecretStr
 
 import ferro
-from ferro import Model, engines
+from ferro import Field, Model, engines
 from ferro.base import FerroField
 
 pytestmark = pytest.mark.backend_matrix
@@ -202,6 +202,69 @@ async def test_query_update_keeps_a_raw_column_where_the_call_puts_it(
 
     (update,) = _sent(statement_records, "UPDATE")
     assert _set_columns(update) == ["e", "blob", "a"]
+
+
+class Marker(Model):
+    """Every column is left to the database: no write binds one."""
+
+    id: int | None = Field(default=None, primary_key=True)
+
+
+DEFAULT_VALUES = 'INSERT INTO "marker" DEFAULT VALUES'
+
+
+@pytest_asyncio.fixture
+async def marker_table(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    yield
+    ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("marker_table")
+async def test_save_with_no_bound_column_inserts_default_values(statement_records):
+    async with engines.session():
+        marker = await Marker.create()
+        assert isinstance(marker.id, int)
+        assert (await Marker.get(marker.id)).id == marker.id
+
+    (insert,) = [r for r in statement_records if r.sql.startswith("INSERT")]
+    assert insert.sql == f'{DEFAULT_VALUES} RETURNING "id"'
+    assert not insert.params
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("marker_table")
+@pytest.mark.parametrize("n", [1, 3])
+async def test_bulk_create_with_no_bound_column_sends_one_statement_per_row(
+    statement_records, n
+):
+    async with engines.session():
+        assert await Marker.bulk_create([Marker() for _ in range(n)]) == n
+        assert await Marker.where(lambda marker: marker.id > 0).count() == n
+
+    inserts = [r.sql for r in statement_records if r.sql.startswith("INSERT")]
+    assert inserts == [DEFAULT_VALUES] * n
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("marker_table")
+async def test_a_failing_unbound_bulk_create_leaves_no_row(db_backend):
+    async with engines.session():
+        if db_backend == "sqlite":
+            await ferro.execute(
+                'CREATE TRIGGER marker_one BEFORE INSERT ON "marker" '
+                'WHEN (SELECT count(*) FROM "marker") >= 1 '
+                "BEGIN SELECT RAISE(ABORT, 'second row'); END"
+            )
+            with pytest.raises(Exception, match="second row"):
+                await Marker.bulk_create([Marker(), Marker()])
+            assert await Marker.where(lambda marker: marker.id > 0).count() == 0
+        else:
+            await ferro.execute('INSERT INTO "marker" ("id") VALUES (2)')
+            with pytest.raises(ferro.IntegrityError):
+                await Marker.bulk_create([Marker(), Marker()])
+            assert await Marker.where(lambda marker: marker.id > 0).count() == 1
 
 
 def _upgrade_bullet() -> str:

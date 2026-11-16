@@ -936,6 +936,12 @@ reaches the statement: `save`, `bulk_create` and
 `model_fields` order, walked in `save_bind_payload`. A set is membership
 only.
 
+When no column is bound, `save` and `bulk_create` render
+`INSERT INTO "<table>" DEFAULT VALUES` on both dialects, with the same
+`RETURNING` path as a normal insert; `bulk_create` sends one such statement
+per row, in one transaction. `INSERT INTO t () VALUES ()` is an I-16 miss
+(#838; review #841).
+
 One call is one statement, in the log and in a docs `sql` block. A column
 order that changes between processes or with the row's fetch is an I-16
 violation, the mutation-side twin of the rendered-statement pin in I-1
