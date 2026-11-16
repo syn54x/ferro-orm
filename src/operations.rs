@@ -1893,15 +1893,6 @@ macro_rules! sea_query_build_for_backend {
     }};
 }
 
-macro_rules! sea_query_to_string_for_backend {
-    ($stmt:expr, $backend:expr) => {{
-        match $backend {
-            crate::state::Dialect::Sqlite => $stmt.to_string(SqliteQueryBuilder),
-            crate::state::Dialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
-        }
-    }};
-}
-
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
 /// sees the same string representation as SQLite.
 /// One combined catalog probe per table per schema epoch.
