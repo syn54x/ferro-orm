@@ -34,7 +34,6 @@ from ._bind_payload import (
 from ._core import (
     begin_transaction,
     commit_transaction,
-    fetch_all,
     prune_stale_relations,
     register_instance,
     rollback_transaction,
@@ -775,8 +774,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert sorted(author.name for author in authors) == ["Ada Lovelace", "Grace Hopper"]
             ```
         """
-        route = await _transaction_or_using(using, session)
-        return await fetch_all(cls, route)
+        return await Query(cls, using=using, session=session).all()
 
     @classmethod
     async def get(cls, pk: Any, *, session: "Session | None" = None) -> Self:

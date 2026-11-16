@@ -142,6 +142,21 @@ async def test_fetches_that_select_the_column_refuse(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
+async def test_model_all_refuses_a_mismatched_column(db_url):
+    Token = _token_model()
+    await _connect_with_table(db_url, OLD_TOKEN)
+    async with ferro.engines.session():
+        await execute("INSERT INTO \"token\" VALUES (1, 'plain')")
+
+        with pytest.raises(DataError, match=REFUSAL):
+            await Token.all()
+
+        rows = await fetch_all('SELECT id, secret FROM "token"')
+        assert [(row["id"], row["secret"]) for row in rows] == [(1, "plain")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
 async def test_text_column_over_live_bytea_refuses_both_doors(db_url):
     class Note(Model):
         id: Annotated[int, FerroField(primary_key=True)]

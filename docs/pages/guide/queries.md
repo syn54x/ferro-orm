@@ -563,7 +563,8 @@ The four calls send these statements; on PostgreSQL only the placeholders differ
 ```sql
 -- predicates.py:terminals (sqlite)
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
-FROM "transaction";
+FROM "transaction"
+WHERE TRUE;
 
 SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
 FROM "transaction"

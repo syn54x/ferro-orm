@@ -432,8 +432,8 @@ fn apply_decoded_fields<'py>(
 ///
 /// # Precondition
 /// `fields` must be a FULL row decode — every persisted column, not a
-/// projected subset. All three current callers (`fetch_all`, `fetch_one`,
-/// `fetch_filtered` in `src/operations.rs`) decode `SELECT table.*`, so this
+/// projected subset. The one current caller (`fetch_filtered` in
+/// `src/operations.rs`) decodes `SELECT table.*`, so this
 /// holds today. A future caller that passes a partial-column decode would
 /// silently corrupt the cached instance: columns absent from `fields` keep
 /// their stale `__dict__` values, and `__pydantic_fields_set__` is reset to

@@ -970,15 +970,10 @@ storage class the table catalog read for it. Today it is called by:
 
 - a write that sets the column: `save()` as insert or update,
   `bulk_create()` and the `SET` columns of a query `update()`;
-- a `Query` fetch that selects it, built by `build_fetch` (`get()`,
+- a fetch that selects it, built by `build_fetch` (`Model.all()`, `get()`,
   `where(...).all()`, `first()`, `select()`, `include()`): the root model's
   columns, a projected column (through a relation too) and every included
   model's columns.
-
-`Model.all()` selects every root column through a `SELECT` of its own
-(`_core.fetch_all`, `src/ferro/models.py`, `src/operations.rs`) and never
-calls the function: a standing I-17 violation, tracked in #944, not intended
-behaviour.
 
 Setting or selecting the column is what the contract covers. A fetch that
 does not select it runs, and a statement that only filters on it or

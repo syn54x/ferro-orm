@@ -659,10 +659,6 @@ async def _live_row_security_for_test(
     """
     ...
 
-async def fetch_all(
-    cls: object,
-    route: RouteHandle,
-) -> list[Any]: ...
 async def fetch_filtered(
     cls: object,
     query_ir_json: str,
@@ -680,11 +676,6 @@ async def count_filtered(
     secret_values: Iterable[object] = ...,
     operation: Literal["count", "exists"] = "count",
 ) -> int: ...
-async def fetch_one(
-    cls: object,
-    pk_val: str,
-    route: RouteHandle,
-) -> Any | None: ...
 async def save_record(
     name: str,
     data: dict[str, Any],
