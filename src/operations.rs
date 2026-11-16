@@ -2647,9 +2647,26 @@ fn build_save_sql(
         returning.push(pk.to_string());
     }
     returning.extend(model.meta.generated_cols.iter().cloned());
-    let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
+    let (mut sql, values) = if columns.is_empty() {
+        default_values_insert(table_name)
+    } else {
+        sea_query_build_for_backend!(insert_stmt, backend)
+    };
     push_returning(&mut sql, &returning);
     Ok((sql, values, returning))
+}
+
+/// The insert of a row whose every column is the database's. sea-query
+/// renders it `VALUES (DEFAULT)` on Postgres and `() VALUES ()` on SQLite,
+/// which SQLite rejects, so the one text both dialects accept is written here (I-16).
+fn default_values_insert(table_name: &str) -> (String, sea_query::Values) {
+    (
+        format!(
+            "INSERT INTO {} DEFAULT VALUES",
+            ferro_ddl_lowering::quote_ident(table_name)
+        ),
+        sea_query::Values(Vec::new()),
+    )
 }
 
 /// Append ` RETURNING "a", "b"` for `columns`; nothing when there are none.
@@ -3168,16 +3185,22 @@ pub fn save_bulk_records<'py>(
                             backend,
                         )?);
                     }
-                    insert_stmt.values(row_values).map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "Statement build failed: {}",
-                            e
-                        ))
-                    })?;
+                    if !column_names.is_empty() {
+                        insert_stmt.values(row_values).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "Statement build failed: {}",
+                                e
+                            ))
+                        })?;
+                    }
                 }
 
-                let (s, values) = sea_query_build_for_backend!(insert_stmt, backend);
-                statements.push((s, values));
+                // One row per statement (`bulk_insert_rows_per_statement`).
+                statements.push(if column_names.is_empty() {
+                    default_values_insert(&table_name)
+                } else {
+                    sea_query_build_for_backend!(insert_stmt, backend)
+                });
             }
 
             let mut rows_affected: u64 = 0;
@@ -3222,11 +3245,11 @@ pub fn save_bulk_records<'py>(
 /// Rows per INSERT statement so `rows × columns` never exceeds the backend's
 /// bind-parameter budget. Always at least one row: a single row wider than
 /// the budget cannot be split further, so it passes through to the backend
-/// (whose error is then the honest answer). A zero-column statement binds
-/// nothing, so the whole batch fits in one statement.
+/// (whose error is then the honest answer). A zero-column insert is
+/// `DEFAULT VALUES`, which adds one row, so it is one row per statement.
 fn bulk_insert_rows_per_statement(max_bind_params: usize, n_columns: usize) -> usize {
     if n_columns == 0 {
-        return usize::MAX;
+        return 1;
     }
     (max_bind_params / n_columns).max(1)
 }
@@ -3254,8 +3277,8 @@ mod bulk_chunking_tests {
     }
 
     #[test]
-    fn zero_columns_never_split() {
-        assert_eq!(bulk_insert_rows_per_statement(32_766, 0), usize::MAX);
+    fn zero_columns_is_one_row_per_statement() {
+        assert_eq!(bulk_insert_rows_per_statement(32_766, 0), 1);
     }
 }
 
