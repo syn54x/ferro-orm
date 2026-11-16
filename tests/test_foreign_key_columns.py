@@ -37,6 +37,7 @@ from ferro import (
 )
 from ferro.columns import ForeignKeyRef
 from ferro.registry import REGISTRY
+from ferro.relations.fixes import DeclarationRefusal
 from ferro.relations import resolve_relationships
 
 
@@ -303,8 +304,10 @@ def test_a_retired_key_column_to_a_model_never_defined_fails_resolution():
         id: int | None = Field(default=None, primary_key=True)
         team_id: int | None = Field(default=None, foreign_key="Team", retired=True)
 
-    with pytest.raises(RuntimeError, match="'Team' not found"):
+    with pytest.raises(DeclarationRefusal) as refusal:
         ensure_resolved_modelset()
+    assert (refusal.value.model, refusal.value.field) == ("Player", "team_id")
+    assert "no model named Team is defined" in str(refusal.value)
 
 
 def test_forward_and_reverse_are_public():
