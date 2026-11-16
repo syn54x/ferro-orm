@@ -378,6 +378,29 @@ def _cases(storage: str) -> dict[str, dict]:
                 f'tags: Relation[list["{spelled}"]] = ManyToMany(through="player_teams")'
             ],
         )
+    # Where the spelling fix cannot be written, the refusal is the reason alone.
+    pk_name = _field_of(pk)
+    pk_line = pk.replace("primary_key=True", 'primary_key=True, foreign_key="Teem"')
+    cases["a primary key naming a model close to Team"] = _case(
+        "none", pk_name, local=None, no_pk=("Player",), Player=[pk_line]
+    )
+    cases["a retired key column naming a model close to Team"] = _case(
+        "none",
+        "team_id",
+        local=None,
+        Player=[
+            f'team_id: {key} | None = Field(default=None, foreign_key="Teem", '
+            "retired=True)"
+        ],
+    )
+    cases["a many-to-many naming a model close to its own"] = _case(
+        "none",
+        "friends",
+        local=None,
+        Player=[
+            'friends: Relation[list["Playr"]] = ManyToMany(through="player_friends")'
+        ],
+    )
     # Refusals that can name no fix, and say what to do in words.
     cases["bare forward over a column with no foreign_key"] = _case(
         "none",

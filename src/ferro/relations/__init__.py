@@ -94,14 +94,18 @@ def _join_table_rename_hints(
 
 # The declaration that names a target: its model, its field and how it is
 # written naming another model.
-_At = tuple[Any, str, Callable[[Any], str]]
+# The line is `None` where no line would load: a primary key or retired column
+# cannot be written as a foreign key, and a model cannot link itself.
+_At = tuple[Any, str, Callable[[Any], str | None]]
 
 
 def _key_at(model_cls: Any, column: str, meta: FerroField) -> _At:
     """The foreign-key column ``model_cls.column``, as `_resolve_target` is told."""
 
-    def line(match: Any) -> str:
-        info = model_cls.model_fields[column]
+    def line(match: Any) -> str | None:
+        info = model_cls.model_fields.get(column)
+        if info is None or column == model_cls.__ferro_pk__:
+            return None
         return key_column_line(
             model_cls,
             column,
@@ -119,7 +123,11 @@ def _many_to_many_at(model_cls: Any, name: str, relation: ManyToManyRelation) ->
     return (
         model_cls,
         name,
-        lambda match: _many_to_many_line(name, match.__name__, relation),
+        lambda match: (
+            None
+            if match is model_cls
+            else _many_to_many_line(name, match.__name__, relation)
+        ),
     )
 
 
@@ -132,9 +140,9 @@ def _undefined_target_refusal(name: str, at: _At) -> DeclarationRefusal:
     close = difflib.get_close_matches(name, models, n=1)
     edits = []
     if close and len(models[close[0]]) == 1 and models[close[0]][0].__ferro_pk__:
-        edits = [
-            Edit(model_cls.__name__, field, "replace", (line(models[close[0]][0]),))
-        ]
+        written = line(models[close[0]][0])
+        if written is not None:
+            edits = [Edit(model_cls.__name__, field, "replace", (written,))]
     return DeclarationRefusal(
         model_cls.__name__,
         field,
@@ -2015,11 +2023,10 @@ def resolve_relationships():
     one again.
 
     Raises:
-        RuntimeError: A relation names a model that is not defined, a
-            many-to-many join table's name is another model's table, or a
-            model's schema fails to rebuild.
-        TypeError: A model's declaration is invalid once its relations are
-            known.
+        RuntimeError: A many-to-many join table's name is another model's
+            table, or a model's schema fails to rebuild.
+        TypeError: A relation names a model that is not defined, or a
+            model's declaration is invalid once its relations are known.
     """
     before = REGISTRY.snapshot()
     try:
