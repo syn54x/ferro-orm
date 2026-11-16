@@ -1,11 +1,12 @@
 """Relation resolution: binding each declared relation to its target model."""
 
 import ast
+import difflib
 import json
 import re
 import sys
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from types import UnionType
 from typing import Annotated, Any, ForwardRef, Union, get_args, get_origin
@@ -91,11 +92,73 @@ def _join_table_rename_hints(
 # -- foreign-key columns and the relations that name them -----------------------------
 
 
-def _resolve_target(target: Any, *, final: bool) -> Any:
+# The declaration that names a target: its model, its field and how it is
+# written naming another model.
+# The line is `None` where no line would load: a primary key or retired column
+# cannot be written as a foreign key, and a model cannot link itself.
+_At = tuple[Any, str, Callable[[Any], str | None]]
+
+
+def _key_at(model_cls: Any, column: str, meta: FerroField) -> _At:
+    """The foreign-key column ``model_cls.column``, as `_resolve_target` is told."""
+
+    def line(match: Any) -> str | None:
+        info = model_cls.model_fields.get(column)
+        if info is None or column == model_cls.__ferro_pk__:
+            return None
+        return key_column_line(
+            model_cls,
+            column,
+            match,
+            nullable=annotation_allows_none(info.annotation),
+            meta=meta,
+            foreign_key=match.__name__,
+        )
+
+    return model_cls, column, line
+
+
+def _many_to_many_at(model_cls: Any, name: str, relation: ManyToManyRelation) -> _At:
+    """The many-to-many ``model_cls.name``, as `_resolve_target` is told."""
+    return (
+        model_cls,
+        name,
+        lambda match: (
+            None
+            if match is model_cls
+            else _many_to_many_line(name, match.__name__, relation)
+        ),
+    )
+
+
+def _undefined_target_refusal(name: str, at: _At) -> DeclarationRefusal:
+    """The refusal for a name no model answers: define it, or fix the spelling."""
+    model_cls, field, line = at
+    models: dict[str, list[Any]] = {}
+    for model in REGISTRY.models().values():
+        models.setdefault(model.__name__, []).append(model)
+    close = difflib.get_close_matches(name, models, n=1)
+    edits = []
+    if close and len(models[close[0]]) == 1 and models[close[0]][0].__ferro_pk__:
+        written = line(models[close[0]][0])
+        if written is not None:
+            edits = [Edit(model_cls.__name__, field, "replace", (written,))]
+    return DeclarationRefusal(
+        model_cls.__name__,
+        field,
+        f"no model named {name} is defined; define it, or import the module "
+        "that defines it, before relations resolve",
+        edits,
+    )
+
+
+def _resolve_target(target: Any, *, final: bool, at: _At | None = None) -> Any:
     """The model ``target`` names: a class as it is, a name from the registry.
 
     Before relations resolve (``final=False``) a name nothing answers yet is
-    ``None``, and the check that needed it waits for resolution.
+    ``None``, and the check that needed it waits for resolution. Once they do
+    (``final=True``), ``at`` is the declaration naming it, and a name nothing
+    answers is refused there.
     """
     if isinstance(target, type):
         return target
@@ -107,7 +170,8 @@ def _resolve_target(target: Any, *, final: bool) -> Any:
             return None
     model = REGISTRY.resolve_reference(name, default=None)
     if model is None:
-        raise RuntimeError(f"Relationship resolution failed: '{name}' not found")
+        assert at is not None, name
+        raise _undefined_target_refusal(name, at)
     return model
 
 
@@ -1028,7 +1092,19 @@ def check_forward_relation(
         if final:
             _refuse_unnamed_forward(model_cls, name, relation)
         return
-    target = _resolve_target(relation.to, final=final)
+
+    def forward_at(match: Any) -> str:
+        info = model_cls.model_fields.get(relation.fk_column)
+        nullable = info is not None and annotation_allows_none(info.annotation)
+        return forward_line(
+            name,
+            match.__name__,
+            relation.fk_column,
+            relation._bound,
+            nullable=nullable,
+        )
+
+    target = _resolve_target(relation.to, final=final, at=(model_cls, name, forward_at))
     if target is None:
         return
     relation.to = target
@@ -1098,7 +1174,9 @@ def check_forward_relation(
             f"{column} has no foreign_key",
             [Edit(model, column, "replace", (line,))],
         )
-    points_at = _resolve_target(meta.foreign_key, final=final)
+    points_at = _resolve_target(
+        meta.foreign_key, final=final, at=_key_at(model_cls, column, meta)
+    )
     if points_at is None:
         return
     nullable = annotation_allows_none(info.annotation)
@@ -1146,7 +1224,17 @@ def check_reverse_relation(
     if relation._refusal is not None:
         _refuse_unnamed_reverse(model_cls, name, relation, final=final)
         return
-    other = _resolve_target(relation.to, final=final)
+    other = _resolve_target(
+        relation.to,
+        final=final,
+        at=(
+            model_cls,
+            name,
+            lambda match: reverse_line(
+                name, match.__name__, relation.attribute, relation._bound
+            ),
+        ),
+    )
     if other is None:
         return
     relation.to = other
@@ -1177,7 +1265,9 @@ def check_reverse_relation(
     elif meta is None or meta.foreign_key is None:
         reason = f"{other.__name__}.{column} has no foreign_key"
     else:
-        points_at = _resolve_target(meta.foreign_key, final=final)
+        points_at = _resolve_target(
+            meta.foreign_key, final=final, at=_key_at(other, column, meta)
+        )
         if points_at is None or points_at is model_cls:
             return
         reason = (
@@ -1238,7 +1328,11 @@ def _check_reverse_many_to_many(
     if linked._refusal is not None:
         return  # the many-to-many's own refusal raises at resolution
     other = relation.to
-    points_at = _resolve_target(linked.to, final=final)
+    points_at = _resolve_target(
+        linked.to,
+        final=final,
+        at=_many_to_many_at(other, relation.attribute, linked),
+    )
     if points_at is None or points_at is model_cls:
         return
     refused = (
@@ -1831,7 +1925,11 @@ def _resolve_declared_foreign_key(
     """Check one queued foreign-key column or relation; install a reverse one."""
     model_cls = REGISTRY.models()[model_name]
     if isinstance(declared, FerroField):
-        target = _resolve_target(declared.foreign_key, final=True)
+        target = _resolve_target(
+            declared.foreign_key,
+            final=True,
+            at=_key_at(model_cls, field_name, declared),
+        )
         check_key_column(model_cls, field_name, declared, target)
     elif isinstance(declared, ForwardRelation):
         check_forward_relation(model_cls, field_name, declared, final=True)
@@ -1925,11 +2023,10 @@ def resolve_relationships():
     one again.
 
     Raises:
-        RuntimeError: A relation names a model that is not defined, a
-            many-to-many join table's name is another model's table, or a
-            model's schema fails to rebuild.
-        TypeError: A model's declaration is invalid once its relations are
-            known.
+        RuntimeError: A many-to-many join table's name is another model's
+            table, or a model's schema fails to rebuild.
+        TypeError: A relation names a model that is not defined, or a
+            model's declaration is invalid once its relations are known.
     """
     before = REGISTRY.snapshot()
     try:
@@ -1967,7 +2064,11 @@ def _resolve_pending() -> None:
         # Everything else queued is a many-to-many.
         if rel._refusal is not None:
             _refuse_unnamed_many_to_many(REGISTRY.models()[model_name], field_name, rel)
-        rel.to = target_model = _resolve_target(rel.to, final=True)
+        rel.to = target_model = _resolve_target(
+            rel.to,
+            final=True,
+            at=_many_to_many_at(REGISTRY.models()[model_name], field_name, rel),
+        )
         if target_model is REGISTRY.models()[model_name]:
             # The class body names a target by the name its model is
             # registered under, so class definition already refused this.

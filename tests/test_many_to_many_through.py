@@ -207,10 +207,10 @@ def test_a_many_to_many_to_a_model_never_defined_fails_resolution():
             through="player_events"
         )
 
-    with pytest.raises(
-        RuntimeError, match="Relationship resolution failed: 'Nowhere' not found"
-    ):
+    with pytest.raises(DeclarationRefusal) as refusal:
         ferro.ensure_resolved_modelset()
+    assert (refusal.value.model, refusal.value.field) == ("Player", "events")
+    assert "no model named Nowhere is defined" in str(refusal.value)
 
 
 def test_reverse_index_false_keeps_the_unique_index_only():
