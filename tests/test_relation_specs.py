@@ -15,6 +15,7 @@ from ferro import Check, Field, Forward, ManyToMany, Model, Relation, Reverse
 from ferro.base import FerroField
 from ferro.columns import RelationSpec
 from ferro.registry import REGISTRY
+from ferro.relations.fixes import DeclarationRefusal
 
 
 class TestRelationSpecBasics:
@@ -201,8 +202,11 @@ class TestCompleteAtClassDefinition:
 
         spec = Player.__ferro_relation_specs__["team"]
 
-        with pytest.raises(RuntimeError, match="'Ghost' not found"):
+        with pytest.raises(DeclarationRefusal) as refusal:
             spec.target
+
+        assert (refusal.value.model, refusal.value.field) == ("Player", "team_id")
+        assert "no model named Ghost is defined" in str(refusal.value)
 
     def test_the_forward_descriptor_keeps_no_key_column_of_its_own(self):
         from ferro.relations.descriptors import ForwardDescriptor
