@@ -73,7 +73,7 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
 `0.28` makes a foreign key a column you declare. Before, `ForeignKey()` created an `account_id` column you never wrote, and the other model needed a `BackRef()` whose name matched its `related_name`. Now you write `account_id` as an ordinary field with `Field(foreign_key=Account)`, and a relation is an optional typed view that names that column. The old declarations are refused by name, with a pointer to this section.
 
-A correct conversion leaves the schema as it was: the same columns, the same `fk_*` constraints, the same join tables. The [acceptance check](#explicit-foreign-keys-acceptance) at the end proves it.
+A correct conversion leaves the schema as it was: the same columns, the same `fk_*` constraints, the same join tables. Two changes are the exception: a key column you give a `db_type`, and a many-to-many join column that takes its key's exact storage. The [acceptance check](#explicit-foreign-keys-acceptance) at the end names both and proves the rest.
 
 ### The conversion table
 
@@ -316,7 +316,30 @@ The old relation keywords, `back_ref`, `many_to_many`, `related_name`, `through`
 
 Write `Field(primary_key=True)`. A JSON schema no longer carries any Ferro option.
 
-**A relation that names a model nobody defines.** `team_id: int = Field(foreign_key="Teem")`, with no model named `Teem`, is refused at `connect()` with a `TypeError` that names the declaration: `Player.team_id: no model named Teem is defined; define it, or import the module that defines it, before relations resolve`. When one defined model has a close name, the refusal adds the corrected line to write. `0.27` raised `RuntimeError: Relationship resolution failed: 'Teem' not found`, so change any `except RuntimeError` around `connect()` that caught it.
+**A relation or key column that names a model nobody defines.** In `0.27`, a `ForeignKey` or `ManyToMany` whose target no model answered raised `RuntimeError: Relationship resolution failed: 'Teem' not found` at `connect()`. Now a key column or a relation that names such a model is refused there with a `TypeError` that names the declaration:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys.py:undefined"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/upgrade_foreign_keys_annotated.py:undefined"
+    ```
+
+When one defined model has a close name, as `Team` does here, the refusal prints the line to write:
+
+<!-- prints: upgrade_foreign_keys.py:undefined -->
+```text
+TypeError: Player.team_id: no model named Teem is defined; define it, or import the module that defines it, before relations resolve. Write: team_id: int = Field(foreign_key="Team")
+```
+
+Change any `except RuntimeError` around `connect()` that caught the old error.
+
+**`add()` and `remove()` on a many-to-many.** They take saved instances of the related model, and refuse anything else before a statement is sent: an instance not saved yet raises `ValueError`, and an instance of another model raises `TypeError`. `0.27` bound the unsaved instance's `None` and failed inside the database, and read another model's `id` and linked or unlinked the row with that key.
 
 **A key column's storage.** A key column must be stored like the key it points at. Before, the column took its storage from the Python type alone, so an `int` column beside a `bigint` key was created as `integer`. That is now refused, naming the `db_type` to add: when the class is defined for a class target, as here, and at `connect()` for a target named by string:
 
@@ -339,16 +362,16 @@ The refusal prints the line to write:
 TypeError: Entry.ledger_id: Ledger.id is stored as bigint and this column as int. Write: ledger_id: int = Field(foreign_key=Ledger, db_type="bigint")
 ```
 
-Adding `db_type="bigint"` widens the column, the one schema change a conversion makes.
+Adding `db_type="bigint"` widens the column, one of the two schema changes the [acceptance check](#explicit-foreign-keys-acceptance) allows.
 
 ### Changes outside relations {#changes-outside-relations}
 
 Four more changes in `0.28` reach code that runs today. None is about a foreign key:
 
-- **Bytes over a text column, on Postgres.** A `bytes` or `SecretBytes` field whose live column is `varchar`, or a `str` field whose live column is `bytea`, is refused. `0.27` stored the value as its hex text (`\xff006b` for `b"\xff\x00k"`). Now `save()`, `bulk_create()`, `update()` and every fetch that selects the field, `Model.all()` included, raise a `DataError` that names the field and the fix, before any statement is sent. Change the column to the type the model declares with a migration (`ferro migrate new` writes it) or with `connect(migrate_updates=True)`; the next operation on the same connection then succeeds. SQLite stores the bytes as written, so it never refuses.
-- **A JSON field loads as its declared type.** A field stored as JSON whose annotation is more than plain `dict` and `list` data, such as a nested Pydantic model, a `set`, a `tuple` or a `list[datetime]`, is fetched as that type. `0.27` handed back what the JSON decoder made: a `dict` for a nested model, a `list` for a `set`, a `str` for a `datetime`. Code that read `product.dimensions["width"]` on a fetched record now reads `product.dimensions.width`, as it always did on a record you constructed. A stored document the type rejects raises on fetch, naming the field.
-- **A fetched record lists its fields in declaration order.** `model_dump()` and `model_dump_json()` give a fetched record's keys in the order the model declares them, the order a constructed record has. `0.27` could give them in the order of the row. This matters only to text you compare.
-- **`Model.all()` sends the statement a query sends.** Its `SELECT` now ends in `WHERE TRUE`, as `Model.where(...)` with no filter does. This matters only to a test that matches logged SQL.
+- **Bytes over a text column, on Postgres.** A `bytes` or `SecretBytes` field whose live column is a text type such as `varchar` or `text`, or a `str` field whose live column is `bytea`, is refused. `0.27` stored bytes in a text column as their hex text (`\xff006b` for `b"\xff\x00k"`). Now `save()`, `bulk_create()`, `update()` and every fetch that selects the field, `Model.all()` included, raise a `DataError` that names the field and the fix, before any statement is sent. Change the column to the type the model declares with a migration (`ferro migrate new` writes it) or with `connect(migrate_updates=True)`; the next operation on the same connection then succeeds. SQLite stores the bytes as written, so it never refuses.
+- **A JSON field loads as its declared type.** A field stored as JSON whose annotation is more than plain `dict` and `list` data, such as a nested Pydantic model, a `set`, a `tuple` or a `list[datetime]`, is fetched as that type. `0.27` handed back what the JSON decoder made: a `dict` for a nested model, a `list` for a `set`, a `str` for a `datetime`. Code that read `product.dimensions["width_mm"]` on a fetched record now reads `product.dimensions.width_mm`, as it always did on a record you constructed. A stored document the type rejects raises on fetch, naming the field.
+- **A fetched record lists its fields in declaration order.** `model_dump()` and `model_dump_json()` give a fetched record's keys in the order the model declares them, the order a constructed record has. `0.27` gave them in alphabetical order, the order its `SELECT` lists the columns. This matters only to text you compare.
+- **`Model.all()` sends the statement a query sends.** Its `SELECT` now ends in `WHERE TRUE`, as `Model.select().all()` and every other query with no filter does. This matters only to a test that matches logged SQL.
 
 ### The acceptance check {#explicit-foreign-keys-acceptance}
 
@@ -373,7 +396,8 @@ Two changes plan a statement, and you review and record each as a migration. One
 
     0.28 makes a foreign key a column the model declares. A relation is an
     optional typed view that names that column. A correct conversion changes
-    no schema: same columns, same fk_* constraints, same join tables.
+    no schema (same columns, same fk_* constraints, same join tables) apart
+    from the two kinds of statement step 5 allows.
 
     Rules for every file you touch:
     - Keep the file's declaration style for the new key column: assignment
@@ -470,20 +494,24 @@ Two changes plan a statement, and you review and record each as a migration. One
          RuntimeError ("Relationship resolution failed"). Fix the name or
          import the module that defines the model, and update any
          `except RuntimeError` that caught it.
+       - add() and remove() on a many-to-many refuse an unsaved instance
+         (ValueError) and an instance of another model (TypeError) before
+         any statement. Save the instance first; pass the related model.
 
     3. Check the changes outside relations:
        - Postgres only: a bytes or SecretBytes field whose live column is
-         varchar, or a str field whose live column is bytea, raises DataError
+         a text type, or a str field whose live column is bytea, raises DataError
          on save(), bulk_create(), update() and every fetch that selects it,
          Model.all() included. Do not catch it: change the column with a
          migration (`ferro migrate new`) or connect(migrate_updates=True).
-       - A JSON field annotated with a nested Pydantic model, set, tuple,
-         datetime, UUID, Decimal or enum is fetched as that type, not as the
-         dict, list or str the JSON decoder made. Change
+       - A JSON field annotated with a nested Pydantic model, a set, a
+         tuple, or a list or dict holding datetime, UUID, Decimal or enum
+         values is fetched as that type, not as the dict, list or str the
+         JSON decoder made. Change
          `record.field["key"]` on a fetched record to `record.field.key`,
          and drop any conversion the code did by hand after a fetch.
        - model_dump() of a fetched record lists keys in field declaration
-         order, and Model.all() logs `SELECT ... WHERE TRUE`. Update tests
+         order, not alphabetically, and Model.all() logs `SELECT ... WHERE TRUE`. Update tests
          that compare that text.
 
     4. Report every key column you gave a db_type and every through= name you
