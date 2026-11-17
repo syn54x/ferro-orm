@@ -7,8 +7,9 @@ related_files:
   - src/ferro/query/nodes.py
   - src/ferro/query/wire.py
   - src/ferro/query/builder.py
+  - src/ferro/raw.py
   - AGENTS.md
-related_issues: [428, 430, 938]
+related_issues: [428, 430, 938, 976, 981]
 captured: 2026-09-15
 ---
 
@@ -41,6 +42,23 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
   `to_wire_json` canonicalizes. Every statement sends the value `save()`
   wrote, and the core binds it by the join column's storage
   (`join_key_expr`), with no cascade of its own.
+- Raw SQL: `_marshal` in `src/ferro/raw.py` calls the helper for those
+  five types, so a raw bind on SQLite matches the text `save()` stored
+  (#976).
+- Offset refusal: `refuse_offset_seconds` in `src/ferro/_bind_payload.py`
+  raises for a `datetime` / `time` whose UTC offset is not whole minutes
+  (the stored text spells it to the minute). Its two callers cover every
+  path: `canonicalize_wire_scalar` (literals, `update()`, raw binds), once
+  on the whole value, and `save_bind_payload`, once on each field's value
+  as the instance holds it (#981). It searches the value as pydantic's
+  python-mode dump gives it (models and dataclasses become dicts, datetimes
+  stay objects), then every mapping key and value and every collection
+  item, so a shape pydantic can serialize is covered without a container
+  list of Ferro's own. Do not add per-type arms to it. The python-mode dump
+  hands a self-referencing dict or list back unchanged, so the walk tracks
+  containers by `id()`: one reached twice is searched once, and one that is
+  its own ancestor is refused with a `ValueError` before any statement is
+  sent (without that, the walk never ends).
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
 

@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable, Iterator
-from datetime import date, datetime, time
+from collections.abc import Collection, Iterable, Iterator
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import SecretBytes, SecretStr
+from pydantic import SecretBytes, SecretStr, TypeAdapter
 from pydantic_core import to_json
 
 from .columns import retired_clause
+
+# Dumps any value the way pydantic's inference does, keeping datetime objects.
+_INFERRED: TypeAdapter[Any] = TypeAdapter(Any)
 
 _SAVE_COLUMN_CONTAINERS = (set, frozenset, list, tuple)
 _SAVE_COLUMN_USAGE = {
@@ -137,8 +140,82 @@ def _raw_bound_fields(instance: Any) -> dict[str, Any]:
     return raw
 
 
+def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
+    """Refuse a `datetime` or `time` whose UTC offset is not whole minutes.
+
+    The stored text spells an offset to the minute, so such a value would be
+    stored up to a minute off. The value is searched as pydantic dumps it,
+    which turns models and dataclasses into dicts and keeps every `datetime`
+    and `time`, so whatever a JSON column would store is checked: every key
+    and value of a mapping and every item of any other collection. A
+    container reached twice is searched once; one that holds itself cannot be
+    stored as JSON and is refused.
+
+    Args:
+        value: The value about to be written or bound.
+        where: A prefix naming the field, such as `"Message.pinned_at: "`.
+
+    Raises:
+        ValueError: The value, or one it holds, has such an offset, or the
+            value refers to itself.
+    """
+    pending: list[tuple[Any, bool]] = [(_INFERRED.dump_python(value), False)]
+    on_path: set[int] = set()
+    searched: set[int] = set()
+    while pending:
+        item, leaving = pending.pop()
+        if leaving:
+            on_path.discard(id(item))
+            searched.add(id(item))
+            continue
+        if isinstance(item, Mapping):
+            children = [*item.keys(), *item.values()]
+        elif isinstance(item, Collection) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
+            children = list(item)
+        else:
+            children = None
+        if children is not None:
+            if id(item) in on_path:
+                raise ValueError(
+                    f"{where}the value refers to itself (a "
+                    f"{type(item).__name__} inside it holds that same "
+                    f"{type(item).__name__}), so it cannot be stored as JSON. "
+                    "Break the cycle before the write, for example by storing "
+                    "the parent's key instead of the parent."
+                )
+            if id(item) not in searched:
+                on_path.add(id(item))
+                pending.append((item, True))
+                pending.extend((child, False) for child in children)
+        elif isinstance(item, (datetime, time)):
+            offset = item.utcoffset()
+            if offset is not None and offset % timedelta(minutes=1):
+                fix = (
+                    "Convert it first: value.astimezone(timezone.utc)."
+                    if isinstance(item, datetime)
+                    else "Give it an offset in whole minutes, or no tzinfo."
+                )
+                raise ValueError(
+                    f"{where}{item!r} has a UTC offset that is not a whole number "
+                    "of minutes; the database stores an offset to the minute, so "
+                    f"the value would be stored up to a minute off. {fix}"
+                )
+
+
 def canonicalize_wire_scalar(value: Any) -> Any:
     """Canonical JSON form for query and ``update()`` literals (I-13).
+
+    The whole value is checked once by ``refuse_offset_seconds`` before any
+    of it is converted.
+    """
+    refuse_offset_seconds(value)
+    return _canonical_wire_value(value)
+
+
+def _canonical_wire_value(value: Any) -> Any:
+    """Convert one literal already checked by ``refuse_offset_seconds`` (I-13).
 
     A secret is unwrapped first (``unwrap_secret``), so a literal binds what
     ``save()`` wrote. ``datetime`` / ``date`` / ``time`` / UUID / Decimal go
@@ -155,9 +232,9 @@ def canonicalize_wire_scalar(value: Any) -> Any:
     if isinstance(value, (datetime, date, time, uuid.UUID, Decimal)):
         return json.loads(to_json(value))
     if isinstance(value, (list, tuple, set)):
-        return [canonicalize_wire_scalar(item) for item in value]
+        return [_canonical_wire_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: canonicalize_wire_scalar(item) for key, item in value.items()}
+        return {key: _canonical_wire_value(item) for key, item in value.items()}
     if hasattr(value, "isoformat"):
         raise TypeError(
             f"{type(value).__name__} is not a query/update literal; "
@@ -179,6 +256,11 @@ def save_bind_payload(instance: Any) -> dict[str, Any]:
     which a fetch fills in the ``SELECT``'s column order, and the raw columns
     are bound apart from it.
     """
+    model_name = type(instance).__name__
+    for name in type(instance).model_fields:
+        refuse_offset_seconds(
+            getattr(instance, name, None), where=f"{model_name}.{name}: "
+        )
     raw = _raw_bound_fields(instance)
     # A generated column is the database's to write (ADR-0058): never bound.
     generated = getattr(type(instance), "__ferro_generated__", {})
