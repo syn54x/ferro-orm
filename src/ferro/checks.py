@@ -737,6 +737,7 @@ def _resolve_check_node(
     check: Check,
     columns: Mapping[str, Any],
     relations: Mapping[str, RelationSpec],
+    row: str,
 ) -> QueryNode:
     """Evaluate one check's lambda against a validating proxy.
 
@@ -744,9 +745,9 @@ def _resolve_check_node(
     operator on a relation, a bare relation returned — is re-raised as a
     ``TypeError`` naming the model and the check, so a model with several
     checks says which one is wrong. ``TypeError`` is also the declaration-error
-    type the metaclass surfaces unwrapped.
+    type the metaclass surfaces unwrapped. ``row`` is the lambda's parameter,
+    as refusals spell it.
     """
-    row = _row_name(check.predicate, model_cls)
     proxy = _CheckProxy(
         model_cls,
         columns,
@@ -815,8 +816,10 @@ def compile_table_checks(
         return ()
     specs: list[TableCheckSpec] = []
     for check in declared:
-        node = _resolve_check_node(model_cls, model_name, check, columns, relations)
         row = _row_name(check.predicate, model_cls)
+        node = _resolve_check_node(
+            model_cls, model_name, check, columns, relations, row
+        )
         specs.append(
             TableCheckSpec(
                 suffix=check.suffix,

@@ -8,6 +8,7 @@ condition.
 import difflib
 import inspect
 import re
+import sys
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -66,6 +67,18 @@ _POSITIONAL = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
 )
 
+# Only parameter names are read, so annotations stay unevaluated: on 3.14 a
+# name imported under `if TYPE_CHECKING:` would otherwise raise NameError.
+# Before 3.14 annotations are evaluated at definition, so none is pending.
+if sys.version_info >= (3, 14):
+    import annotationlib
+
+    _SIGNATURE_OPTIONS: dict[str, Any] = {
+        "annotation_format": annotationlib.Format.FORWARDREF
+    }
+else:
+    _SIGNATURE_OPTIONS = {}
+
 
 def _row_name(selector: object, model_cls: type) -> str:
     """The name an error gives the row a lambda receives.
@@ -75,7 +88,8 @@ def _row_name(selector: object, model_cls: type) -> str:
     such parameter to read.
     """
     try:
-        parameters = inspect.signature(selector).parameters.values()  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        signature = inspect.signature(selector, **_SIGNATURE_OPTIONS)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        parameters = signature.parameters.values()
     except (TypeError, ValueError):
         parameters = ()
     for parameter in parameters:
