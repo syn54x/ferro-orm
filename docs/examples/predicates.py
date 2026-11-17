@@ -19,6 +19,7 @@ class Owner(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
+
     accounts: Relation[list["Account"]] = Reverse("owner_id")
 
 
@@ -26,6 +27,7 @@ class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
     owner_id: int | None = Field(default=None, foreign_key=Owner)
+
     owner: Relation[Owner | None] = Forward("owner_id")
     transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
@@ -34,6 +36,7 @@ class Category(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True)
     parent_id: int | None = Field(default=None, foreign_key="Category")
+
     parent: Relation["Category | None"] = Forward("parent_id")
     children: Relation[list["Category"]] = Reverse("parent_id")
     transactions: Relation[list["Transaction"]] = Reverse("category_id")
@@ -47,8 +50,9 @@ class Transaction(Model):
     posted_on: date
     cleared_on: date | None = None
     account_id: int = Field(foreign_key=Account)
-    account: Relation[Account] = Forward("account_id")
     category_id: int | None = Field(default=None, foreign_key=Category)
+
+    account: Relation[Account] = Forward("account_id")
     category: Relation[Category | None] = Forward("category_id")
     lines: Relation[list["SplitLine"]] = Reverse("transaction_id")
     transfer_out: Relation[list["Transfer"]] = Reverse("outflow_id")
@@ -60,22 +64,25 @@ class SplitLine(Model):
     id: int | None = Field(default=None, primary_key=True)
     amount: Decimal
     transaction_id: int = Field(foreign_key=Transaction)
-    transaction: Relation[Transaction] = Forward("transaction_id")
     category_id: int = Field(foreign_key=Category)
+
+    transaction: Relation[Transaction] = Forward("transaction_id")
     category: Relation[Category] = Forward("category_id")
 
 
 class Transfer(Model):
     id: int | None = Field(default=None, primary_key=True)
     outflow_id: int = Field(foreign_key=Transaction, unique=True)
-    outflow: Relation[Transaction] = Forward("outflow_id")
     inflow_id: int = Field(foreign_key=Transaction, unique=True)
+
+    outflow: Relation[Transaction] = Forward("outflow_id")
     inflow: Relation[Transaction] = Forward("inflow_id")
 
 
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True)
+
     transactions: Relation[list[Transaction]] = ManyToMany(through="tag_transactions")
 
 

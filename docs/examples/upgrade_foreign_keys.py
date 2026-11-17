@@ -28,10 +28,11 @@ class Note(Model):
     id: int | None = Field(default=None, primary_key=True)
     body: str
     account_id: int = Field(foreign_key=Account, index=True)
-    account: Relation[Account] = Forward("account_id")
     reply_to_id: int | None = Field(
         default=None, foreign_key="Note", on_delete="SET NULL"
     )
+
+    account: Relation[Account] = Forward("account_id")
     reply_to: Relation["Note | None"] = Forward("reply_to_id")
     replies: Relation[list["Note"]] = Reverse("reply_to_id")
     pin: Relation[list["Pin"]] = Reverse("note_id")
@@ -41,12 +42,14 @@ class Note(Model):
 class Pin(Model):
     id: int | None = Field(default=None, primary_key=True)
     note_id: int = Field(foreign_key=Note, unique=True)
+
     note: Relation[Note] = Forward("note_id")
 
 
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
+
     notes: Relation[list[Note]] = ManyToMany(through="tag_notes")
 
 
@@ -64,6 +67,7 @@ def storage_refusal() -> None:
         class Entry(Model):
             id: int | None = Field(default=None, primary_key=True)
             ledger_id: int = Field(foreign_key=Ledger)  # an integer column
+
             ledger: Relation[Ledger] = Forward("ledger_id")
 
     except TypeError as error:

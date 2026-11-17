@@ -1,11 +1,12 @@
 ---
-title: Docs page conventions (kind, running example, results, printed output, session, SQL, glossary, Annotated twins)
+title: Docs page conventions (kind, running example, results, printed output, session, SQL, glossary, Annotated twins, columns before relations)
 type: pattern
 tags: [docs, convention, zensical, pydantic]
 related_files:
   - AGENTS.md
   - docs/examples/
   - docs/includes/abbreviations.md
+  - tests/_docs_checks.py
   - tests/_docs_harness.py
   - tests/_docs_sql.py
   - tests/_docs_twins.py
@@ -308,10 +309,53 @@ or print different output.
 Link the tabs with the labels `Assignment` and `Annotated`, exactly; the
 `content.tabs.link` feature only syncs tabs whose labels match.
 
+### Columns first, then relations
+
+A model declares every column, then one blank line, then its relations. A
+relation is not a column on the table, so the reader sees the table first
+and the typed views over it second.
+
+Before (each relation beside its foreign-key column):
+
+```python
+class Note(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    body: str
+    account_id: int = Field(foreign_key=Account, index=True)
+    account: Relation[Account] = Forward("account_id")
+    reply_to_id: int | None = Field(default=None, foreign_key="Note", on_delete="SET NULL")
+    reply_to: Relation["Note | None"] = Forward("reply_to_id")
+    replies: Relation[list["Note"]] = Reverse("reply_to_id")
+```
+
+After:
+
+```python
+class Note(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    body: str
+    account_id: int = Field(foreign_key=Account, index=True)
+    reply_to_id: int | None = Field(default=None, foreign_key="Note", on_delete="SET NULL")
+
+    account: Relation[Account] = Forward("account_id")
+    reply_to: Relation["Note | None"] = Forward("reply_to_id")
+    replies: Relation[list["Note"]] = Reverse("reply_to_id")
+```
+
+A relation is an assignment of `Forward(...)`, `Reverse(...)` or
+`ManyToMany(...)`; every other annotated name in the class body is a column.
+The columns keep their order among themselves, so the statements Ferro emits
+are the same (AGENTS.md I-16), and so do the relations. A comment directly
+above the first relation belongs to it, and the blank line goes above the
+comment. A model with only relations, or only columns, needs no blank line.
+`python -m tests._docs_checks` reports a column declared after a relation
+and a first relation with no blank line above it.
+
 ## When to apply
 
 Every new or edited page under `docs/pages/`, every script under
 `docs/examples/`, and every twin pair. Prose rules (lead-in and result
 sentences, sentence-case headings, no minimising words) come from the
 writing-for-humans skill and are checked in review; lambda naming (I-8) and
-error checks that can fail are checked by `python -m tests._docs_checks`.
+error checks that can fail and columns before relations are checked by
+`python -m tests._docs_checks`.

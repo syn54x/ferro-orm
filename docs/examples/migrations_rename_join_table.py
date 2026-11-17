@@ -31,6 +31,7 @@ class Author(Model):
     nickname: str | None = Field(default=None, index=True)
     bio: str = Field(index=True)
     status: Status = Status.ACTIVE
+
     tags: Relation[list[Tag]] = ManyToMany(
         through="author_tags",  # before: through="writer_tags"
         renamed_from="writer_tags",  # new

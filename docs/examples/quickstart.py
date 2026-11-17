@@ -17,6 +17,7 @@ class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
+
     posts: Relation[list["Post"]] = Reverse("author_id")
 
 
@@ -27,6 +28,7 @@ class Post(Model):
     published: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     author_id: int = Field(foreign_key=Author)
+
     author: Relation[Author] = Forward("author_id")
 
 

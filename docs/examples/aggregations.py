@@ -16,6 +16,7 @@ from ferro import Field, Forward, Model, Relation, Reverse
 class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
+
     transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
@@ -25,6 +26,7 @@ class Transaction(Model):
     price: Decimal | None = None
     memo: str
     account_id: int | None = Field(default=None, foreign_key=Account)
+
     account: Relation[Account | None] = Forward("account_id")
 
 

@@ -20,6 +20,7 @@ class Owner(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
     email: Annotated[str, Field(unique=True)]
+
     accounts: Relation[list["Account"]] = Reverse("owner_id")
 
 
@@ -27,6 +28,7 @@ class Account(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     label: str
     owner_id: Annotated[int | None, Field(foreign_key=Owner)] = None
+
     owner: Relation[Owner | None] = Forward("owner_id")
     transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
@@ -35,6 +37,7 @@ class Category(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: Annotated[str, Field(unique=True)]
     parent_id: Annotated[int | None, Field(foreign_key="Category")] = None
+
     parent: Relation["Category | None"] = Forward("parent_id")
     children: Relation[list["Category"]] = Reverse("parent_id")
     transactions: Relation[list["Transaction"]] = Reverse("category_id")
@@ -48,8 +51,9 @@ class Transaction(Model):
     posted_on: date
     cleared_on: date | None = None
     account_id: Annotated[int, Field(foreign_key=Account)]
-    account: Relation[Account] = Forward("account_id")
     category_id: Annotated[int | None, Field(foreign_key=Category)] = None
+
+    account: Relation[Account] = Forward("account_id")
     category: Relation[Category | None] = Forward("category_id")
     lines: Relation[list["SplitLine"]] = Reverse("transaction_id")
     transfer_out: Relation[list["Transfer"]] = Reverse("outflow_id")
@@ -61,22 +65,25 @@ class SplitLine(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     amount: Decimal
     transaction_id: Annotated[int, Field(foreign_key=Transaction)]
-    transaction: Relation[Transaction] = Forward("transaction_id")
     category_id: Annotated[int, Field(foreign_key=Category)]
+
+    transaction: Relation[Transaction] = Forward("transaction_id")
     category: Relation[Category] = Forward("category_id")
 
 
 class Transfer(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     outflow_id: Annotated[int, Field(foreign_key=Transaction, unique=True)]
-    outflow: Relation[Transaction] = Forward("outflow_id")
     inflow_id: Annotated[int, Field(foreign_key=Transaction, unique=True)]
+
+    outflow: Relation[Transaction] = Forward("outflow_id")
     inflow: Relation[Transaction] = Forward("inflow_id")
 
 
 class Tag(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     name: Annotated[str, Field(unique=True)]
+
     transactions: Relation[list[Transaction]] = ManyToMany(through="tag_transactions")
 
 

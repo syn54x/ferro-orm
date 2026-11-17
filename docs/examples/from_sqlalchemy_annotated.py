@@ -14,6 +14,7 @@ class User(Model):
     username: Annotated[str, Field(unique=True)]
     email: str
     age: int
+
     posts: Relation[list["Post"]] = Reverse("author_id")
 
 
@@ -21,6 +22,7 @@ class Post(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     title: str
     author_id: Annotated[int, Field(foreign_key=User)]
+
     author: Relation[User] = Forward("author_id")
 
 

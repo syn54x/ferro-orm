@@ -1,6 +1,6 @@
-"""Checks over docs examples: query lambdas, error checks and retired relations.
+"""Checks over docs examples: query lambdas, error checks, relations and columns.
 
-Four mistakes compile and run but teach the wrong thing:
+Five mistakes compile and run but teach the wrong thing:
 
 - ``Post.where(lambda p: p.published)``: a query lambda with a one-letter
   parameter. The docs name it after the model, ``lambda post: post.published``.
@@ -12,6 +12,9 @@ Four mistakes compile and run but teach the wrong thing:
   "shadow column" or "back-reference".
 - Awaiting a forward relation, ``await book.shelf``, or prose saying that
   awaiting one loads it. The relation is the instance; ``.load()`` fills it.
+- A model whose relations sit among its columns. A relation is not a column
+  on the table, so the columns come first, then one blank line, then the
+  relations.
 
 Dated records keep the old words and are exempt: the upgrading guide, the
 changelog, ``docs/plans``, ``docs/brainstorms``, ``docs/research``,
@@ -505,6 +508,67 @@ def awaited_relations(path: Path) -> list[Violation]:
     return sorted(violations, key=lambda violation: violation.line)
 
 
+_RELATION_CALLS = frozenset({"Forward", "Reverse", "ManyToMany"})
+_COLUMNS_FIRST = "declare every column first, then one blank line, then the relations"
+
+
+def _relation(statement: ast.AnnAssign) -> bool:
+    return (
+        isinstance(statement.value, ast.Call)
+        and _called_name(statement.value) in _RELATION_CALLS
+    )
+
+
+def columns_before_relations(path: Path) -> list[Violation]:
+    """Report each model in ``path`` whose relations sit among its columns.
+
+    A relation is an annotated assignment of ``Forward(...)``, ``Reverse(...)``
+    or ``ManyToMany(...)``; every other annotated name in a class body is a
+    column. Reported: a column declared after a relation, and a first
+    relation with columns above it and no blank line between (comments
+    directly above the relation belong to it).
+    """
+    violations = []
+    for source, first_line in _sources(path):
+        lines = source.splitlines()
+        for node in ast.walk(_parse(source, path, first_line)):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            fields = [
+                statement
+                for statement in node.body
+                if isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            ]
+            first = next((field for field in fields if _relation(field)), None)
+            if first is None:
+                continue
+            name = first.target.id
+            above = first.lineno - first_line - 1
+            while lines[above].lstrip().startswith("#"):
+                above -= 1
+            if fields[0] is not first and lines[above].strip():
+                violations.append(
+                    Violation(
+                        path,
+                        first.lineno,
+                        f"relation {name!r} follows the columns with no blank "
+                        f"line; {_COLUMNS_FIRST}",
+                    )
+                )
+            violations += [
+                Violation(
+                    path,
+                    field.lineno,
+                    f"column {field.target.id!r} is declared after relation "
+                    f"{name!r}; {_COLUMNS_FIRST}",
+                )
+                for field in fields[fields.index(first) :]
+                if not _relation(field)
+            ]
+    return sorted(violations, key=lambda violation: violation.line)
+
+
 def _files(paths: list[str]) -> Iterator[Path]:
     for name in paths:
         path = Path(name)
@@ -531,6 +595,7 @@ def main(argv: list[str]) -> int:
             violations += unfailing_error_checks(path)
             violations += retired_vocabulary(path)
             violations += awaited_relations(path)
+            violations += columns_before_relations(path)
         except SyntaxError as error:
             violations.append(
                 Violation(path, error.lineno or 0, f"does not parse: {error.msg}")

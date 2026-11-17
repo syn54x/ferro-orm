@@ -588,6 +588,7 @@ What this means in practice:
   class Player(Model):
       id: int | None = Field(default=None, primary_key=True)
       team_id: int = Field(foreign_key=Team, on_delete="SET NULL")
+
       team: Relation[Team] = Forward("team_id")
   # TypeError: Player.team_id: on_delete="SET NULL" needs a nullable column.
   # Fix it by hand: (1) on Player, replace team_id with `team_id: int | None =
@@ -663,6 +664,10 @@ Rules:
   `ManyToMany()`) is always an assignment. A foreign-key column is a field
   like any other and is tabbed: `team_id: int = Field(foreign_key=Team)`
   against `team_id: Annotated[int, Field(foreign_key=Team)]`.
+- A model declares its columns first, then one blank line, then its
+  relations, since a relation is not a column on the table; the docs lint
+  checks it (`docs/solutions/patterns/docs-page-conventions.md`, "Columns
+  first, then relations").
 - Code blocks that do not declare fields (queries, mutations, transactions,
   usage snippets) are not affected by this rule.
 
