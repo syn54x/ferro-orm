@@ -13,6 +13,7 @@ class User(Model):
     username: str = Field(unique=True)
     email: str
     age: int
+
     posts: Relation[list["Post"]] = Reverse("author_id")
 
 
@@ -20,6 +21,7 @@ class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
     author_id: int = Field(foreign_key=User)
+
     author: Relation[User] = Forward("author_id")
 
 

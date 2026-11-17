@@ -922,12 +922,14 @@ else:
             class Tag(Model):
                 id: int | None = Field(default=None, primary_key=True)
                 label: str
+
                 articles: Relation[list["Article"]] = Reverse("tags")
 
 
             class Article(Model):
                 id: int | None = Field(default=None, primary_key=True)
                 title: str
+
                 tags: Relation[list[Tag]] = ManyToMany(through="article_tags")
 
 
@@ -980,6 +982,7 @@ else:
                 id: int | None = Field(default=None, primary_key=True)
                 title: str
                 shelf_id: int = Field(foreign_key=Shelf, index=True)
+
                 shelf: Relation[Shelf] = Forward("shelf_id")
 
 
@@ -1023,6 +1026,7 @@ else:
             class Shelf(Model):
                 id: int | None = Field(default=None, primary_key=True)
                 label: str
+
                 books: Relation[list["Book"]] = Reverse("shelf_id")
 
 

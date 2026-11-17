@@ -27,6 +27,7 @@ Declare `unique=True` alone: the unique constraint is the index.
 class Profile(Model):
     id: int | None = Field(default=None, primary_key=True)
     player_id: int = Field(foreign_key=Player, unique=True)
+
     player: Relation[Player] = Forward("player_id")
 ```
 

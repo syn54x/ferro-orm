@@ -4,6 +4,7 @@
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     team_id: int = Field(foreign_key=Team)                    # column "team_id"
+
     team: Relation[Team] = Forward("team_id")                 # no column
     tournaments: Relation[list["Tournament"]] = ManyToMany(through="player_tournaments")
                                                               # join table "player_tournaments"

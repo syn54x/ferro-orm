@@ -17,6 +17,7 @@ from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 class Team(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
+
     players: Relation[list["Player"]] = Reverse("team_id")
     titles: Relation[list["Tournament"]] = Reverse("winner_id")
 
@@ -25,10 +26,11 @@ class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     team_id: int = Field(foreign_key=Team, index=True)
-    team: Relation[Team] = Forward("team_id")
     mentor_id: int | None = Field(
         default=None, foreign_key="Player", on_delete="SET NULL"
     )
+
+    team: Relation[Team] = Forward("team_id")
     mentor: Relation["Player | None"] = Forward("mentor_id")
     mentees: Relation[list["Player"]] = Reverse("mentor_id")
     profile: Relation[list["Profile"]] = Reverse("player_id")
@@ -39,6 +41,7 @@ class Profile(Model):
     id: int | None = Field(default=None, primary_key=True)
     bio: str
     player_id: int = Field(foreign_key=Player, unique=True)
+
     player: Relation[Player] = Forward("player_id")
 
 
@@ -46,6 +49,7 @@ class Tournament(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     winner_id: int | None = Field(default=None, foreign_key=Team, on_delete="SET NULL")
+
     winner: Relation[Team | None] = Forward("winner_id")
     players: Relation[list[Player]] = Reverse("tournaments")
 

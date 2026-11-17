@@ -1,5 +1,5 @@
-"""The docs checks: one-letter query lambdas, error checks that cannot fail and
-retired relation terms."""
+"""The docs checks: one-letter query lambdas, error checks that cannot fail,
+retired relation terms and columns declared before relations."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from tests._docs_checks import (
     _PYTHON_NAMES,
     Violation,
     awaited_relations,
+    columns_before_relations,
     lambda_param_violations,
     query_methods_taking_callables,
     retired_terms,
@@ -720,4 +721,157 @@ def test_a_dated_directory_counts_only_under_docs(tmp_path: Path) -> None:
     page = _write(tmp_path, "plans/page.md", "# Page\n\nAn unpopulated relation.\n")
     assert _retired_messages(page) == [
         (3, '"populated relation" is retired; write "loaded relation"')
+    ]
+
+
+_AFTER_RELATION = (
+    "column 'reply_to_id' is declared after relation 'account'; declare every "
+    "column first, then one blank line, then the relations"
+)
+_NO_BLANK_LINE = (
+    "relation 'account' follows the columns with no blank line; declare every "
+    "column first, then one blank line, then the relations"
+)
+
+
+def test_columns_then_a_blank_line_then_relations_passes(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "ok.py",
+        """
+        class Note(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            account_id: int = Field(foreign_key=Account)
+
+            # Each note belongs to one account.
+            account: Relation[Account] = Forward("account_id")
+            replies: Relation[list["Note"]] = ferro.Reverse("reply_to_id")
+
+
+        class Tag(Model):
+            notes: Relation[list[Note]] = ManyToMany(through="NoteTag")
+        """,
+    )
+    assert columns_before_relations(path) == []
+
+
+def test_a_column_after_a_relation_fails_with_its_line(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        class Note(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            account_id: int = Field(foreign_key=Account)
+
+            account: Relation[Account] = Forward("account_id")
+            reply_to_id: int | None = Field(default=None, foreign_key="Note")
+            reply_to: Relation["Note | None"] = Forward("reply_to_id")
+        """,
+    )
+    assert columns_before_relations(path) == [Violation(path, 6, _AFTER_RELATION)]
+
+
+def test_a_first_relation_with_no_blank_line_above_fails(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        class Note(Model):
+            account_id: int = Field(foreign_key=Account)
+            # Each note belongs to one account.
+            account: Relation[Account] = Forward("account_id")
+            replies: Relation[list["Note"]] = Reverse("reply_to_id")
+        """,
+    )
+    assert columns_before_relations(path) == [Violation(path, 4, _NO_BLANK_LINE)]
+
+
+def test_column_order_is_checked_in_markdown_and_docstring_fences(
+    tmp_path: Path,
+) -> None:
+    fence = (
+        "```python\n"
+        "class Note(Model):\n"
+        "    account_id: int = Field(foreign_key=Account)\n"
+        '    account: Relation[Account] = Forward("account_id")\n'
+        "```\n"
+    )
+    page = tmp_path / "page.md"
+    page.write_text("# Page\n\n" + fence, encoding="utf-8")
+    assert columns_before_relations(page) == [Violation(page, 6, _NO_BLANK_LINE)]
+    module = tmp_path / "module.py"
+    module.write_text(
+        'def declare():\n    """Declare a note.\n\n'
+        + textwrap.indent(fence, "    ")
+        + '    """\n',
+        encoding="utf-8",
+    )
+    assert columns_before_relations(module) == [Violation(module, 7, _NO_BLANK_LINE)]
+
+
+def test_a_relation_is_recognised_by_its_final_name(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        class Note(Model):
+            account_id: int = Field(foreign_key=Account)
+            account: Relation[Account] = fields.Forward("account_id")
+            reply_to_id: int | None = Field(default=None, foreign_key="Note")
+            replies: Relation[list["Note"]] = ferro.fields.Reverse("reply_to_id")
+        """,
+    )
+    assert columns_before_relations(path) == [
+        Violation(path, 3, _NO_BLANK_LINE),
+        Violation(path, 4, _AFTER_RELATION),
+    ]
+
+
+def test_a_classvar_is_not_a_column(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "ok.py",
+        """
+        class Note(Model):
+            model_config: ClassVar[ConfigDict] = ConfigDict()
+            account: Relation[Account] = Forward("account_id")
+            registry: typing.ClassVar[dict[str, int]] = {}
+            count: ClassVar = 0
+        """,
+    )
+    assert columns_before_relations(path) == []
+
+
+def test_a_multi_line_column_and_a_nested_class_keep_their_lines(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        def declare():
+            class Note(Model):
+                reply_to_id: int | None = Field(
+                    default=None, foreign_key="Note", on_delete="SET NULL"
+                )
+
+                reply_to: Relation["Note | None"] = Forward("reply_to_id")
+
+                class Inner(Model):
+                    account_id: int = Field(
+                        foreign_key=Account,
+                    )
+                    account: Relation[Account] = Forward("account_id")
+                    reply_to_id: int | None = Field(
+                        default=None,
+                        foreign_key="Note",
+                    )
+
+            return Note
+        """,
+    )
+    assert columns_before_relations(path) == [
+        Violation(path, 13, _NO_BLANK_LINE),
+        Violation(path, 14, _AFTER_RELATION),
     ]

@@ -4,6 +4,7 @@
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     team_id: int = Field(foreign_key=Team, on_delete="SET NULL")
+
     team: Relation[Team] = Forward("team_id")
 ```
 
