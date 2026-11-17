@@ -329,10 +329,10 @@ Each form below fails when you build the query, before any SQL is sent, with an 
 
 <!-- prints: aggregations.py:error-family -->
 ```text
-TypeError: t.memo.sum() is not supported: Transaction.memo is string-typed, and sum() takes a numeric column (int, float, or Decimal). No portable cross-backend meaning exists for this aggregate over a string column.
+TypeError: transaction.memo.sum() is not supported: Transaction.memo is string-typed, and sum() takes a numeric column (int, float, or Decimal). No portable cross-backend meaning exists for this aggregate over a string column.
 ```
 
-`where()` filters rows before aggregation, so it cannot hold an aggregate. The error points at `having()`, the post-aggregation filter, which does not exist yet. Until it does, filter rows with `where()` and compare the aggregated results in Python:
+`where()` filters rows before aggregation, so it cannot hold an aggregate. Ferro has no `having()` yet, and the error says so. Until it does, filter rows with `where()` and compare the aggregated results in Python:
 
 ```python
 --8<-- "docs/examples/aggregations.py:error-where"
@@ -340,10 +340,10 @@ TypeError: t.memo.sum() is not supported: Transaction.memo is string-typed, and 
 
 <!-- prints: aggregations.py:error-where -->
 ```text
-TypeError: t.amount.sum() > ... is not a where() predicate: WHERE filters rows before aggregation, so an aggregate cannot appear in it. Post-aggregation filtering is having() (#291); until it lands, filter rows with where() and compare the aggregated result in Python.
+TypeError: transaction.amount.sum() > ... is not a where() predicate: WHERE filters rows before aggregation, so an aggregate cannot appear in it, and Ferro has no having() yet. Filter rows with where() and compare the aggregated result in Python.
 ```
 
-Python's builtin `sum()` over a column reference raises instead of failing obscurely. The error text writes the lambda parameter as `t`, whatever you named it:
+Python's builtin `sum()` over a column reference raises instead of failing obscurely. The error names the column the way your lambda does:
 
 ```python
 --8<-- "docs/examples/aggregations.py:error-builtin-sum"
@@ -351,7 +351,7 @@ Python's builtin `sum()` over a column reference raises instead of failing obscu
 
 <!-- prints: aggregations.py:error-builtin-sum -->
 ```text
-TypeError: t.amount is a column reference and cannot be iterated; did you mean t.amount.sum()? Aggregates are methods on the column (.count()/.sum()/.avg()/.min()/.max()).
+TypeError: transaction.amount is a column reference and cannot be iterated; did you mean transaction.amount.sum()? Aggregates are methods on the column (.count()/.sum()/.avg()/.min()/.max()).
 ```
 
 An aggregate outside the dict form has no output name, so it raises:
@@ -362,7 +362,7 @@ An aggregate outside the dict form has no output name, so it raises:
 
 <!-- prints: aggregations.py:error-unnamed -->
 ```text
-TypeError: aggregate fields are user-named (#294): give t.amount.sum() an output name with the dict selector form (e.g. select(lambda t: {"total": t.amount.sum()})).
+TypeError: aggregate fields are user-named: give transaction.amount.sum() an output name with the dict selector form (e.g. select(lambda transaction: {"total": transaction.amount.sum()})).
 ```
 
 Sorting groups by a column that is not a group key raises, as the ordering rules above say:
