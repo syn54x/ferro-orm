@@ -22,6 +22,7 @@ from ferro import (
     Relation,
     Reverse,
     connect,
+    engines,
 )
 from ferro.relations import resolve_relationships
 
@@ -165,7 +166,8 @@ async def test_a_predicate_annotated_with_type_checking_names_builds(models, db_
     Sale.select().order_by(_amount)
     LineItem.select().include(_its_sale)
     LineItem.select().join(_its_sale)
-    assert await Sale.where(_big).update(_bump) == 0
+    async with engines.session():
+        assert await Sale.where(_big).update(_bump) == 0
     with pytest.raises(TypeError) as caught:
         Sale.where(_iterates)
     assert str(caught.value).startswith("sale.amount is a column reference")
