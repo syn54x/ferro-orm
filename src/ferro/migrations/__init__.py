@@ -30,9 +30,27 @@ from typing import TYPE_CHECKING, Any
 from ._baseline import BaselineReport, baseline, remove_baseline
 from ._drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
-from .generate import check
-from .report import AlreadyTrackedError, AppliedAboveBaselineError, RunRefused
-from .runner import require_applied, status, up
+from .generate import CheckReport, Problem, check
+from .report import (
+    AlreadyTrackedError,
+    AppliedAboveBaselineError,
+    MigrationStatus,
+    RunRefused,
+    StatusReport,
+)
+from .runner import (
+    AppliedStep,
+    InheritedEvent,
+    InheritedMigration,
+    RunEvent,
+    RunNote,
+    RunReport,
+    StepEvent,
+    StepFailure,
+    require_applied,
+    status,
+    up,
+)
 from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
 
 if TYPE_CHECKING:
@@ -41,12 +59,24 @@ if TYPE_CHECKING:
 __all__ = [
     "AlreadyTrackedError",
     "AppliedAboveBaselineError",
+    "AppliedStep",
     "BaselineReport",
+    "CheckReport",
     "DatabaseAheadError",
     "DriftReport",
+    "InheritedEvent",
+    "InheritedMigration",
     "MigrationRefused",
+    "MigrationStatus",
     "PendingMigrationsError",
+    "Problem",
+    "RunEvent",
+    "RunNote",
     "RunRefused",
+    "RunReport",
+    "StatusReport",
+    "StepEvent",
+    "StepFailure",
     "atomic",
     "baseline",
     "check",

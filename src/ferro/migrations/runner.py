@@ -516,10 +516,11 @@ async def up(
             inherits (before any step), one per applied step, and one per
             attempt a step makes while it waits for a table lock.
         on_event: Receives the same lines as data, each just before
-            `progress` receives its `line()`: an `InheritedEvent` per squash
-            inherited, a `StepEvent` per applied step, a `RunNote` for any
-            other. A failed step is a `StepEvent` too, with no line for
-            `progress`.
+            `progress` receives its `line()`: an
+            [`InheritedEvent`][ferro.migrations.InheritedEvent] per squash
+            inherited, a [`StepEvent`][ferro.migrations.StepEvent] per applied
+            step, a [`RunNote`][ferro.migrations.RunNote] for any other. A
+            failed step is a `StepEvent` too, with no line for `progress`.
 
     Returns:
         What the run did: the squashes it inherited, in order, then the
@@ -1578,9 +1579,11 @@ async def down(
         progress: Receives one line per squash inherited, then one per
             reverted step.
         on_event: Receives each line as data just before `progress`
-            receives its `line()`: an `InheritedEvent` per squash inherited,
-            a `StepEvent` per reverted step, a `RunNote` for any other. A
-            failed down is a `StepEvent` with no line.
+            receives its `line()`: an
+            [`InheritedEvent`][ferro.migrations.InheritedEvent] per squash
+            inherited, a [`StepEvent`][ferro.migrations.StepEvent] per
+            reverted step, a [`RunNote`][ferro.migrations.RunNote] for any
+            other. A failed down is a `StepEvent` with no line.
 
     Returns:
         What the run did: the squashes it inherited, then the steps it

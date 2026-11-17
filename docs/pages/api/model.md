@@ -12,7 +12,7 @@ description: "API reference for Model, the base class every Ferro model inherits
 
 [`Model.using(name)`][ferro.Model.using] binds the model's class methods to one named connection and returns a `ModelConnection`.
 
-::: ferro.models.ModelConnection
+::: ferro.ModelConnection
 
 ## Table-level declarations
 

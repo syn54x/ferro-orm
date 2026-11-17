@@ -38,13 +38,31 @@ Passing both `using=` and `url=` raises `MigrationRefused`. `check` reads only t
 
 ### Reports
 
-`up()` returns a `RunReport`, `status()` a `StatusReport` and `check()` a `CheckReport`. None of the three is exported: you read them, you never build one.
+`up()` returns a [`RunReport`][ferro.migrations.RunReport], `status()` a [`StatusReport`][ferro.migrations.StatusReport] and `check()` a [`CheckReport`][ferro.migrations.CheckReport]. You read them, you never build one. The types of their fields, and of the event `up(on_event=...)` passes its callback, are documented below them.
 
-::: ferro.migrations.runner.RunReport
+::: ferro.migrations.RunReport
 
-::: ferro.migrations.report.StatusReport
+::: ferro.migrations.InheritedMigration
 
-::: ferro.migrations.generate.CheckReport
+::: ferro.migrations.AppliedStep
+
+::: ferro.migrations.StepFailure
+
+::: ferro.migrations.RunEvent
+
+::: ferro.migrations.StepEvent
+
+::: ferro.migrations.RunNote
+
+::: ferro.migrations.InheritedEvent
+
+::: ferro.migrations.StatusReport
+
+::: ferro.migrations.MigrationStatus
+
+::: ferro.migrations.CheckReport
+
+::: ferro.migrations.Problem
 
 ## Baseline and drift
 

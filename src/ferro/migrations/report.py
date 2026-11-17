@@ -146,7 +146,8 @@ class AlreadyTrackedError(RunRefused):
     carries on to `up()`. The target is the migration the previous
     release's models generated, so an unattended baseline records no step
     it did not run. Its `head` is the newest of the records, and its
-    `report` the database's `StatusReport`, what `status()` reports.
+    `report` the database's
+    [`StatusReport`][ferro.migrations.StatusReport], what `status()` reports.
 
     Examples:
         ```python {test=compile reason="needs a migrations project and a database"}
@@ -170,7 +171,7 @@ class AppliedAboveBaselineError(RunRefused):
     Removing the baseline under them would leave applied migrations above
     pending ones. The message names the `ferro migrate down --to` that
     reverts them; nothing was removed. Its `report` is the database's
-    `StatusReport`.
+    [`StatusReport`][ferro.migrations.StatusReport].
     """
 
     def __init__(self, message: str, **payload: Any) -> None:
