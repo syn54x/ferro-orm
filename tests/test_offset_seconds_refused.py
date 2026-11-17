@@ -1,5 +1,7 @@
 """A datetime or time whose UTC offset is not whole minutes is refused on every write path."""
 
+import signal
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Annotated
@@ -40,6 +42,8 @@ async def message_model(db_url, clean_registry):
         span: Span | None = None
         marks: dict[datetime, int] = {}
         stamps: frozenset[datetime] = frozenset()
+        tree: dict | None = None
+        chain: list | None = None
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -155,6 +159,71 @@ async def test_offset_seconds_refused_in_every_container_shape(
     assert REFUSAL in str(raised.value)
     assert names in str(raised.value)
     assert [record.sql for record in statement_records] == []
+
+
+@contextmanager
+def _fails_after(seconds: float):
+    """Turn a hang into a failure: SIGALRM interrupts even a busy Python loop."""
+
+    def _expire(signum, frame):
+        raise TimeoutError(f"still running after {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _cyclic_dict():
+    root = {"name": "root", "children": []}
+    root["children"].append({"name": "leaf", "parent": root})
+    return root
+
+
+def _cyclic_list():
+    chain = ["head"]
+    chain.append(chain)
+    return chain
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
+@pytest.mark.parametrize(
+    ("write", "names"),
+    [
+        pytest.param(_save("tree", _cyclic_dict()), "Message.tree", id="save-dict"),
+        pytest.param(_save("chain", _cyclic_list()), "Message.chain", id="save-list"),
+        pytest.param(_update("tree", _cyclic_dict()), "", id="update-dict"),
+        pytest.param(_update("chain", _cyclic_list()), "", id="update-list"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_circular_value_is_refused_without_hanging(
+    message_model, statement_records, write, names
+):
+    Message = message_model
+    statement_records.clear()
+    with _fails_after(5), pytest.raises(ValueError) as raised:
+        await write(Message)
+    assert "refers to itself" in str(raised.value)
+    assert names in str(raised.value)
+    assert [record.sql for record in statement_records] == []
+
+
+@pytest.mark.asyncio
+async def test_shared_container_reached_twice_saves(message_model):
+    Message = message_model
+    shared = {"at": "2026-03-01T15:00:00Z"}
+    tree = {"first": shared, "second": shared}
+    await Message(
+        id=1, pinned_at=UTC_PINNED_AT, tree=tree, chain=[shared, shared]
+    ).save()
+    async with ferro.engines.session():
+        fetched = await Message.get(1)
+    assert fetched.tree == tree
+    assert fetched.chain == [shared, shared]
 
 
 @pytest.mark.asyncio
