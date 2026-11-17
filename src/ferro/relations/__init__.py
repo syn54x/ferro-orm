@@ -36,6 +36,7 @@ from ..ir.compiler import (
     register_model_with_ir,
 )
 from ..query import Relation
+from ..query.nodes import _snake
 from ..registry import REGISTRY, JoinTableBundle
 from .descriptors import RelationshipDescriptor
 from .fixes import DeclarationRefusal, Edit
@@ -1200,10 +1201,6 @@ def check_forward_relation(
 def _retired_fields(model_cls: Any) -> dict[str, RetiredField]:
     """The model's retired fields, whose columns a relation can no longer read."""
     return model_cls.__dict__.get("__ferro_retired_fields__") or {}
-
-
-def _snake(name: str) -> str:
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 def check_reverse_relation(

@@ -34,6 +34,7 @@ from .query.nodes import (
     FuncValueExpr,
     NegateValueExpr,
     QueryNode,
+    row_name,
 )
 
 if TYPE_CHECKING:
@@ -341,12 +342,7 @@ def compile_generated_columns(
     declared = _declared_generated(model_cls)
     if not declared:
         return {}
-    proxy = _ValueProxy(
-        model_cls,
-        columns,
-        relations,
-        _reverse_relation_names(model_cls),
-    )
+    reverse_relations = _reverse_relation_names(model_cls)
     specs: dict[str, GeneratedColumnSpec] = {}
     for field_name, func in declared.items():
         where = f"{model_name}.{field_name}"
@@ -356,6 +352,13 @@ def compile_generated_columns(
                 f"{type(func).__name__}"
             )
         _validate_source(func, where)
+        proxy = _ValueProxy(
+            model_cls,
+            columns,
+            relations,
+            reverse_relations,
+            root=row_name(func, model_cls),
+        )
         try:
             result = func(proxy)
         except (AttributeError, TypeError, ValueError) as exc:

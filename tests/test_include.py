@@ -774,7 +774,7 @@ async def test_m2m_association_query_composes_with_include(db_url):
 def test_string_include_selector_names_the_lambda_form():
     with pytest.raises(
         TypeError,
-        match=r"not a string.*include\(lambda t: t\.account\)",
+        match=r"not a string.*include\(lambda i_n_transaction: i_n_transaction\.account\)",
     ):
         INTransaction.select().include("account")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 

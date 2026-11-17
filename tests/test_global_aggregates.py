@@ -358,11 +358,11 @@ class TestSourceFamilyValidation:
 
 class TestAggregateMisuse:
     def test_aggregate_comparison_in_where_points_at_having(self):
-        with pytest.raises(TypeError, match=r"having\(\) \(#291\)"):
+        with pytest.raises(TypeError, match=r"Ferro has no having\(\) yet"):
             GATransaction.where(lambda t: t.amount.sum() > 100)
 
     def test_bare_aggregate_in_where_points_at_having(self):
-        with pytest.raises(TypeError, match=r"having\(\) \(#291\)"):
+        with pytest.raises(TypeError, match=r"Ferro has no having\(\) yet"):
             GATransaction.where(lambda t: t.amount.sum())
 
     def test_iterating_a_field_proxy_names_the_sum_method(self):

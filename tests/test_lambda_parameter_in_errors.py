@@ -71,8 +71,16 @@ def test_iterating_a_column_names_it_the_way_the_lambda_does(models):
             "sale.amount.sum() > ...",
             True,
         ),
-        (lambda Sale: Sale.where(lambda sale: sale.amount.sum()), "sale.amount.sum()", True),
-        (lambda Sale: Sale.select(lambda sale: sale.amount.sum()), "sale.amount.sum()", False),
+        (
+            lambda Sale: Sale.where(lambda sale: sale.amount.sum()),
+            "sale.amount.sum()",
+            True,
+        ),
+        (
+            lambda Sale: Sale.select(lambda sale: sale.amount.sum()),
+            "sale.amount.sum()",
+            False,
+        ),
         (
             lambda Sale: Sale.select(lambda sale: {"x": sale.memo.sum()}),
             "sale.memo.sum()",
@@ -85,7 +93,9 @@ def test_iterating_a_column_names_it_the_way_the_lambda_does(models):
         ),
     ],
 )
-def test_aggregate_misuse_names_the_lambda_parameter(models, build, expected, names_having):
+def test_aggregate_misuse_names_the_lambda_parameter(
+    models, build, expected, names_having
+):
     with pytest.raises(TypeError) as caught:
         build(models["Sale"])
     message = str(caught.value)

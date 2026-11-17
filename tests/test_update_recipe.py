@@ -144,19 +144,19 @@ async def test_unknown_recipe_key_uses_did_you_mean(
 
 def test_value_expr_in_select_names_followup(models: dict[str, type]) -> None:
     User = models["User"]
-    with pytest.raises(TypeError, match=r"#327|#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         User.select(lambda user: ValueExpr())
 
 
 def test_value_expr_in_where_names_followup(models: dict[str, type]) -> None:
     User = models["User"]
-    with pytest.raises(TypeError, match=r"#327|#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         User.where(lambda user: ValueExpr())  # type: ignore[arg-type, return-value]
 
 
 def test_value_expr_in_order_by_names_followup(models: dict[str, type]) -> None:
     User = models["User"]
-    with pytest.raises(TypeError, match=r"#327|#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         User.select().order_by(lambda user: ValueExpr())  # type: ignore[arg-type, return-value]
 
 

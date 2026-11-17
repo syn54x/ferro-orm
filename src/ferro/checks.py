@@ -44,6 +44,8 @@ from .query.nodes import (
     QueryNode,
     QueryProxy,
     ValueExpr,
+    _snake,
+    row_name,
     value_comparison,
 )
 
@@ -159,7 +161,7 @@ class Check:
                 f"Check({self.suffix!r}, ...) predicate must be a callable ferro "
                 "predicate (e.g. `lambda transfer: transfer.outflow_transaction "
                 f"== None`), not {type(self.predicate).__name__}. Raw SQL strings "
-                "are not check predicates (ADR-0012)."
+                "are not check predicates."
             )
 
     def __repr__(self) -> str:
@@ -205,8 +207,10 @@ class _CheckProxy(QueryProxy[Any]):
         columns: Mapping[str, Any],
         relations: Mapping[str, RelationSpec],
         reverse_relations: frozenset[str],
+        *,
+        root: str | None = None,
     ) -> None:
-        super().__init__(model_cls)
+        super().__init__(model_cls, root=root)
         self._columns = columns
         self._relations = relations
         self._reverse_relations = reverse_relations
@@ -214,16 +218,18 @@ class _CheckProxy(QueryProxy[Any]):
     def __getattr__(self, name: str) -> Any:
         relation = self._relations.get(name)
         if relation is not None:
-            return _RelationNullProxy(self._model_cls, name, relation.fk_column)
+            return _RelationNullProxy(
+                self._model_cls, name, relation.fk_column, self._root
+            )
         if name in self._reverse_relations:
             raise TypeError(
                 f"check predicate references the reverse relation {name!r}: an "
                 "existence test answers a question about other rows, which a "
                 "CHECK cannot see. A check predicate reads this table's own "
-                "columns (ADR-0016)."
+                "columns."
             )
         if name in self._columns:
-            return FieldProxy(name, owner=self._model_cls)
+            return FieldProxy(name, owner=self._model_cls, root=self._root)
         suggestions = sorted(set(self._columns) | set(self._relations))
         close = difflib.get_close_matches(name, suggestions, n=1)
         hint = f" Did you mean {close[0]!r}?" if close else ""
@@ -243,28 +249,31 @@ class _CheckProxy(QueryProxy[Any]):
 class _RelationNullProxy:
     """A forward relation inside a check predicate: null tests only.
 
-    ``t.<relation> == None`` desugars to the relation's foreign-key column —
+    ``box.<relation> == None`` desugars to the relation's foreign-key column —
     the same join-free leaf ``RelationProxy._instance_comparison`` builds for
     ``where()``. It cannot reuse that proxy: ``RelationProxy`` reads the
     foreign-key column from the model's *published* ``__ferro_relation_specs__``,
     while a check predicate compiles before anything is published.
     """
 
-    __slots__ = ("_model_cls", "_relation", "_fk_column")
+    __slots__ = ("_model_cls", "_relation", "_fk_column", "_root")
 
-    def __init__(self, model_cls: type, relation: str, fk_column: str) -> None:
+    def __init__(
+        self, model_cls: type, relation: str, fk_column: str, root: str
+    ) -> None:
         self._model_cls = model_cls
         self._relation = relation
         self._fk_column = fk_column
+        self._root = root
 
     def _null_comparison(self, other: object, operator: str) -> QueryNode:
         if other is not None:
             raise TypeError(
                 f"check predicate compares the relation {self._relation!r} to "
                 f"{other!r}: a check predicate supports only "
-                f"t.{self._relation} == None / != None (equivalently "
-                f"t.{self._fk_column} == None). Comparing to a row would bake a "
-                "primary key into the schema (ADR-0016)."
+                f"{self._root}.{self._relation} == None / != None (equivalently "
+                f"{self._root}.{self._fk_column} == None). Comparing to a row "
+                "would bake a primary key into the schema."
             )
         return QueryNode(
             column=self._fk_column,
@@ -285,15 +294,16 @@ class _RelationNullProxy:
         raise TypeError(
             f"check predicate traverses the relation {self._relation!r} to reach "
             f"{name!r}: relation traversal reads another table, which a CHECK "
-            f"cannot do. Test the relation itself (t.{self._relation} == None) or "
-            f"its foreign-key column (t.{self._fk_column}) — richer traversal stays "
-            "rejected (ADR-0016)."
+            "cannot do. Test the relation itself "
+            f"({self._root}.{self._relation} == None) or its foreign-key column "
+            f"({self._root}.{self._fk_column}) — richer traversal stays rejected."
         )
 
     def _reject_operator(self, symbol: str) -> Any:
         raise TypeError(
             f"check predicate applies {symbol} to the relation {self._relation!r}: "
-            f"only == None / != None are supported (or use t.{self._fk_column})."
+            "only == None / != None are supported (or use "
+            f"{self._root}.{self._fk_column})."
         )
 
     def __lt__(self, other: object) -> Any:
@@ -335,7 +345,8 @@ def _declared_checks(model_cls: type[Any]) -> tuple[Check, ...]:
         if not isinstance(entry, Check):
             raise TypeError(
                 f"{model_cls.__qualname__}.{FERRO_CHECKS}[{index}] must be a Check "
-                f"object (e.g. Check('at_most_one_outflow', lambda t: ...)), not "
+                "object (e.g. Check('at_most_one_outflow', "
+                f"lambda {_snake(model_cls.__name__)}: ...)), not "
                 f"{type(entry).__name__}"
             )
     seen: set[str] = set()
@@ -369,7 +380,7 @@ def _unsupported(model_name: str, suffix: str, what: str) -> TypeError:
         "where() dialect: comparisons, IS NULL, AND/OR/NOT, .in_(), .like(), "
         "and column-to-column tests with inlined literals — not relation "
         "traversal, existence tests, aggregates, closed-over variables, or "
-        "function calls (ADR-0016)."
+        "function calls."
     )
 
 
@@ -396,9 +407,7 @@ def _lower_operand(value: Any, model_name: str, suffix: str) -> dict[str, Any]:
     if isinstance(value, FieldProxy):
         if value.path:
             raise _unsupported(
-                model_name,
-                suffix,
-                f"relation traversal (t.{'.'.join((*value.path, value.column))})",
+                model_name, suffix, f"relation traversal ({value._dotted()})"
             )
         return {"kind": "column", "name": value.column}
     return {"kind": "literal", "token": _check_literal_token(value)}
@@ -445,7 +454,7 @@ def _closure_error(model_name: str, suffix: str, name: str) -> TypeError:
     return TypeError(
         f"{model_name}.{FERRO_CHECKS} check {suffix!r} closes over "
         f"{name!r}: check predicates must use literals inlined into the "
-        "CHECK body, not variables from the enclosing scope (ADR-0016)."
+        "CHECK body, not variables from the enclosing scope."
     )
 
 
@@ -480,7 +489,7 @@ def _validate_predicate_source(
         raise TypeError(
             f"{model_name}.{FERRO_CHECKS} check {suffix!r} binds a default "
             "argument: check predicates must use literals inlined into the "
-            "CHECK body, not values captured on the callable (ADR-0016)."
+            "CHECK body, not values captured on the callable."
         )
     for code_obj in _iter_code_objects(code):
         for inst in dis.get_instructions(code_obj):
@@ -503,15 +512,14 @@ def _validate_predicate_source(
         raise TypeError(
             f"{model_name}.{FERRO_CHECKS} check {suffix!r} source is "
             "unavailable: check predicates must be lambdas whose body can be "
-            "validated (ADR-0016)."
+            "validated."
         ) from exc
     tree = ast.parse(textwrap.dedent(source))
     lambda_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
     if not lambda_nodes:
         raise TypeError(
             f"{model_name}.{FERRO_CHECKS} check {suffix!r} is not a lambda: "
-            "check predicates must be lambdas whose body can be validated "
-            "(ADR-0016)."
+            "check predicates must be lambdas whose body can be validated."
         )
     names = dict(predicate.__globals__)
     names.update(
@@ -535,7 +543,7 @@ def _validate_predicate_source(
             f"{model_name}.{FERRO_CHECKS} check {suffix!r} contains a function "
             "call: check predicates inline literals and column references and "
             "call only the functions in ferro.fn — not other SQL functions or "
-            "arbitrary Python calls (ADR-0016, ADR-0059)."
+            "arbitrary Python calls."
         )
 
 
@@ -644,12 +652,19 @@ def _refuse_overflow_under_or(
 
 
 def _lower_node(
-    node: QueryNode, model_name: str, suffix: str, columns: Mapping[str, Any]
+    node: QueryNode,
+    model_name: str,
+    suffix: str,
+    columns: Mapping[str, Any],
+    row: str,
 ) -> dict[str, Any]:
-    """Lower one evaluated ``QueryNode`` into the ``CheckExpr`` wire shape."""
+    """Lower one evaluated ``QueryNode`` into the ``CheckExpr`` wire shape.
+
+    ``row`` is the check lambda's parameter, as refusals spell it.
+    """
 
     def lower(child: QueryNode) -> dict[str, Any]:
-        return _lower_node(child, model_name, suffix, columns)
+        return _lower_node(child, model_name, suffix, columns, row)
 
     if isinstance(node, _ValueComparison):
         return _lower_compare(
@@ -671,7 +686,7 @@ def _lower_node(
         raise _unsupported(
             model_name,
             suffix,
-            f"relation traversal (t.{'.'.join((*node.path, str(node.column)))})",
+            f"relation traversal ({'.'.join((row, *node.path, str(node.column)))})",
         )
     operator = str(node.operator)
     if operator == "IN":
@@ -700,7 +715,7 @@ def _lower_node(
         }
     if isinstance(node.value, ValueExpr):
         # A column compared with arithmetic or a `ferro.fn` call.
-        column = FieldProxy(str(node.column), owner=node.owner)
+        column = FieldProxy(str(node.column), owner=node.owner, root=row)
         return _lower_compare(column, operator, node.value, model_name, suffix, columns)
     null_kind = _NULL_TEST_KINDS.get(operator)
     if null_kind is not None and node.value is None:
@@ -731,11 +746,13 @@ def _resolve_check_node(
     checks says which one is wrong. ``TypeError`` is also the declaration-error
     type the metaclass surfaces unwrapped.
     """
+    row = row_name(check.predicate, model_cls)
     proxy = _CheckProxy(
         model_cls,
         columns,
         relations,
         _reverse_relation_names(model_cls),
+        root=row,
     )
     prefix = f"{model_name}.{FERRO_CHECKS} check {check.suffix!r}: "
     _validate_predicate_source(check.predicate, model_name, check.suffix)
@@ -754,8 +771,7 @@ def _resolve_check_node(
     if isinstance(result, FieldProxy):
         raise TypeError(
             f"{prefix}the predicate returned the bare column {result.column!r}; "
-            "a check predicate is a comparison (e.g. t."
-            f"{result.column} == None)."
+            f"a check predicate is a comparison (e.g. {result._dotted()} == None)."
         )
     if not isinstance(result, QueryNode):
         what = (
@@ -800,10 +816,11 @@ def compile_table_checks(
     specs: list[TableCheckSpec] = []
     for check in declared:
         node = _resolve_check_node(model_cls, model_name, check, columns, relations)
+        row = row_name(check.predicate, model_cls)
         specs.append(
             TableCheckSpec(
                 suffix=check.suffix,
-                predicate=_lower_node(node, model_name, check.suffix, columns),
+                predicate=_lower_node(node, model_name, check.suffix, columns, row),
             )
         )
     return tuple(specs)

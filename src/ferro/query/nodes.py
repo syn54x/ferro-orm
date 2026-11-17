@@ -6,6 +6,8 @@ condition.
 """
 
 import difflib
+import inspect
+import re
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -47,6 +49,39 @@ _AGGREGATE_FAMILY_HINT = {
     "min": "an orderable column (numeric, text, or date/time)",
     "max": "an orderable column (numeric, text, or date/time)",
 }
+
+
+def _snake(name: str) -> str:
+    """A model's name as a lambda parameter: `line_item` for `LineItem`."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _join(*parts: str | None) -> str:
+    """`sale.shop.label` from its parts, leaving out a root nobody named."""
+    return ".".join(part for part in parts if part)
+
+
+_POSITIONAL = (
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+)
+
+
+def row_name(selector: object, model_cls: type) -> str:
+    """The name an error gives the row a lambda receives.
+
+    It is the lambda's first positional parameter (`sale` in
+    `lambda sale: ...`), or the model's name in snake case when there is no
+    such parameter to read.
+    """
+    try:
+        parameters = inspect.signature(selector).parameters.values()  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    except (TypeError, ValueError):
+        parameters = ()
+    for parameter in parameters:
+        if parameter.kind in _POSITIONAL:
+            return parameter.name
+    return _snake(model_cls.__name__)
 
 
 def _aggregate_source_family(spec: Any) -> str:
@@ -333,6 +368,8 @@ class FieldProxy(Generic[TField]):
         column: str,
         path: tuple[str, ...] = (),
         owner: type | None = None,
+        *,
+        root: str | None = None,
     ):
         """Refer to a column; query lambdas build these for you.
 
@@ -342,19 +379,25 @@ class FieldProxy(Generic[TField]):
                 model. Defaults to `()`, the queried model itself.
             owner: The model the column belongs to. Defaults to `None`, which
                 skips the column type checks of the aggregate methods.
+            root: The lambda parameter the column was read from, as error
+                messages spell it. Defaults to `None`: the owner's name in
+                snake case when `path` is empty, otherwise left out.
         """
         self.column = column
         """The column's name."""
         self.path = path
         """The relation fields from the queried model to the column's model."""
         # Underscored so the attribute can never statically shadow traversal
-        # to a relation FIELD named "owner" (`t.account.owner.email`) through
+        # to a relation FIELD named "owner" (`post.author.owner.email`) through
         # the TYPE_CHECKING `__getattr__` chain.
         self._owner = owner
+        if root is None and owner is not None and not path:
+            root = _snake(owner.__name__)
+        self._root = root
 
     def _dotted(self) -> str:
         """The selector expression this proxy came from (error messages)."""
-        return "t." + ".".join((*self.path, self.column))
+        return _join(self._root, *self.path, self.column)
 
     def _aggregate(self, fn: str) -> "AggregateExpr":
         """Build an aggregate expression over this column (#294, ADR-0009).
@@ -380,7 +423,7 @@ class FieldProxy(Generic[TField]):
                         "cross-backend meaning exists for this aggregate over "
                         f"a {family} column."
                     )
-        return AggregateExpr(fn, self.column, self.path)
+        return AggregateExpr(fn, self.column, self.path, root=self._root)
 
     def count(self) -> "AggregateExpr":
         """Count the rows where this column is not `NULL`, as SQL `COUNT(column)`.
@@ -561,12 +604,13 @@ class FieldProxy(Generic[TField]):
                 # workloads it serves are existence-test workloads, and
                 # hand-correlating on id columns leaks the join column into
                 # every call site.
+                relation = _join(self._root, "<relation>")
                 raise TypeError(
                     f"The 'in_' operator expects a list, tuple, or set, got "
                     f"{type(other).__name__}. To filter on membership in "
-                    "related rows, use the existence test on the relation — "
-                    "where(lambda t: t.<relation>.exists(lambda r: ...)) — "
-                    "instead of an in_(subquery) (ADR-0007)."
+                    "related rows, use the existence test on the relation, "
+                    f"{relation}.exists(...), in where() instead of an "
+                    "in_(subquery)."
                 )
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
@@ -724,9 +768,16 @@ class AggregateExpr:
         ```
     """
 
-    __slots__ = ("fn", "column", "path")
+    __slots__ = ("fn", "column", "path", "_root")
 
-    def __init__(self, fn: str, column: str, path: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        fn: str,
+        column: str,
+        path: tuple[str, ...],
+        *,
+        root: str | None = None,
+    ) -> None:
         """Build an aggregate; the column methods such as `sum()` build these for you.
 
         Args:
@@ -734,6 +785,8 @@ class AggregateExpr:
             column: The aggregated column.
             path: The relation fields from the queried model to the column's
                 model.
+            root: The lambda parameter the column was read from, as error
+                messages spell it. Defaults to `None`, left out.
         """
         self.fn = fn
         """The aggregate: `"count"`, `"sum"`, `"avg"`, `"min"` or `"max"`."""
@@ -741,19 +794,19 @@ class AggregateExpr:
         """The aggregated column."""
         self.path = path
         """The relation fields from the queried model to the column's model."""
+        self._root = root
 
     def _dotted(self) -> str:
         """The selector expression this aggregate came from (errors)."""
-        return "t." + ".".join((*self.path, self.column)) + f".{self.fn}()"
+        return _join(self._root, *self.path, self.column) + f".{self.fn}()"
 
     def _reject_comparison(self, symbol: str) -> NoReturn:
         """Reject a comparison on an aggregate (#294 → having(), #291)."""
         raise TypeError(
             f"{self._dotted()} {symbol} ... is not a where() predicate: "
             "WHERE filters rows before aggregation, so an aggregate cannot "
-            "appear in it. Post-aggregation filtering is having() (#291); "
-            "until it lands, filter rows with where() and compare the "
-            "aggregated result in Python."
+            "appear in it, and Ferro has no having() yet. Filter rows with "
+            "where() and compare the aggregated result in Python."
         )
 
     def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
@@ -777,8 +830,8 @@ class AggregateExpr:
     def __bool__(self) -> NoReturn:
         raise TypeError(
             f"{self._dotted()} has no truth value; an aggregate expression "
-            'is a projection source (select(lambda t: {"total": '
-            f"{self._dotted()}}})), not a predicate."
+            'is a value in a select() dict ({"total": '
+            f"{self._dotted()}}}), not a predicate."
         )
 
     def __repr__(self) -> str:
@@ -896,9 +949,9 @@ class ValueExpr:
     def _reject_clause(self, clause: str) -> NoReturn:
         reject_fn_in_query(self, f"{clause}()")
         raise TypeError(
-            f"value expressions cannot appear in {clause}(); "
-            "comparing a value expression to produce a predicate is #327; "
-            "projecting or ordering by one is #309."
+            f"value expressions cannot appear in {clause}(); comparing a "
+            "value expression to produce a predicate, and projecting or "
+            "ordering by one, are not supported yet."
         )
 
     def _compare(self, symbol: str, other: object) -> "QueryNode":
@@ -909,9 +962,10 @@ class ValueExpr:
         reject_fn_in_query(self, f"a comparison ({symbol})")
         raise TypeError(
             f"comparing a value expression ({symbol}) is not a where() "
-            "predicate (#327). Value expressions are SET sources "
-            '(update(lambda t: {"col": ...})); projecting or ordering by '
-            "one is #309."
+            "predicate: comparing one is not supported yet. Value "
+            "expressions are SET sources, the values of an update() "
+            "recipe's dict; projecting or ordering by one is not "
+            "supported yet either."
         )
 
     def __eq__(self, other: object) -> "QueryNode":  # type: ignore[override]  # ty: ignore[invalid-method-override]
@@ -935,9 +989,9 @@ class ValueExpr:
     def __bool__(self) -> NoReturn:
         reject_fn_in_query(self, "a truth test")
         raise TypeError(
-            "ValueExpr has no truth value; it is a SET source "
-            '(update(lambda t: {"col": ...})), not a predicate. '
-            "Comparing one is #327; projecting or ordering by one is #309."
+            "ValueExpr has no truth value; it is a SET source, a value of "
+            "an update() recipe's dict, not a predicate. Comparing, "
+            "projecting or ordering by one is not supported yet."
         )
 
     def __add__(self, other: Any) -> "BinaryValueExpr":
@@ -1180,15 +1234,19 @@ class QueryProxy(Generic[TModel]):
     # Every attribute types as ``FieldProxy[Any]``: per-field types for a bare
     # lambda parameter need mapped types, proposed for Python in PEP 827.
 
-    __slots__ = ("_model_cls",)
+    __slots__ = ("_model_cls", "_root")
 
-    def __init__(self, model_cls: type) -> None:
+    def __init__(self, model_cls: type, *, root: str | None = None) -> None:
         """Stand in for a row of a model; queries build these for you.
 
         Args:
             model_cls: The queried model class.
+            root: The name of the lambda parameter this stand-in is passed
+                as, which error messages spell the row with. Defaults to
+                `None`, the model's name in snake case.
         """
         self._model_cls = model_cls
+        self._root = root or _snake(model_cls.__name__)
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
         """Read a field: a column, a forward relation or a reverse relation.
@@ -1210,18 +1268,18 @@ class QueryProxy(Generic[TModel]):
             # Statically typed as FieldProxy[Any] (chainable shape) even though a
             # relation resolves to a RelationProxy at runtime — a bare relation
             # proxy is intentionally not a QueryNode, so predicate typing still
-            # rejects `lambda t: t.account` (design pin, PRD #267).
+            # rejects `lambda post: post.author` (design pin, PRD #267).
             return RelationProxy(  # ty: ignore[invalid-return-type]
-                self._model_cls, (name,), spec.target
+                self._model_cls, (name,), spec.target, root=self._root
             )
         reverse = getattr(self._model_cls, "__ferro_reverse_specs__", None) or {}
         rspec = reverse.get(name)
         if rspec is not None:
             return ReverseRelationProxy(  # ty: ignore[invalid-return-type]
-                self._model_cls, name, rspec
+                self._model_cls, name, rspec, root=self._root
             )
         validate_query_column(self._model_cls, name)
-        return FieldProxy(name, owner=self._model_cls)
+        return FieldProxy(name, owner=self._model_cls, root=self._root)
 
 
 class RelationProxy:
@@ -1246,19 +1304,34 @@ class RelationProxy:
         ```
     """
 
-    __slots__ = ("_root_model", "_path", "_target")
+    __slots__ = ("_root_model", "_path", "_target", "_root")
 
-    def __init__(self, root_model: type, path: tuple[str, ...], target: type) -> None:
+    def __init__(
+        self,
+        root_model: type,
+        path: tuple[str, ...],
+        target: type,
+        *,
+        root: str | None = None,
+    ) -> None:
         """Stand in for a related row; query lambdas build these for you.
 
         Args:
             root_model: The queried model class.
             path: The relation fields from the queried model to this one.
             target: The related model class.
+            root: The lambda parameter the relation was read from, as error
+                messages spell it. Defaults to `None`, the queried model's
+                name in snake case.
         """
         self._root_model = root_model
         self._path = path
         self._target = target
+        self._root = root or _snake(root_model.__name__)
+
+    def _dotted(self) -> str:
+        """The selector expression this proxy came from (error messages)."""
+        return _join(self._root, *self._path)
 
     def __getattr__(self, name: str) -> "RelationProxy | FieldProxy[Any]":
         """Read a field of the related model: a column or a further relation.
@@ -1278,25 +1351,28 @@ class RelationProxy:
         relations = getattr(self._target, "__ferro_relation_specs__", None) or {}
         spec = relations.get(name)
         if spec is not None:
-            return RelationProxy(self._root_model, self._path + (name,), spec.target)
+            return RelationProxy(
+                self._root_model, self._path + (name,), spec.target, root=self._root
+            )
         reverse = getattr(self._target, "__ferro_reverse_specs__", None) or {}
         if name in reverse:
             # A reverse relation reached through forward traversal
-            # (`t.account.transactions`) is recognized but has no supported
+            # (`post.author.posts`) is recognized but has no supported
             # predicate form yet: an existence test correlates to the ROOT
             # scope only (#314). Fail pointedly rather than fall through to
             # the column error's misleading "no queryable column" message.
-            dotted = ".".join(("t", *self._path, name))
+            target_row = _snake(self._target.__name__)
             raise AttributeError(
-                f"{dotted} names the reverse relation {name!r} on a traversed "
-                "scope; existence tests are supported on the query root only "
-                f"(t.{name}.exists() on a {self._target.__name__} query). "
-                "Reverse relations are tested, not traversed (ADR-0007).",
+                f"{self._dotted()}.{name} names the reverse relation {name!r} "
+                "on a traversed scope; existence tests are supported on the "
+                f"query root only ({target_row}.{name}.exists() on a "
+                f"{self._target.__name__} query). Reverse relations are "
+                "tested, not traversed.",
                 name=name,
                 obj=self._target,
             )
         validate_query_column(self._target, name)
-        return FieldProxy(name, path=self._path, owner=self._target)
+        return FieldProxy(name, path=self._path, owner=self._target, root=self._root)
 
     def _relation_name(self) -> str:
         """The last-hop relation field name (the one being compared)."""
@@ -1305,9 +1381,9 @@ class RelationProxy:
     def _last_hop_fk_column(self) -> tuple[str, type]:
         """Foreign-key column of the LAST hop and the model declaring it.
 
-        For ``t.account`` this is ``account_id`` on the root table (owner =
-        root model); for ``t.account.owner`` it is ``owner_id`` on the hop-1
-        (account) table. The owner rides the comparison node as a
+        For ``post.author`` this is ``author_id`` on the root table (owner =
+        root model); for ``post.author.owner`` it is ``owner_id`` on the hop-1
+        (author) table. The owner rides the comparison node as a
         compile-side scope fact (#315 cross-scope guard).
         """
         current = self._root_model
@@ -1368,7 +1444,7 @@ class RelationProxy:
         raise TypeError(
             f"cannot compare relation {relation!r} to {other!r}: expected a "
             f"{self._target.__name__} instance or None. To filter by a column, "
-            f"compare it directly (e.g. t.{relation}.<column> == ...)."
+            f"compare it directly (e.g. {self._dotted()}.<column> == ...)."
         )
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
@@ -1386,10 +1462,11 @@ class RelationProxy:
     def _reject_operator(self, symbol: str) -> "QueryNode":
         """Reject a non-equality operator on a bare relation (#273)."""
         relation = self._relation_name()
+        dotted = self._dotted()
         raise TypeError(
             f"relation {relation!r} supports only == / != against a "
             f"{self._target.__name__} instance or None; to compare a column use "
-            f"t.{relation}.<column> (e.g. t.{relation}.<column> {symbol} ...)."
+            f"{dotted}.<column> (e.g. {dotted}.<column> {symbol} ...)."
         )
 
     def __lt__(self, other: object) -> "QueryNode":
@@ -1452,35 +1529,35 @@ def _resolve_scoped_predicate(
             reverse relation, an aggregate, or any other non-predicate value.
     """
     if not callable(inner):
+        row = _snake(model_cls.__name__)
         raise TypeError(
-            f"t.{relation}.exists(...) expected a predicate callable over "
-            f"{model_cls.__name__} (e.g. `lambda l: l.amount < 0`), got "
-            f"{type(inner).__name__}"
+            f"{relation}.exists(...) expected a predicate callable over "
+            f"{model_cls.__name__} (e.g. `lambda {row}: {row}.<column> < 0`), "
+            f"got {type(inner).__name__}"
         )
-    result = inner(QueryProxy(model_cls))
+    result = inner(QueryProxy(model_cls, root=row_name(inner, model_cls)))
     if isinstance(result, RelationProxy):
-        bare = result._path[-1]
         raise TypeError(
-            f"t.{relation}.exists(...) inner predicate returned the bare "
-            f"relation {bare!r}; compare a column (e.g. l.{bare}.<column> == "
-            "...) or use == None / == an instance."
+            f"{relation}.exists(...) inner predicate returned the bare "
+            f"relation {result._path[-1]!r}; compare a column (e.g. "
+            f"{result._dotted()}.<column> == ...) or use == None / == an "
+            "instance."
         )
     if isinstance(result, ReverseRelationProxy):
-        bare = result._name
         raise TypeError(
-            f"t.{relation}.exists(...) inner predicate returned the bare "
-            f"reverse relation {bare!r}; test membership with "
-            f"l.{bare}.exists()."
+            f"{relation}.exists(...) inner predicate returned the bare "
+            f"reverse relation {result._name!r}; test membership with "
+            f"{result._dotted()}.exists()."
         )
     if isinstance(result, AggregateExpr):
         raise TypeError(
-            f"t.{relation}.exists(...) cannot filter on the aggregate "
+            f"{relation}.exists(...) cannot filter on the aggregate "
             f"{result._dotted()}: an existence test answers membership, not "
             "aggregation."
         )
     if not isinstance(result, QueryNode):
         raise TypeError(
-            f"t.{relation}.exists(...) inner callable must return a "
+            f"{relation}.exists(...) inner callable must return a "
             f"predicate (QueryNode), got {type(result).__name__}"
         )
     return result
@@ -1507,12 +1584,12 @@ def _validate_inner_scope(node: QueryNode, model_cls: type, relation: str) -> No
     if node.exists is not None:
         if node.exists.owner is not None and node.exists.owner is not model_cls:
             raise TypeError(
-                f"t.{relation}.exists(...) inner predicate contains an "
+                f"{relation}.exists(...) inner predicate contains an "
                 "existence test built from another scope's parameter "
                 f"(over {node.exists.owner.__name__}, not "
                 f"{model_cls.__name__}). Cross-scope references inside an "
-                "existence test are not supported yet (#309) — the inner "
-                "lambda may reference only its own parameter."
+                "existence test are not supported yet; the inner lambda may "
+                "reference only its own parameter."
             )
         # Its own inner tree was validated against its own scope when built.
         return
@@ -1527,10 +1604,10 @@ def _validate_inner_scope(node: QueryNode, model_cls: type, relation: str) -> No
         (FieldProxy, AggregateExpr, QueryProxy, RelationProxy, ReverseRelationProxy),
     ):
         raise TypeError(
-            f"t.{relation}.exists(...) inner predicate compares "
+            f"{relation}.exists(...) inner predicate compares "
             f"{node.column!r} against another column reference; "
             "column-to-column comparison is cross-scope correlation, not "
-            "supported yet (#309) — compare against a value."
+            "supported yet; compare against a value."
         )
     expected = model_cls
     for hop_name in node.path:
@@ -1538,20 +1615,20 @@ def _validate_inner_scope(node: QueryNode, model_cls: type, relation: str) -> No
         spec = specs.get(hop_name)
         if spec is None:
             raise TypeError(
-                f"t.{relation}.exists(...) inner predicate leaf "
+                f"{relation}.exists(...) inner predicate leaf "
                 f"{node.column!r} traverses {hop_name!r}, which is not a "
                 f"relation of {expected.__name__} — the leaf was built from "
                 "another scope's parameter. Cross-scope references are not "
-                "supported yet (#309)."
+                "supported yet."
             )
         expected = spec.target
     if node.owner is not None and node.owner is not expected:
         raise TypeError(
-            f"t.{relation}.exists(...) inner predicate leaf {node.column!r} "
+            f"{relation}.exists(...) inner predicate leaf {node.column!r} "
             f"belongs to {node.owner.__name__}, not the inner scope "
             f"({expected.__name__}) — it was built from another lambda's "
-            "parameter. Cross-scope correlation is not supported yet "
-            "(#309); the inner lambda may reference only its own parameter."
+            "parameter. Cross-scope correlation is not supported yet; the "
+            "inner lambda may reference only its own parameter."
         )
 
 
@@ -1597,19 +1674,29 @@ class ReverseRelationProxy:
         ```
     """
 
-    __slots__ = ("_root_model", "_name", "_spec")
+    __slots__ = ("_root_model", "_name", "_spec", "_root")
 
-    def __init__(self, root_model: type, name: str, spec: Any) -> None:
+    def __init__(
+        self, root_model: type, name: str, spec: Any, *, root: str | None = None
+    ) -> None:
         """Stand in for a reverse relation; query lambdas build these for you.
 
         Args:
             root_model: The queried model class.
             name: The relation's field name.
             spec: The relation's details, from the model.
+            root: The lambda parameter the relation was read from, as error
+                messages spell it. Defaults to `None`, the queried model's
+                name in snake case.
         """
         self._root_model = root_model
         self._name = name
         self._spec = spec
+        self._root = root or _snake(root_model.__name__)
+
+    def _dotted(self) -> str:
+        """The selector expression this proxy came from (error messages)."""
+        return f"{self._root}.{self._name}"
 
     def exists(self, inner: "Predicate[Any] | None" = None) -> QueryNode:
         """Test whether the row has related rows, as SQL `EXISTS (...)`.
@@ -1647,7 +1734,7 @@ class ReverseRelationProxy:
         root_pk = getattr(self._root_model, "__ferro_pk__", None)
         if root_pk is None:
             raise ValueError(
-                f"t.{self._name}.exists() requires "
+                f"{self._dotted()}.exists() requires "
                 f"{self._root_model.__name__} to declare a primary-key "
                 "column: the existence test correlates the child's FK "
                 "against the root primary key."
@@ -1661,7 +1748,7 @@ class ReverseRelationProxy:
             target_pk = getattr(self._spec.target, "__ferro_pk__", None)
             if target_pk is None:
                 raise ValueError(
-                    f"t.{self._name}.exists() requires "
+                    f"{self._dotted()}.exists() requires "
                     f"{self._spec.target.__name__} to declare a primary-key "
                     "column: the M2M existence test joins the join table to "
                     "the target primary key."
@@ -1695,8 +1782,8 @@ class ReverseRelationProxy:
         where: tuple[QueryNode, ...] = ()
         joins: tuple[Any, ...] = ()
         if inner is not None:
-            node = _resolve_scoped_predicate(inner, self._spec.target, self._name)
-            _validate_inner_scope(node, self._spec.target, self._name)
+            node = _resolve_scoped_predicate(inner, self._spec.target, self._dotted())
+            _validate_inner_scope(node, self._spec.target, self._dotted())
             paths: dict[tuple[str, ...], None] = {}
             _collect_inner_traversal_paths(node, paths)
             joins = tuple(
@@ -1714,21 +1801,22 @@ class ReverseRelationProxy:
         )
 
     def _reject_operator(self, symbol: str) -> NoReturn:
+        dotted = self._dotted()
         raise TypeError(
             f"reverse relation {self._name!r} does not support {symbol}: a "
             "reverse relation appears in a predicate only as an existence "
-            f"test — t.{self._name}.exists(), negated with "
-            f"~t.{self._name}.exists(). Reverse relations are tested, not "
-            "traversed (ADR-0007)."
+            f"test — {dotted}.exists(), negated with ~{dotted}.exists(). "
+            "Reverse relations are tested, not traversed."
         )
 
     def __getattr__(self, name: str) -> NoReturn:
         """Refuse a column read: a reverse relation can only be tested with `exists()`."""
+        dotted = self._dotted()
         raise AttributeError(
             f"reverse relation {self._name!r} has no queryable column "
-            f"{name!r}: reverse relations are tested, not traversed "
-            f"(ADR-0007). Test membership with t.{self._name}.exists(), "
-            f"negated with ~t.{self._name}.exists().",
+            f"{name!r}: reverse relations are tested, not traversed. Test "
+            f"membership with {dotted}.exists(), negated with "
+            f"~{dotted}.exists().",
             name=name,
             obj=self._root_model,
         )

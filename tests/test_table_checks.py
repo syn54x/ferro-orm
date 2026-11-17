@@ -188,7 +188,7 @@ def test_empty_ferro_checks_is_a_no_op():
     [
         (
             lambda rejecting: rejecting.owner.label == None,  # noqa: E711
-            r"traversal.*its foreign-key column \(t\.owner_id\)",
+            r"traversal.*its foreign-key column \(rejecting\.owner_id\)",
         ),
         (lambda rejecting: rejecting.notes.exists(), "existence test"),
         (lambda rejecting: rejecting.amount.sum(), "aggregate"),
