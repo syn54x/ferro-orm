@@ -9,7 +9,7 @@ import ast
 import functools
 import re
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import pytest
 
@@ -24,6 +24,11 @@ from ferro import (
     connect,
 )
 from ferro.relations import resolve_relationships
+
+if TYPE_CHECKING:
+    # Defined for the type checker only: reading these annotations at runtime
+    # raises NameError, as it does in a module that imports them this way.
+    from ferro.query.nodes import QueryNode, QueryProxy
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "ferro"
 _STALE = re.compile(r"\bt\.|ADR-\d+|#\d+")
@@ -123,6 +128,46 @@ def test_no_positional_parameter_falls_back_to_the_model_name(models):
     Sale = models["Sale"]
     with pytest.raises(TypeError) as caught:
         Sale.where(lambda *rows: sum(rows[0].amount))
+    assert str(caught.value).startswith("sale.amount is a column reference")
+
+
+def _big(sale: QueryProxy[Any]) -> QueryNode:
+    return sale.amount > 10
+
+
+def _columns(sale: QueryProxy[Any]) -> Any:
+    return (sale.id, sale.amount)
+
+
+def _amount(sale: QueryProxy[Any]) -> Any:
+    return sale.amount
+
+
+def _its_sale(line: QueryProxy[Any]) -> Any:
+    return line.sale
+
+
+def _bump(sale: QueryProxy[Any]) -> dict[str, Any]:
+    return {"amount": sale.amount + 1}
+
+
+def _iterates(sale: QueryProxy[Any]) -> QueryNode:
+    return sum(sale.amount) > 10  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]
+
+
+@pytest.mark.asyncio
+async def test_a_predicate_annotated_with_type_checking_names_builds(models, db_url):
+    """Naming the row reads the parameter's name, never its annotation."""
+    await connect(db_url, auto_migrate=True)
+    Sale, LineItem = models["Sale"], models["LineItem"]
+    Sale.where(_big)
+    Sale.select(_columns)
+    Sale.select().order_by(_amount)
+    LineItem.select().include(_its_sale)
+    LineItem.select().join(_its_sale)
+    assert await Sale.where(_big).update(_bump) == 0
+    with pytest.raises(TypeError) as caught:
+        Sale.where(_iterates)
     assert str(caught.value).startswith("sale.amount is a column reference")
 
 
