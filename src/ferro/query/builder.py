@@ -1120,7 +1120,7 @@ class Query(Generic[T]):
 
         Examples:
             ```python {test=run prelude=reference}
-            posts = await Post.select().order_by(lambda post: post.id).limit(10).offset(1).all()
+            posts = await Post.select().order_by(lambda post: post.id).offset(1).all()
             assert [post.id for post in posts] == [2]
             ```
         """
