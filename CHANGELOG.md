@@ -1,6 +1,120 @@
 # CHANGELOG
 
 
+## v0.28.0 (2026-11-17)
+
+### Bug Fixes
+
+- A foreign key references the target's primary-key column (#612)
+  ([#828](https://github.com/syn54x/ferro-orm/pull/828),
+  [`2893467`](https://github.com/syn54x/ferro-orm/commit/28934677863ed46cb1c3ccc0eee96955c0a501b0))
+
+- A many-to-many's join table types its key column by a second rule, so a Decimal or date primary
+  key fails create_tables() (#936) ([#937](https://github.com/syn54x/ferro-orm/pull/937),
+  [`fe1f147`](https://github.com/syn54x/ferro-orm/commit/fe1f147a785931980d916a94d6b0c53364621f7d))
+
+- A model with only an autoincrement primary key cannot be saved (#838)
+  ([#967](https://github.com/syn54x/ferro-orm/pull/967),
+  [`45fbdcf`](https://github.com/syn54x/ferro-orm/commit/45fbdcf09a908bf9797abdb5c0c264daac3a6fdd))
+
+- A relation naming an undefined model raises a RuntimeError with no fix (#945)
+  ([#962](https://github.com/syn54x/ferro-orm/pull/962),
+  [`40cde0d`](https://github.com/syn54x/ferro-orm/commit/40cde0d8f5df9da5f40c5ccb03898eca001875ef))
+
+- Detect a ForeignKey in a string annotation and under an outer Optional (#751)
+  ([#827](https://github.com/syn54x/ferro-orm/pull/827),
+  [`de3ad4e`](https://github.com/syn54x/ferro-orm/commit/de3ad4ece7614d3952da476cca5ad2be37d5c22c))
+
+- Hydrated instances list fields in declaration order (#754)
+  ([#829](https://github.com/syn54x/ferro-orm/pull/829),
+  [`685a5df`](https://github.com/syn54x/ferro-orm/commit/685a5dfb511b99d7ab5b9ec0bb76b7463632a274))
+
+- JSON-family fields hydrate as their declared type (#737)
+  ([#832](https://github.com/syn54x/ferro-orm/pull/832),
+  [`e1d49a4`](https://github.com/syn54x/ferro-orm/commit/e1d49a4366198f2f538afa1b0d7c999d322f4dbe))
+
+- Many-to-many add() and remove() identify instances by primary key (#830)
+  ([#839](https://github.com/syn54x/ferro-orm/pull/839),
+  [`2c58a4d`](https://github.com/syn54x/ferro-orm/commit/2c58a4d00689dffe1b55e93a74e4f8583b6e5502))
+
+- Model.all() builds its own SELECT so it skips the storage check (#944)
+  ([#963](https://github.com/syn54x/ferro-orm/pull/963),
+  [`3a47c8d`](https://github.com/syn54x/ferro-orm/commit/3a47c8d925c510e9e641555eb2c1bde8ef8c8620))
+
+- Raw SQL binds a UTC datetime as +00:00 where save() stores Z, so a raw SQLite query for a saved
+  timestamp finds no row (#976) ([#982](https://github.com/syn54x/ferro-orm/pull/982),
+  [`c660e25`](https://github.com/syn54x/ferro-orm/commit/c660e25b452b7e210b524f1ea8d8ddb1b0e51b49))
+
+- Refuse bytes against a text column on Postgres (#785)
+  ([#834](https://github.com/syn54x/ferro-orm/pull/834),
+  [`eddd177`](https://github.com/syn54x/ferro-orm/commit/eddd177d5f3d8c583cff6d3abab6d6d07d4be676))
+
+- **release**: Re-lock uv.lock in the release commit
+  ([#931](https://github.com/syn54x/ferro-orm/pull/931),
+  [`f5e497f`](https://github.com/syn54x/ferro-orm/commit/f5e497f838205fbd9e182b9a494c736b005c3b04))
+
+### Documentation
+
+- Add the DTO glossary entry ([#867](https://github.com/syn54x/ferro-orm/pull/867),
+  [`07c6b8d`](https://github.com/syn54x/ferro-orm/commit/07c6b8d5c3f6242ade74b0ff90770254c6f75740))
+
+- Bring AGENTS.md up to the contracts main already keeps
+  ([#942](https://github.com/syn54x/ferro-orm/pull/942),
+  [`5a3ad06`](https://github.com/syn54x/ferro-orm/commit/5a3ad0699e8660cd1cc3fe512025b95112f38c7d))
+
+- Declare columns before relations in every model example
+  ([#986](https://github.com/syn54x/ferro-orm/pull/986),
+  [`8de03e3`](https://github.com/syn54x/ferro-orm/commit/8de03e3765395852ee038eddc4a4e19a6b95c880))
+
+- Make the upgrade guide ready for 0.28 (#965)
+  ([#966](https://github.com/syn54x/ferro-orm/pull/966),
+  [`d9bb39f`](https://github.com/syn54x/ferro-orm/commit/d9bb39f5779f10d74bf9fc34b824356484963a3d))
+
+- The Inspecting SQL guide page (#767) ([#833](https://github.com/syn54x/ferro-orm/pull/833),
+  [`55db6c6`](https://github.com/syn54x/ferro-orm/commit/55db6c6b1c51fbd781c6976c52e6eaf9d6af7f15))
+
+- Update the agent Routing block for spp v2 ([#842](https://github.com/syn54x/ferro-orm/pull/842),
+  [`4c37d3d`](https://github.com/syn54x/ferro-orm/commit/4c37d3d0fe52662e6d73005040a0577dae1ff0d5))
+
+### Features
+
+- Explicit foreign-key columns, with relations as typed views (#874)
+  ([#917](https://github.com/syn54x/ferro-orm/pull/917),
+  [`be75eaf`](https://github.com/syn54x/ferro-orm/commit/be75eaf210430623101a7d5b283e7960b3d6205f))
+
+### Refactoring
+
+- Make a model's forward relation specs complete from class definition (#934)
+  ([#935](https://github.com/syn54x/ferro-orm/pull/935),
+  [`6143aab`](https://github.com/syn54x/ferro-orm/commit/6143aab778d2c8fdbf1fbc73253c654aca7a14d2))
+
+- Move relation declaration reading behind relations (#932)
+  ([#933](https://github.com/syn54x/ferro-orm/pull/933),
+  [`c3d015c`](https://github.com/syn54x/ferro-orm/commit/c3d015c7a00e1571b77a8b7a9a480f7b1410c456))
+
+### Testing
+
+- Give the sibling-target models a primary key so main is green after #827 and #828
+  ([#831](https://github.com/syn54x/ferro-orm/pull/831),
+  [`cf1ee43`](https://github.com/syn54x/ferro-orm/commit/cf1ee43fa683f4a0de352157fd98797ffe4b5e14))
+
+- Remove 291 tests whose Keepers already catch the same break
+  ([#961](https://github.com/syn54x/ferro-orm/pull/961),
+  [`5e5011d`](https://github.com/syn54x/ferro-orm/commit/5e5011d6e1263dc0f4fdc2776529beeaa1bfedfd))
+
+- Run test=pytest fences from any docs page (#835)
+  ([#840](https://github.com/syn54x/ferro-orm/pull/840),
+  [`e4a87aa`](https://github.com/syn54x/ferro-orm/commit/e4a87aa81c6b6b2c6f97f797adfe23b9ceb58cf0))
+
+- Scope the carried-policy lookup to the test's own table
+  ([#836](https://github.com/syn54x/ferro-orm/pull/836),
+  [`fa47257`](https://github.com/syn54x/ferro-orm/commit/fa47257ee222bf27dbac094cd10762d3936b8b41))
+
+- Test model declaration through class definitions (#928)
+  ([#929](https://github.com/syn54x/ferro-orm/pull/929),
+  [`f9bfe24`](https://github.com/syn54x/ferro-orm/commit/f9bfe24e80eb12217bfccd96a65adfdcf2ec0ed4))
+
+
 ## v0.27.0 (2026-10-30)
 
 ### Bug Fixes
