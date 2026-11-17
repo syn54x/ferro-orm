@@ -54,7 +54,7 @@ from .nodes import (
     RowSelector,
     ValueExpr,
     _snake,
-    row_name,
+    _row_name,
     validate_query_column,
 )
 from .rendered import Terminal, send, terminal
@@ -131,7 +131,7 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             "where() expected a predicate callable "
             f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
         )
-    result = predicate(QueryProxy(model_cls, root=row_name(predicate, model_cls)))
+    result = predicate(QueryProxy(model_cls, root=_row_name(predicate, model_cls)))
     if isinstance(result, RelationProxy):
         raise TypeError(
             f"where() predicate returned the bare relation {result._path[-1]!r}; "
@@ -174,7 +174,7 @@ def _resolve_update_recipe(
             '(e.g. `lambda user: {"email": "x", "bonus": user.score}`), '
             f"got {type(recipe).__name__}"
         )
-    result = recipe(QueryProxy(model_cls, root=row_name(recipe, model_cls)))
+    result = recipe(QueryProxy(model_cls, root=_row_name(recipe, model_cls)))
     if not isinstance(result, dict):
         raise TypeError(
             f"update() recipe must return a dict, got {type(result).__name__}"
@@ -229,7 +229,7 @@ def _resolve_join_selector(
             non-relation value — a join selector names a relation path, not a
             column.
     """
-    row = row_name(selector, model_cls)
+    row = _row_name(selector, model_cls)
     if not callable(selector):
         raise TypeError(
             "join()/left_join() expected a selector callable "
@@ -324,7 +324,7 @@ def _resolve_include_selector(
             names a reverse or M2M relation (reverse loading is a separate
             future mechanism, #287), or returns any other non-relation value.
     """
-    row = row_name(selector, model_cls)
+    row = _row_name(selector, model_cls)
     if isinstance(selector, str):
         raise TypeError(
             f"include() takes a lambda selector naming a relation path, not a "
@@ -409,7 +409,7 @@ def _resolve_projection_selector(
         ValueError: If the selection is empty, or two fields resolve to the
             same output name (the collision error names the dict form).
     """
-    row = row_name(selector, model_cls)
+    row = _row_name(selector, model_cls)
     result = selector(QueryProxy(model_cls, root=row))
     if isinstance(result, dict):
         fields = _collect_dict_projection(result, row)
@@ -837,7 +837,7 @@ class Query(Generic[T]):
         """
         if not selectors:
             return self._clone()
-        row = row_name(selectors[0], self.model_cls)
+        row = _row_name(selectors[0], self.model_cls)
         if self._includes:
             raise ValueError(
                 "select() with a projection cannot be combined with "
@@ -929,7 +929,7 @@ class Query(Generic[T]):
         if isinstance(field, str):
             col_name = validate_query_column(self.model_cls, field)
         elif callable(field):
-            row = row_name(field, self.model_cls)
+            row = _row_name(field, self.model_cls)
             selected = field(QueryProxy(self.model_cls, root=row))
             # Ordering by a bare relation (no column selected) is meaningless —
             # reject it loudly rather than emitting an order_by the SELECT
@@ -1851,7 +1851,7 @@ class ProjectedQuery(Query[T]):
                 "order_by() expected a column-name string or a lambda "
                 f"selector, got {type(field).__name__}"
             )
-        row = row_name(field, self.model_cls)
+        row = _row_name(field, self.model_cls)
         selected = field(QueryProxy(self.model_cls, root=row))
         # Rule 2: the lambda form spells source expressions — aggregates
         # resolve to the projected field carrying the same expression and
@@ -2095,7 +2095,7 @@ class ProjectedQuery(Query[T]):
             ValueError: Always. Select the related columns, or call
                 `include()` on a query without `select()`.
         """
-        row = row_name(selector, self.model_cls)
+        row = _row_name(selector, self.model_cls)
         raise ValueError(
             "include() cannot be combined with a projection: a query carries "
             "exactly one materialization plan — projected records or "

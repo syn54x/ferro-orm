@@ -45,7 +45,7 @@ from .query.nodes import (
     QueryProxy,
     ValueExpr,
     _snake,
-    row_name,
+    _row_name,
     value_comparison,
 )
 
@@ -746,7 +746,7 @@ def _resolve_check_node(
     checks says which one is wrong. ``TypeError`` is also the declaration-error
     type the metaclass surfaces unwrapped.
     """
-    row = row_name(check.predicate, model_cls)
+    row = _row_name(check.predicate, model_cls)
     proxy = _CheckProxy(
         model_cls,
         columns,
@@ -816,7 +816,7 @@ def compile_table_checks(
     specs: list[TableCheckSpec] = []
     for check in declared:
         node = _resolve_check_node(model_cls, model_name, check, columns, relations)
-        row = row_name(check.predicate, model_cls)
+        row = _row_name(check.predicate, model_cls)
         specs.append(
             TableCheckSpec(
                 suffix=check.suffix,

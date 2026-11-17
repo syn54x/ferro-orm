@@ -34,7 +34,7 @@ from .query.nodes import (
     FuncValueExpr,
     NegateValueExpr,
     QueryNode,
-    row_name,
+    _row_name,
 )
 
 if TYPE_CHECKING:
@@ -357,7 +357,7 @@ def compile_generated_columns(
             columns,
             relations,
             reverse_relations,
-            root=row_name(func, model_cls),
+            root=_row_name(func, model_cls),
         )
         try:
             result = func(proxy)

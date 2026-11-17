@@ -67,7 +67,7 @@ _POSITIONAL = (
 )
 
 
-def row_name(selector: object, model_cls: type) -> str:
+def _row_name(selector: object, model_cls: type) -> str:
     """The name an error gives the row a lambda receives.
 
     It is the lambda's first positional parameter (`sale` in
@@ -1535,7 +1535,7 @@ def _resolve_scoped_predicate(
             f"{model_cls.__name__} (e.g. `lambda {row}: {row}.<column> < 0`), "
             f"got {type(inner).__name__}"
         )
-    result = inner(QueryProxy(model_cls, root=row_name(inner, model_cls)))
+    result = inner(QueryProxy(model_cls, root=_row_name(inner, model_cls)))
     if isinstance(result, RelationProxy):
         raise TypeError(
             f"{relation}.exists(...) inner predicate returned the bare "
