@@ -7,8 +7,9 @@ related_files:
   - src/ferro/query/nodes.py
   - src/ferro/query/wire.py
   - src/ferro/query/builder.py
+  - src/ferro/raw.py
   - AGENTS.md
-related_issues: [428, 430, 938]
+related_issues: [428, 430, 938, 976, 981]
 captured: 2026-09-15
 ---
 
@@ -41,6 +42,15 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
   `to_wire_json` canonicalizes. Every statement sends the value `save()`
   wrote, and the core binds it by the join column's storage
   (`join_key_expr`), with no cascade of its own.
+- Raw SQL: `_marshal` in `src/ferro/raw.py` calls the helper for those
+  five types, so a raw bind on SQLite matches the text `save()` stored
+  (#976).
+- Offset refusal: `refuse_offset_seconds` in `src/ferro/_bind_payload.py`
+  raises for a `datetime` / `time` whose UTC offset is not whole minutes
+  (the stored text spells it to the minute). Its two callers cover every
+  path: `canonicalize_wire_scalar` (literals, `update()`, raw binds) and
+  `save_bind_payload`, over each field's value with containers and nested
+  models searched (#981).
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
 

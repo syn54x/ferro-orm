@@ -117,9 +117,9 @@ Raw SQL has no schema map, so Ferro does not cast bind values for you, as asyncp
 | `str` | text | — |
 | `bytes` / `bytearray` | bytea / blob | — |
 | `uuid.UUID` | text | `$N::uuid` |
-| `datetime.datetime` | ISO 8601 text | `$N::timestamptz` |
-| `datetime.date` | ISO 8601 text | `$N::date` |
-| `datetime.time` | ISO 8601 text | `$N::time` |
+| `datetime.datetime` | the text `save()` stores (`2026-03-02T09:05:00Z`) | `$N::timestamptz` |
+| `datetime.date` | the text `save()` stores (`2026-03-02`) | `$N::date` |
+| `datetime.time` | the text `save()` stores (`09:05:00`) | `$N::time` |
 | `decimal.Decimal` | text | `$N::numeric` |
 | `enum.Enum` | its `.value`, by the same rules | depends on `.value` |
 | `dict` / `list` | `json.dumps(...)` text | `$N::jsonb` |
@@ -138,7 +138,7 @@ rows = await fetch_all(
 assert rows == [{"id": 2, "kind": "signup"}, {"id": 3, "kind": "click"}]
 ```
 
-`since` travels as ISO 8601 text and `::timestamptz` turns it back into a timestamp, so the signup and the later click come back. Without the cast, Postgres refuses the comparison with `operator does not exist: timestamp with time zone >= text`. Result columns work the same way in reverse: UUID, datetime and JSON values come back as strings, as `fetch_one()` showed.
+`since` travels as the text `save()` stores, `2026-03-02T09:05:00Z`, and `::timestamptz` turns it back into a timestamp, so the signup and the later click come back. On SQLite the same text means a raw `WHERE occurred_at = ?` finds a row a model saved. A `datetime` or `time` whose UTC offset is not a whole number of minutes is refused with a `ValueError`, since the stored text cannot spell it. Without the cast, Postgres refuses the comparison with `operator does not exist: timestamp with time zone >= text`. Result columns work the same way in reverse: UUID, datetime and JSON values come back as strings, as `fetch_one()` showed.
 
 ## Raw SQL in transactions
 

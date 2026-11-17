@@ -366,12 +366,14 @@ Adding `db_type="bigint"` widens the column, one of the two schema changes the [
 
 ### Changes outside relations {#changes-outside-relations}
 
-Four more changes in `0.28` reach code that runs today. None is about a foreign key:
+Six more changes in `0.28` reach code that runs today. None is about a foreign key:
 
 - **Bytes over a text column, on Postgres.** A `bytes` or `SecretBytes` field whose live column is a text type such as `varchar` or `text`, or a `str` field whose live column is `bytea`, is refused. `0.27` stored bytes in a text column as their hex text (`\xff006b` for `b"\xff\x00k"`). Now `save()`, `bulk_create()`, `update()` and every fetch that selects the field, `Model.all()` included, raise a `DataError` that names the field and the fix, before any statement is sent. Change the column to the type the model declares with a migration (`ferro migrate new` writes it) or with `connect(migrate_updates=True)`; the next operation on the same connection then succeeds. SQLite stores the bytes as written, so it never refuses.
 - **A JSON field loads as its declared type.** A field stored as JSON whose annotation is more than plain `dict` and `list` data, such as a nested Pydantic model, a `set`, a `tuple` or a `list[datetime]`, is fetched as that type. `0.27` handed back what the JSON decoder made: a `dict` for a nested model, a `list` for a `set`, a `str` for a `datetime`. Code that read `product.dimensions["width_mm"]` on a fetched record now reads `product.dimensions.width_mm`, as it always did on a record you constructed. A stored document the type rejects raises on fetch, naming the field.
 - **A fetched record lists its fields in declaration order.** `model_dump()` and `model_dump_json()` give a fetched record's keys in the order the model declares them, the order a constructed record has. `0.27` gave them in alphabetical order, the order its `SELECT` lists the columns. This matters only to text you compare.
 - **`Model.all()` sends the statement a query sends.** Its `SELECT` now ends in `WHERE TRUE`, as `Model.select().all()` and every other query with no filter does. This matters only to a test that matches logged SQL.
+- **Raw SQL binds a UTC time the way `save()` stores it.** A UTC `datetime` or `time` bound to a raw statement is sent ending in `Z` (`2026-03-01T15:00:00Z`), where `0.27` sent `+00:00`. Postgres reads both as the same instant. On SQLite, which compares the text, a raw query binding such a value no longer matches rows that raw SQL wrote in `0.27`. Fix those rows once, for each affected table and column: ``UPDATE t SET col = replace(col, '+00:00', 'Z')``. Rows written by `save()` already end in `Z` and need nothing.
+- **A UTC offset with seconds is refused.** A `datetime` or `time` whose UTC offset is not a whole number of minutes, such as `+05:30:15`, raises `ValueError` on `save()`, `bulk_create()`, `update()`, a query literal and a raw bind. `0.27` stored it with the seconds dropped, up to a minute off. Convert the value before the write: `value.astimezone(timezone.utc)`.
 
 ### The acceptance check {#explicit-foreign-keys-acceptance}
 

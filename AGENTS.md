@@ -807,6 +807,16 @@ second datetime/UUID/Decimal cascade — including `datetime.isoformat()` or a
 “mirrors save_bind_payload” comment — is an I-13 violation. Enums on the
 query wire are out of scope for this invariant.
 
+A raw SQL bind goes through the same function: `_marshal` in
+`src/ferro/raw.py` calls `canonicalize_wire_scalar` for these five types, so
+a raw `WHERE col = ?` on SQLite matches the text `save()` stored (#976).
+
+A `datetime` or `time` whose UTC offset is not a whole number of minutes is
+refused on every path, by `refuse_offset_seconds`: `canonicalize_wire_scalar`
+calls it for literals and raw binds, `save_bind_payload` for each field's
+value, nested ones included. The stored text spells an offset to the minute,
+so the value would be stored up to a minute off (#981).
+
 A `SecretStr` / `SecretBytes` is unwrapped first, through `unwrap_secret`,
 on every path: `save()` binds the real value, a query or `update()` literal
 binds the same value, and the display mask `**********` never becomes a
