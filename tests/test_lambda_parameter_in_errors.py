@@ -8,6 +8,7 @@
 import ast
 import functools
 import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
@@ -132,33 +133,34 @@ def test_no_positional_parameter_falls_back_to_the_model_name(models):
     assert str(caught.value).startswith("sale.amount is a column reference")
 
 
-def _big(sale: QueryProxy[Any]) -> QueryNode:
-    return sale.amount > 10
-
-
-def _columns(sale: QueryProxy[Any]) -> Any:
-    return (sale.id, sale.amount)
-
-
-def _amount(sale: QueryProxy[Any]) -> Any:
-    return sale.amount
-
-
-def _its_sale(line: QueryProxy[Any]) -> Any:
-    return line.sale
-
-
-def _bump(sale: QueryProxy[Any]) -> dict[str, Any]:
-    return {"amount": sale.amount + 1}
-
-
-def _iterates(sale: QueryProxy[Any]) -> QueryNode:
-    return sum(sale.amount) > 10  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]
-
-
+@pytest.mark.skipif(
+    sys.version_info < (3, 14),
+    reason="annotations are evaluated lazily only from Python 3.14; before it "
+    "a TYPE_CHECKING-only name in an annotation fails at definition",
+)
 @pytest.mark.asyncio
 async def test_a_predicate_annotated_with_type_checking_names_builds(models, db_url):
     """Naming the row reads the parameter's name, never its annotation."""
+
+    # Defined here, not at module level, so the module still imports on 3.13.
+    def _big(sale: QueryProxy[Any]) -> QueryNode:
+        return sale.amount > 10
+
+    def _columns(sale: QueryProxy[Any]) -> Any:
+        return (sale.id, sale.amount)
+
+    def _amount(sale: QueryProxy[Any]) -> Any:
+        return sale.amount
+
+    def _its_sale(line: QueryProxy[Any]) -> Any:
+        return line.sale
+
+    def _bump(sale: QueryProxy[Any]) -> dict[str, Any]:
+        return {"amount": sale.amount + 1}
+
+    def _iterates(sale: QueryProxy[Any]) -> QueryNode:
+        return sum(sale.amount) > 10  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]
+
     await connect(db_url, auto_migrate=True)
     Sale, LineItem = models["Sale"], models["LineItem"]
     Sale.where(_big)
