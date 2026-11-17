@@ -245,7 +245,7 @@ async def test_marshal_uuid(db_url):
 
 @pytest.mark.asyncio
 async def test_marshal_datetime(db_url):
-    """T7.2: datetime binds via isoformat; Postgres uses ::timestamptz."""
+    """T7.2: datetime binds the text save() stores; Postgres uses ::timestamptz."""
     import datetime
 
     from ferro import execute, fetch_one
@@ -267,7 +267,7 @@ async def test_marshal_datetime(db_url):
 
 @pytest.mark.asyncio
 async def test_marshal_date(db_url):
-    """T7.3: date binds via isoformat."""
+    """T7.3: date binds the text save() stores."""
     import datetime
 
     from ferro import execute, fetch_one
@@ -289,7 +289,7 @@ async def test_marshal_date(db_url):
 
 @pytest.mark.asyncio
 async def test_marshal_time(db_url):
-    """T7.3b: time binds via isoformat."""
+    """T7.3b: time binds the text save() stores."""
     import datetime
 
     from ferro import execute, fetch_one
@@ -477,3 +477,50 @@ async def test_set_config_then_current_setting_inside_tx(db_url):
             )
             assert row is not None
             assert row["v"] == claims
+
+
+@pytest.mark.asyncio
+async def test_raw_bind_matches_save_finds_saved_row(db_url, clean_registry):
+    """A raw query binding a UTC datetime finds the row save() wrote."""
+    from datetime import UTC, datetime
+    from typing import Annotated
+
+    from ferro import FerroField, Model, fetch_all
+
+    class Message(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        pinned_at: datetime
+        body: str
+
+    pinned_at = datetime(2026, 3, 1, 15, 0, tzinfo=UTC)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Message(id=2, pinned_at=pinned_at, body="hi").save()
+        cast = "::timestamptz" if "postgres" in db_url else ""
+        sql = f'SELECT id FROM "message" WHERE pinned_at = {_ph(db_url)}{cast}'
+        assert await fetch_all(sql, pinned_at) == [{"id": 2}]
+
+
+def test_raw_bind_matches_save_for_every_scalar():
+    """A raw bind is the text a query literal and save() write, type by type."""
+    from datetime import UTC, date, datetime, time, timedelta, timezone
+    from decimal import Decimal
+    from uuid import UUID
+
+    from ferro._bind_payload import canonicalize_wire_scalar
+    from ferro.raw import _marshal
+
+    values = [
+        datetime(2026, 3, 1, 15, 0, tzinfo=UTC),
+        datetime(2026, 3, 1, 15, 0, 0, 123456, tzinfo=UTC),
+        datetime(2026, 3, 1, 15, 0),
+        datetime(2026, 3, 1, 15, 0, tzinfo=timezone(timedelta(hours=2))),
+        date(2026, 3, 1),
+        time(15, 0),
+        time(15, 0, tzinfo=UTC),
+        UUID(int=1),
+        Decimal("1.50"),
+    ]
+    for value in values:
+        assert _marshal(value) == canonicalize_wire_scalar(value), value
+    assert _marshal(values[0]) == "2026-03-01T15:00:00Z"
