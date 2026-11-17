@@ -69,9 +69,7 @@ async def test_query_literal_refuses_offset_seconds(message_model):
 async def test_update_refuses_offset_seconds(message_model):
     Message = message_model
     with pytest.raises(ValueError) as raised:
-        await Message.where(lambda message: message.id == 1).update(
-            pinned_at=PINNED_AT
-        )
+        await Message.where(lambda message: message.id == 1).update(pinned_at=PINNED_AT)
     assert FIX in str(raised.value)
 
 
@@ -108,7 +106,9 @@ async def test_save_refuses_offset_seconds_on_time_and_sub_second(message_model)
 @pytest.mark.asyncio
 async def test_save_keeps_a_whole_minute_offset(message_model):
     Message = message_model
-    half_hour = datetime(2026, 3, 1, 15, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    half_hour = datetime(
+        2026, 3, 1, 15, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
     await Message(id=1, pinned_at=half_hour).save()
     async with ferro.engines.session():
         assert (await Message.get(1)).pinned_at == half_hour
