@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import BaseModel, SecretBytes, SecretStr
+from pydantic import SecretBytes, SecretStr, TypeAdapter
 from pydantic_core import to_json
 
 from .columns import retired_clause
+
+# Dumps any value the way pydantic's inference does, keeping datetime objects.
+_INFERRED: TypeAdapter[Any] = TypeAdapter(Any)
 
 _SAVE_COLUMN_CONTAINERS = (set, frozenset, list, tuple)
 _SAVE_COLUMN_USAGE = {
@@ -141,9 +144,10 @@ def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
     """Refuse a `datetime` or `time` whose UTC offset is not whole minutes.
 
     The stored text spells an offset to the minute, so such a value would be
-    stored up to a minute off. A list, tuple, set, the values of a dict and
-    the fields of a nested Pydantic model are searched too, since a JSON
-    column stores what they hold.
+    stored up to a minute off. The value is searched as pydantic dumps it,
+    which turns models and dataclasses into dicts and keeps every `datetime`
+    and `time`, so whatever a JSON column would store is checked: every key
+    and value of a mapping and every item of any other collection.
 
     Args:
         value: The value about to be written or bound.
@@ -152,32 +156,43 @@ def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
     Raises:
         ValueError: The value, or one it holds, has such an offset.
     """
-    if isinstance(value, (datetime, time)):
-        offset = value.utcoffset()
-        if offset is not None and offset % timedelta(minutes=1):
-            fix = (
-                "Convert it first: value.astimezone(timezone.utc)."
-                if isinstance(value, datetime)
-                else "Give it an offset in whole minutes, or no tzinfo."
-            )
-            raise ValueError(
-                f"{where}{value!r} has a UTC offset that is not a whole number "
-                "of minutes; the database stores an offset to the minute, so "
-                f"the value would be stored up to a minute off. {fix}"
-            )
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            refuse_offset_seconds(item, where=where)
-    elif isinstance(value, dict):
-        for item in value.values():
-            refuse_offset_seconds(item, where=where)
-    elif isinstance(value, BaseModel):
-        for name in type(value).model_fields:
-            refuse_offset_seconds(getattr(value, name, None), where=where)
+    pending = [_INFERRED.dump_python(value)]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (datetime, time)):
+            offset = item.utcoffset()
+            if offset is not None and offset % timedelta(minutes=1):
+                fix = (
+                    "Convert it first: value.astimezone(timezone.utc)."
+                    if isinstance(item, datetime)
+                    else "Give it an offset in whole minutes, or no tzinfo."
+                )
+                raise ValueError(
+                    f"{where}{item!r} has a UTC offset that is not a whole number "
+                    "of minutes; the database stores an offset to the minute, so "
+                    f"the value would be stored up to a minute off. {fix}"
+                )
+        elif isinstance(item, Mapping):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, Collection) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
+            pending.extend(item)
 
 
 def canonicalize_wire_scalar(value: Any) -> Any:
     """Canonical JSON form for query and ``update()`` literals (I-13).
+
+    The whole value is checked once by ``refuse_offset_seconds`` before any
+    of it is converted.
+    """
+    refuse_offset_seconds(value)
+    return _canonical_wire_value(value)
+
+
+def _canonical_wire_value(value: Any) -> Any:
+    """Convert one literal already checked by ``refuse_offset_seconds`` (I-13).
 
     A secret is unwrapped first (``unwrap_secret``), so a literal binds what
     ``save()`` wrote. ``datetime`` / ``date`` / ``time`` / UUID / Decimal go
@@ -192,12 +207,11 @@ def canonicalize_wire_scalar(value: Any) -> Any:
     if isinstance(value, Enum):
         return value
     if isinstance(value, (datetime, date, time, uuid.UUID, Decimal)):
-        refuse_offset_seconds(value)
         return json.loads(to_json(value))
     if isinstance(value, (list, tuple, set)):
-        return [canonicalize_wire_scalar(item) for item in value]
+        return [_canonical_wire_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: canonicalize_wire_scalar(item) for key, item in value.items()}
+        return {key: _canonical_wire_value(item) for key, item in value.items()}
     if hasattr(value, "isoformat"):
         raise TypeError(
             f"{type(value).__name__} is not a query/update literal; "

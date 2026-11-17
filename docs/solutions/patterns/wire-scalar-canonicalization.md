@@ -48,9 +48,13 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
 - Offset refusal: `refuse_offset_seconds` in `src/ferro/_bind_payload.py`
   raises for a `datetime` / `time` whose UTC offset is not whole minutes
   (the stored text spells it to the minute). Its two callers cover every
-  path: `canonicalize_wire_scalar` (literals, `update()`, raw binds) and
-  `save_bind_payload`, over each field's value with containers and nested
-  models searched (#981).
+  path: `canonicalize_wire_scalar` (literals, `update()`, raw binds), once
+  on the whole value, and `save_bind_payload`, once on each field's value
+  as the instance holds it (#981). It searches the value as pydantic's
+  python-mode dump gives it (models and dataclasses become dicts, datetimes
+  stay objects), then every mapping key and value and every collection
+  item, so a shape pydantic can serialize is covered without a container
+  list of Ferro's own. Do not add per-type arms to it.
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
 
