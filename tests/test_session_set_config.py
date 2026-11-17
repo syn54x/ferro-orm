@@ -11,8 +11,13 @@ semantics.
 """
 
 import asyncio
+import os
+import subprocess
+import sys
+import threading
 from typing import Annotated
 
+import psycopg
 import pytest
 
 import ferro
@@ -371,7 +376,9 @@ async def _revoke_set_config(role: str) -> None:
     )
     await execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{schema}" TO "{role}"')
     # PUBLIC, not the role specifically: a role-specific REVOKE would still
-    # leave PUBLIC's grant in effect for that role.
+    # leave PUBLIC's grant in effect for that role. The privilege is
+    # database-wide, which is why this test runs in its own database
+    # (`own_database_url`).
     await execute(
         "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC"
     )
@@ -406,13 +413,13 @@ def _role_url(db_url: str, role: str) -> str:
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_reapply_failure_still_commits_the_swap_and_the_eviction(
-    db_url, reapply_failure_role
+    own_database_url, reapply_failure_role
 ):
-    await connect(db_url, auto_migrate=True)
+    await connect(own_database_url, auto_migrate=True)
     async with engines.session():
         await _revoke_set_config(reapply_failure_role)
 
-    await connect(_role_url(db_url, reapply_failure_role), name="limited")
+    await connect(_role_url(own_database_url, reapply_failure_role), name="limited")
     try:
         async with engines.session("limited") as session:
             # No settings yet, so these run unwrapped — no permission needed.
@@ -467,3 +474,56 @@ async def test_reapply_failure_still_commits_the_swap_and_the_eviction(
         async with engines.session():
             await _restore_set_config()
             await _drop_role(reapply_failure_role)
+
+
+@pytest.mark.postgres_only
+def test_the_reapply_failure_test_leaves_set_config_granted_in_the_shared_database(
+    postgres_base_url,
+):
+    """The test above takes `set_config` from PUBLIC, and a function's
+    privileges belong to the whole database. Run it in a child pytest and
+    watch the database every xdist worker shares: PUBLIC must keep EXECUTE
+    there throughout, or a limited-role test on another worker fails with
+    `permission denied for function set_config` (#984)."""
+    done = threading.Event()
+    revoked = []
+
+    def watch() -> None:
+        with psycopg.connect(postgres_base_url, autocommit=True) as conn:
+            while not done.is_set():
+                granted = conn.execute(
+                    "SELECT has_function_privilege('public', "
+                    "'pg_catalog.set_config(text, text, boolean)', 'EXECUTE')"
+                ).fetchone()[0]
+                if not granted:
+                    revoked.append(True)
+                    return
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    try:
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                f"{__file__}::test_reapply_failure_still_commits_the_swap_and_the_eviction",
+                "--db-backends=postgres",
+                "--no-cov",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+            ],
+            env={**os.environ, "FERRO_POSTGRES_URL": postgres_base_url},
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        done.set()
+        watcher.join()
+
+    assert child.returncode == 0 and "1 passed" in child.stdout, child.stdout
+    assert not revoked, (
+        "PUBLIC lost EXECUTE on set_config in the shared database while the "
+        "reapply-failure test ran"
+    )

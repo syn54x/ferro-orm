@@ -266,6 +266,39 @@ def db_schema_name(request: pytest.FixtureRequest, db_url: str | None) -> str | 
 
 
 @pytest.fixture(scope="function")
+def own_database_url(
+    db_url: str | None, postgres_base_url: str | None, db_schema_name: str | None
+) -> Iterator[str]:
+    """A Postgres URL for a database this test alone owns, dropped afterwards.
+
+    Use it for a test that changes something the whole database shares, such
+    as a privilege on a ``pg_catalog`` function: ``db_url`` isolates a test by
+    schema, so such a change would reach every other xdist worker's test.
+    The database and a schema of the same name are created from the test's
+    schema name; ``reset_engine()`` runs before the drop at teardown.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    from ferro import reset_engine
+
+    if postgres_base_url is None or db_schema_name is None:
+        raise RuntimeError("own_database_url is for Postgres tests only")
+
+    with _connect_postgres_admin(postgres_base_url) as conn:
+        conn.execute(f'CREATE DATABASE "{db_schema_name}"')
+    try:
+        own_base = urlunparse(
+            urlparse(postgres_base_url)._replace(path=f"/{db_schema_name}")
+        )
+        _create_postgres_schema(own_base, db_schema_name)
+        yield build_postgres_test_url(own_base, db_schema_name)
+    finally:
+        reset_engine()
+        with _connect_postgres_admin(postgres_base_url) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{db_schema_name}" WITH (FORCE)')
+
+
+@pytest.fixture(scope="function")
 def db_backend(db_url: str) -> str:
     if db_url.startswith("postgres://") or db_url.startswith("postgresql://"):
         return "postgres"
