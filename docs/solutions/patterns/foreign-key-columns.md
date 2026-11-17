@@ -26,12 +26,14 @@ takes is that field's own. A relation never adds a column; it names one.
 ```python
 class Team(Model):
     id: int | None = Field(default=None, primary_key=True)
+
     players: Relation[list["Player"]] = Reverse("team_id")
 
 
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     team_id: int = Field(foreign_key=Team, index=True, on_delete="CASCADE")
+
     team: Relation[Team] = Forward("team_id")
 ```
 

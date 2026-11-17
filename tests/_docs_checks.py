@@ -513,18 +513,37 @@ _COLUMNS_FIRST = "declare every column first, then one blank line, then the rela
 
 
 def _relation(statement: ast.AnnAssign) -> bool:
-    return (
-        isinstance(statement.value, ast.Call)
-        and _called_name(statement.value) in _RELATION_CALLS
-    )
+    """Whether ``statement`` assigns a call whose final name is a relation's.
+
+    ``Forward(...)``, ``fields.Forward(...)`` and ``ferro.fields.Forward(...)``
+    all count. An import alias (``from ferro import Forward as F``) does not:
+    the lint resolves no imports.
+    """
+    if not isinstance(statement.value, ast.Call):
+        return False
+    called = statement.value.func
+    if isinstance(called, ast.Attribute):
+        return called.attr in _RELATION_CALLS
+    return isinstance(called, ast.Name) and called.id in _RELATION_CALLS
+
+
+def _class_variable(statement: ast.AnnAssign) -> bool:
+    """Whether ``statement`` is annotated ``ClassVar``, so not a field at all."""
+    annotation = statement.annotation
+    if isinstance(annotation, ast.Subscript):
+        annotation = annotation.value
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr == "ClassVar"
+    return isinstance(annotation, ast.Name) and annotation.id == "ClassVar"
 
 
 def columns_before_relations(path: Path) -> list[Violation]:
     """Report each model in ``path`` whose relations sit among its columns.
 
     A relation is an annotated assignment of ``Forward(...)``, ``Reverse(...)``
-    or ``ManyToMany(...)``; every other annotated name in a class body is a
-    column. Reported: a column declared after a relation, and a first
+    or ``ManyToMany(...)``, whatever module path it is called through; every
+    other annotated name in a class body is a column, bar a ``ClassVar``.
+    Reported: a column declared after a relation, and a first
     relation with columns above it and no blank line between (comments
     directly above the relation belong to it).
     """
@@ -539,6 +558,7 @@ def columns_before_relations(path: Path) -> list[Violation]:
                 for statement in node.body
                 if isinstance(statement, ast.AnnAssign)
                 and isinstance(statement.target, ast.Name)
+                and not _class_variable(statement)
             ]
             first = next((field for field in fields if _relation(field)), None)
             if first is None:

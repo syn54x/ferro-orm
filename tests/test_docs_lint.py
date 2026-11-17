@@ -1,11 +1,12 @@
 """The docs lint (``tests._docs_checks``) as a gate over the whole tree.
 
 ``python -m tests._docs_checks docs/pages docs/examples src/ferro GLOSSARY.md
-docs/adr`` must find nothing: no query lambda with a one-letter parameter, no
-error check that cannot fail, no retired relation term, no awaited
-relation and no model that declares a column after a relation or runs its
-relations into its columns, on any docs page, in any example script, in any docstring, in the
-glossary or in a current ADR.
+docs/adr README.md AGENTS.md`` must find nothing: no query lambda with a
+one-letter parameter, no error check that cannot fail, no retired relation
+term, no awaited relation and no model that declares a column after a
+relation or runs its relations into its columns, on any docs page, in any
+example script, in any docstring, in the glossary, in a current ADR, in the
+README or in AGENTS.md.
 ``tests/test_docs_checks.py`` covers each check case by case.
 """
 
@@ -16,7 +17,15 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LINTED = ("docs/pages", "docs/examples", "src/ferro", "GLOSSARY.md", "docs/adr")
+LINTED = (
+    "docs/pages",
+    "docs/examples",
+    "src/ferro",
+    "GLOSSARY.md",
+    "docs/adr",
+    "README.md",
+    "AGENTS.md",
+)
 
 
 def _lint(*paths: str) -> subprocess.CompletedProcess[str]:

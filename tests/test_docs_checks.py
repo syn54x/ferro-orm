@@ -808,3 +808,70 @@ def test_column_order_is_checked_in_markdown_and_docstring_fences(
         encoding="utf-8",
     )
     assert columns_before_relations(module) == [Violation(module, 7, _NO_BLANK_LINE)]
+
+
+def test_a_relation_is_recognised_by_its_final_name(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        class Note(Model):
+            account_id: int = Field(foreign_key=Account)
+            account: Relation[Account] = fields.Forward("account_id")
+            reply_to_id: int | None = Field(default=None, foreign_key="Note")
+            replies: Relation[list["Note"]] = ferro.fields.Reverse("reply_to_id")
+        """,
+    )
+    assert columns_before_relations(path) == [
+        Violation(path, 3, _NO_BLANK_LINE),
+        Violation(path, 4, _AFTER_RELATION),
+    ]
+
+
+def test_a_classvar_is_not_a_column(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "ok.py",
+        """
+        class Note(Model):
+            model_config: ClassVar[ConfigDict] = ConfigDict()
+            account: Relation[Account] = Forward("account_id")
+            registry: typing.ClassVar[dict[str, int]] = {}
+            count: ClassVar = 0
+        """,
+    )
+    assert columns_before_relations(path) == []
+
+
+def test_a_multi_line_column_and_a_nested_class_keep_their_lines(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        "bad.py",
+        """
+        def declare():
+            class Note(Model):
+                reply_to_id: int | None = Field(
+                    default=None, foreign_key="Note", on_delete="SET NULL"
+                )
+
+                reply_to: Relation["Note | None"] = Forward("reply_to_id")
+
+                class Inner(Model):
+                    account_id: int = Field(
+                        foreign_key=Account,
+                    )
+                    account: Relation[Account] = Forward("account_id")
+                    reply_to_id: int | None = Field(
+                        default=None,
+                        foreign_key="Note",
+                    )
+
+            return Note
+        """,
+    )
+    assert columns_before_relations(path) == [
+        Violation(path, 13, _NO_BLANK_LINE),
+        Violation(path, 14, _AFTER_RELATION),
+    ]

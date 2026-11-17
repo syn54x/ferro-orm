@@ -30,6 +30,7 @@ or ordering — which in practice is most of them in a well-normalized schema.
 class Project(Model):
     id: int | None = Field(default=None, primary_key=True)
     org_id: int = Field(foreign_key=Org, index=True)
+
     org: Relation[Org] = Forward("org_id")
 ```
 

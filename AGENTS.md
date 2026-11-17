@@ -614,7 +614,7 @@ What this means in practice:
   Outside the rule, as plain `TypeError`s that name the fix in words: a
   declaring call's check of its own arguments, made before any model exists
   (`Forward(3)`, `Field(foreign_key=3)`, `on_delete="BOGUS"`, a removed
-  keyword such as `ManyToMany(related_name=...)`), and a retired
+  keyword such as `related_name` on `ManyToMany`), and a retired
   `ManyToMany`.
 
   A new refusal in `ferro.relations`, or in the metaclass's foreign-key
@@ -769,7 +769,7 @@ Rules:
   anchor. "A `datetime` field becomes `timestamptz` — here's the `CREATE TABLE`"
   beats "`canonical_from_parts` maps the logical type."
 - **Introduce jargon only after the plain version.** Function and type names are
-  precise back-references once the idea is clear — not the primary explanation.
+  precise references back once the idea is clear — not the primary explanation.
 - **Use analogies for architecture.** "Two translation dictionaries that must
   agree by hand" communicates a duplication smell faster than a module diagram.
 - **Show, don't just tell.** Prefer before/after diffs, rendered SQL, and
@@ -789,7 +789,7 @@ key:
 
 ```python
 pinned_at = datetime(2026, 3, 1, 15, 0, tzinfo=UTC)
-await Message(id=2, pinned_at=pinned_at, ...).save()
+await Message(id=2, pinned_at=pinned_at, **other_fields).save()
 page = await (
     Message.order_by(lambda message: message.pinned_at)
     .order_by(lambda message: message.id)

@@ -49,6 +49,7 @@ def show_step(title: str, code: str):
 class Category(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
+
     products: Relation[list["Product"]] = Reverse("category_id")
 
 
@@ -57,21 +58,24 @@ class Product(Model):
     name: Annotated[str, FerroField(index=True)]
     price: float
     category_id: Annotated[int, FerroField(foreign_key=Category, on_delete="CASCADE")]
-    category: Relation[Category] = Forward("category_id")
     in_stock: bool
     sku: Annotated[str | None, FerroField(unique=True)] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    category: Relation[Category] = Forward("category_id")
 
 
 class Actor(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
+
     movies: Relation[list["Movie"]] = ManyToMany(through="actor_movies")
 
 
 class Movie(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: Annotated[str, FerroField(index=True)]
+
     actors: Relation[list[Actor]] = Reverse("movies")
 
 
