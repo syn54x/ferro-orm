@@ -147,19 +147,49 @@ def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
     stored up to a minute off. The value is searched as pydantic dumps it,
     which turns models and dataclasses into dicts and keeps every `datetime`
     and `time`, so whatever a JSON column would store is checked: every key
-    and value of a mapping and every item of any other collection.
+    and value of a mapping and every item of any other collection. A
+    container reached twice is searched once; one that holds itself cannot be
+    stored as JSON and is refused.
 
     Args:
         value: The value about to be written or bound.
         where: A prefix naming the field, such as `"Message.pinned_at: "`.
 
     Raises:
-        ValueError: The value, or one it holds, has such an offset.
+        ValueError: The value, or one it holds, has such an offset, or the
+            value refers to itself.
     """
-    pending = [_INFERRED.dump_python(value)]
+    pending: list[tuple[Any, bool]] = [(_INFERRED.dump_python(value), False)]
+    on_path: set[int] = set()
+    searched: set[int] = set()
     while pending:
-        item = pending.pop()
-        if isinstance(item, (datetime, time)):
+        item, leaving = pending.pop()
+        if leaving:
+            on_path.discard(id(item))
+            searched.add(id(item))
+            continue
+        if isinstance(item, Mapping):
+            children = [*item.keys(), *item.values()]
+        elif isinstance(item, Collection) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
+            children = list(item)
+        else:
+            children = None
+        if children is not None:
+            if id(item) in on_path:
+                raise ValueError(
+                    f"{where}the value refers to itself (a "
+                    f"{type(item).__name__} inside it holds that same "
+                    f"{type(item).__name__}), so it cannot be stored as JSON. "
+                    "Break the cycle before the write, for example by storing "
+                    "the parent's key instead of the parent."
+                )
+            if id(item) not in searched:
+                on_path.add(id(item))
+                pending.append((item, True))
+                pending.extend((child, False) for child in children)
+        elif isinstance(item, (datetime, time)):
             offset = item.utcoffset()
             if offset is not None and offset % timedelta(minutes=1):
                 fix = (
@@ -172,13 +202,6 @@ def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
                     "of minutes; the database stores an offset to the minute, so "
                     f"the value would be stored up to a minute off. {fix}"
                 )
-        elif isinstance(item, Mapping):
-            pending.extend(item.keys())
-            pending.extend(item.values())
-        elif isinstance(item, Collection) and not isinstance(
-            item, (str, bytes, bytearray)
-        ):
-            pending.extend(item)
 
 
 def canonicalize_wire_scalar(value: Any) -> Any:

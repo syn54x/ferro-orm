@@ -54,7 +54,11 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
   python-mode dump gives it (models and dataclasses become dicts, datetimes
   stay objects), then every mapping key and value and every collection
   item, so a shape pydantic can serialize is covered without a container
-  list of Ferro's own. Do not add per-type arms to it.
+  list of Ferro's own. Do not add per-type arms to it. The python-mode dump
+  hands a self-referencing dict or list back unchanged, so the walk tracks
+  containers by `id()`: one reached twice is searched once, and one that is
+  its own ancestor is refused with a `ValueError` before any statement is
+  sent (without that, the walk never ends).
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
 
