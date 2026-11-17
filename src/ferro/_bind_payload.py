@@ -11,12 +11,12 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterable, Iterator
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import SecretBytes, SecretStr
+from pydantic import BaseModel, SecretBytes, SecretStr
 from pydantic_core import to_json
 
 from .columns import retired_clause
@@ -137,6 +137,45 @@ def _raw_bound_fields(instance: Any) -> dict[str, Any]:
     return raw
 
 
+def refuse_offset_seconds(value: Any, *, where: str = "") -> None:
+    """Refuse a `datetime` or `time` whose UTC offset is not whole minutes.
+
+    The stored text spells an offset to the minute, so such a value would be
+    stored up to a minute off. A list, tuple, set, the values of a dict and
+    the fields of a nested Pydantic model are searched too, since a JSON
+    column stores what they hold.
+
+    Args:
+        value: The value about to be written or bound.
+        where: A prefix naming the field, such as `"Message.pinned_at: "`.
+
+    Raises:
+        ValueError: The value, or one it holds, has such an offset.
+    """
+    if isinstance(value, (datetime, time)):
+        offset = value.utcoffset()
+        if offset is not None and offset % timedelta(minutes=1):
+            fix = (
+                "Convert it first: value.astimezone(timezone.utc)."
+                if isinstance(value, datetime)
+                else "Give it an offset in whole minutes, or no tzinfo."
+            )
+            raise ValueError(
+                f"{where}{value!r} has a UTC offset that is not a whole number "
+                "of minutes; the database stores an offset to the minute, so "
+                f"the value would be stored up to a minute off. {fix}"
+            )
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            refuse_offset_seconds(item, where=where)
+    elif isinstance(value, dict):
+        for item in value.values():
+            refuse_offset_seconds(item, where=where)
+    elif isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            refuse_offset_seconds(getattr(value, name, None), where=where)
+
+
 def canonicalize_wire_scalar(value: Any) -> Any:
     """Canonical JSON form for query and ``update()`` literals (I-13).
 
@@ -153,6 +192,7 @@ def canonicalize_wire_scalar(value: Any) -> Any:
     if isinstance(value, Enum):
         return value
     if isinstance(value, (datetime, date, time, uuid.UUID, Decimal)):
+        refuse_offset_seconds(value)
         return json.loads(to_json(value))
     if isinstance(value, (list, tuple, set)):
         return [canonicalize_wire_scalar(item) for item in value]
@@ -179,6 +219,11 @@ def save_bind_payload(instance: Any) -> dict[str, Any]:
     which a fetch fills in the ``SELECT``'s column order, and the raw columns
     are bound apart from it.
     """
+    model_name = type(instance).__name__
+    for name in type(instance).model_fields:
+        refuse_offset_seconds(
+            getattr(instance, name, None), where=f"{model_name}.{name}: "
+        )
     raw = _raw_bound_fields(instance)
     # A generated column is the database's to write (ADR-0058): never bound.
     generated = getattr(type(instance), "__ferro_generated__", {})

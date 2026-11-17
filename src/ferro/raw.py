@@ -20,7 +20,11 @@ import json
 import uuid
 from typing import Any
 
-from ._bind_payload import deferred_secret_values, unwrap_secret
+from ._bind_payload import (
+    canonicalize_wire_scalar,
+    deferred_secret_values,
+    unwrap_secret,
+)
 from ._core import RouteHandle
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
@@ -41,12 +45,11 @@ def _marshal(val: Any) -> bool | int | float | str | bytes | None:
         return val
     if isinstance(val, (bytes, bytearray)):
         return bytes(val)
-    if isinstance(val, uuid.UUID):
-        return str(val)
-    if isinstance(val, (datetime.datetime, datetime.date, datetime.time)):
-        return val.isoformat()
-    if isinstance(val, decimal.Decimal):
-        return str(val)
+    if isinstance(
+        val,
+        (datetime.datetime, datetime.date, datetime.time, uuid.UUID, decimal.Decimal),
+    ):
+        return canonicalize_wire_scalar(val)
     if isinstance(val, enum.Enum):
         return _marshal(val.value)
     if isinstance(val, (dict, list)):
