@@ -502,25 +502,33 @@ async def test_raw_bind_matches_save_finds_saved_row(db_url, clean_registry):
 
 
 def test_raw_bind_matches_save_for_every_scalar():
-    """A raw bind is the text a query literal and save() write, type by type."""
+    """A raw bind is the text save() stores, type by type."""
     from datetime import UTC, date, datetime, time, timedelta, timezone
     from decimal import Decimal
     from uuid import UUID
 
-    from ferro._bind_payload import canonicalize_wire_scalar
+    from pydantic import BaseModel
+
     from ferro.raw import _marshal
 
-    values = [
-        datetime(2026, 3, 1, 15, 0, tzinfo=UTC),
-        datetime(2026, 3, 1, 15, 0, 0, 123456, tzinfo=UTC),
-        datetime(2026, 3, 1, 15, 0),
-        datetime(2026, 3, 1, 15, 0, tzinfo=timezone(timedelta(hours=2))),
-        date(2026, 3, 1),
-        time(15, 0),
-        time(15, 0, tzinfo=UTC),
-        UUID(int=1),
-        Decimal("1.50"),
+    class Row(BaseModel):
+        value: object
+
+    plus_two = timezone(timedelta(hours=2))
+    expected = [
+        (datetime(2026, 3, 1, 15, 0, tzinfo=UTC), "2026-03-01T15:00:00Z"),
+        (
+            datetime(2026, 3, 1, 15, 0, 0, 123456, tzinfo=UTC),
+            "2026-03-01T15:00:00.123456Z",
+        ),
+        (datetime(2026, 3, 1, 15, 0), "2026-03-01T15:00:00"),
+        (datetime(2026, 3, 1, 15, 0, tzinfo=plus_two), "2026-03-01T15:00:00+02:00"),
+        (date(2026, 3, 1), "2026-03-01"),
+        (time(15, 0), "15:00:00"),
+        (time(15, 0, tzinfo=UTC), "15:00:00Z"),
+        (UUID(int=1), "00000000-0000-0000-0000-000000000001"),
+        (Decimal("1.50"), "1.50"),
     ]
-    for value in values:
-        assert _marshal(value) == canonicalize_wire_scalar(value), value
-    assert _marshal(values[0]) == "2026-03-01T15:00:00Z"
+    for value, text in expected:
+        assert _marshal(value) == text, value
+        assert Row(value=value).model_dump(mode="json")["value"] == text, value

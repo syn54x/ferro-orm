@@ -1,5 +1,6 @@
 """A datetime or time whose UTC offset is not whole minutes is refused on every write path."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Annotated
 
@@ -23,6 +24,11 @@ class Window(BaseModel):
     opens_at: datetime
 
 
+@dataclass
+class Span:
+    opens_at: datetime
+
+
 @pytest_asyncio.fixture
 async def message_model(db_url, clean_registry):
     class Message(Model):
@@ -31,6 +37,9 @@ async def message_model(db_url, clean_registry):
         alarm: time | None = None
         seen_at: list[datetime] = []
         window: Window | None = None
+        span: Span | None = None
+        marks: dict[datetime, int] = {}
+        stamps: frozenset[datetime] = frozenset()
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -89,6 +98,63 @@ async def test_save_refuses_offset_seconds_nested_in_a_field(message_model):
         await Message(
             id=1, pinned_at=UTC_PINNED_AT, window=Window(opens_at=PINNED_AT)
         ).save()
+
+
+def _save(field, value):
+    return lambda Message: Message(
+        id=1, pinned_at=UTC_PINNED_AT, **{field: value}
+    ).save()
+
+
+def _update(field, value):
+    return lambda Message: Message.where(lambda message: message.id == 1).update(
+        **{field: value}
+    )
+
+
+@pytest.mark.parametrize(
+    ("write", "names"),
+    [
+        pytest.param(_save("seen_at", [PINNED_AT]), "Message.seen_at", id="save-list"),
+        pytest.param(
+            _save("window", Window(opens_at=PINNED_AT)),
+            "Message.window",
+            id="save-nested-model",
+        ),
+        pytest.param(
+            _save("span", Span(opens_at=PINNED_AT)), "Message.span", id="save-dataclass"
+        ),
+        pytest.param(
+            _save("marks", {PINNED_AT: 1}), "Message.marks", id="save-dict-key"
+        ),
+        pytest.param(
+            _save("stamps", frozenset({PINNED_AT})),
+            "Message.stamps",
+            id="save-frozenset",
+        ),
+        pytest.param(
+            _update("window", Window(opens_at=PINNED_AT)), FIX, id="update-nested-model"
+        ),
+        pytest.param(
+            _update("span", Span(opens_at=PINNED_AT)), FIX, id="update-dataclass"
+        ),
+        pytest.param(_update("marks", {PINNED_AT: 1}), FIX, id="update-dict-key"),
+        pytest.param(
+            _update("stamps", frozenset({PINNED_AT})), FIX, id="update-frozenset"
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_offset_seconds_refused_in_every_container_shape(
+    message_model, statement_records, write, names
+):
+    Message = message_model
+    statement_records.clear()
+    with pytest.raises(ValueError) as raised:
+        await write(Message)
+    assert REFUSAL in str(raised.value)
+    assert names in str(raised.value)
+    assert [record.sql for record in statement_records] == []
 
 
 @pytest.mark.asyncio
