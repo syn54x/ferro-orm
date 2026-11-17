@@ -138,7 +138,9 @@ rows = await fetch_all(
 assert rows == [{"id": 2, "kind": "signup"}, {"id": 3, "kind": "click"}]
 ```
 
-`since` travels as the text `save()` stores, `2026-03-02T09:05:00Z`, and `::timestamptz` turns it back into a timestamp, so the signup and the later click come back. On SQLite the same text means a raw `WHERE occurred_at = ?` finds a row a model saved. A `datetime` or `time` whose UTC offset is not a whole number of minutes is refused with a `ValueError`, since the stored text cannot spell it. Without the cast, Postgres refuses the comparison with `operator does not exist: timestamp with time zone >= text`. Result columns work the same way in reverse: UUID, datetime and JSON values come back as strings, as `fetch_one()` showed.
+`since` travels as the text `save()` stores, `2026-03-02T09:05:00Z`, and `::timestamptz` turns it back into a timestamp, so the signup and the later click come back. Without the cast, Postgres refuses the comparison with `operator does not exist: timestamp with time zone >= text`. Result columns work the same way in reverse: UUID, datetime and JSON values come back as strings, as `fetch_one()` showed.
+
+On SQLite, which compares the stored text, the same spelling means a raw `WHERE occurred_at = ?` finds a row a model saved. A `datetime` or `time` whose UTC offset is not a whole number of minutes is refused with a `ValueError`, since the stored text spells an offset only to the minute.
 
 ## Raw SQL in transactions
 
