@@ -28,7 +28,7 @@ from tests.test_migrate_up import new
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "docs" / "pages" / "upgrading.md"
-HEADING = "## Upgrading to X.Y {#explicit-foreign-keys}"
+HEADING = "## Upgrading to 0.28 {#explicit-foreign-keys}"
 REFERENCE = "Reference: https://ferro-orm.x54.sh/upgrading/#explicit-foreign-keys"
 
 # One needle per old form the table converts.
@@ -136,7 +136,7 @@ def test_the_section_holds_exactly_one_agent_prompt() -> None:
     assert section.count("??? example") == 1
     prompt = _prompt(section)
     assert prompt.startswith(
-        "```text\n    You are helping upgrade a Python codebase to Ferro ORM X.Y.\n"
+        "```text\n    You are helping upgrade a Python codebase to Ferro ORM 0.28.\n"
         f"    {REFERENCE}\n"
     )
 

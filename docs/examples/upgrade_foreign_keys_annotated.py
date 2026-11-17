@@ -87,6 +87,28 @@ async def main() -> None:
         assert (await note.pin.first()) is not None
 
 
+async def undefined_refusal() -> None:
+    """Connect with a key column that names a model nobody defines."""
+
+    # --8<-- [start:undefined]
+    class Team(Model):
+        id: Annotated[int | None, Field(primary_key=True)] = None
+
+    class Player(Model):
+        id: Annotated[int | None, Field(primary_key=True)] = None
+        team_id: Annotated[int, Field(foreign_key="Teem")]  # no model is named Teem
+
+    try:
+        await connect("sqlite::memory:", auto_migrate=True)
+    except TypeError as error:
+        print(f"TypeError: {error}")
+    else:
+        raise AssertionError("a key column naming an undefined model was accepted")
+    # --8<-- [end:undefined]
+
+
 if __name__ == "__main__":
     storage_refusal()
     asyncio.run(main())
+    # Last: Player stays registered, and no later connect() would succeed.
+    asyncio.run(undefined_refusal())
