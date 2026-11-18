@@ -429,7 +429,8 @@ fn planned_create_unit(
                     .find(|(model, _)| &model.table_name == table)
                     .ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "the plan creates '{table}', which the create pass does not; this                              is a ferro bug, please file an issue"
+                            "the plan creates '{table}', which the create pass does not; this \
+                             is a ferro bug, please file an issue"
                         ))
                     })?;
                 unit.extend(table_steps(model, emission));
