@@ -26,8 +26,8 @@
 //! | a type change | contract |
 //! | a constraint added to a table that already exists (`NOT VALID` on Postgres), or validated (the validate, add-constraint and contract steps) | contract |
 //! | a unique index built or redefined | contract |
-//! | a row-security change that can refuse a write (a policy, `ENABLE` / `FORCE`) | contract |
-//! | an added table (with a foreign key added to it by the same step, after its `CREATE TABLE`) or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
+//! | a row-security change that can refuse a write (a policy, `ENABLE` / `FORCE`) on a table that already exists | contract |
+//! | an added table (with what the same step adds to it after its `CREATE TABLE`: a foreign key, row security, a policy) or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
 //! | a data step, a guard step | expand |
 //! | a SQLite rebuild carrying only expand ops | expand |
 //! | a step whose rendering on the dialect runs nothing (`not-applicable`) | expand |
