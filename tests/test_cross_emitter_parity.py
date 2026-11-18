@@ -82,7 +82,7 @@ from ferro import (
     ensure_resolved_modelset,
     reset_engine,
 )
-from ferro import OperationalError, PassReport
+from ferro import PassReport
 from ferro import migrate as ferro_migrate
 from ferro.migrations import drift as migrations_drift
 from ferro.migrations import get_metadata
@@ -900,20 +900,7 @@ class Finding:
     dialects: frozenset[str] = frozenset(DIALECTS)
 
 
-FINDINGS: dict[str, Finding] = {
-    "C2-drop-a-foreign-key-column": Finding(
-        reason=(
-            "pins (f) and (g): on SQLite the planner renders a plain DROP COLUMN for a "
-            "foreign-key column, which SQLite refuses at execution (the column "
-            "is in the table's FOREIGN KEY definition); the pass fails naming "
-            "`ferro migrate new` instead of the renderer refusing the op "
-            "(SqliteInPlace) before anything runs"
-        ),
-        raises=OperationalError,
-        pins=frozenset({"f", "g"}),
-        dialects=frozenset({"sqlite"}),
-    ),
-}
+FINDINGS: dict[str, Finding] = {}
 
 
 KEPT_DEFAULTS: dict[tuple[str, str], dict[tuple[str, str], str]] = {
@@ -1084,6 +1071,7 @@ REBUILD_CASES = (
     "A10-add-a-table-check",
     "A10-change-a-table-check",
     "A10-drop-a-table-check",
+    "A10-drop-a-column-a-table-check-reads",
     "B3-rename-a-model",
     "B3-rename-a-join-table",
     "C1-add-an-optional-foreign-key",

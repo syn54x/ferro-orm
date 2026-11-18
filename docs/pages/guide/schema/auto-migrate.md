@@ -154,10 +154,11 @@ async with engines.session():
     assert [column["name"] for column in columns] == ["email", "id", "name", "nickname"]
 ```
 
-Ada's `bio` is gone with its column; `nickname` was added in the same connect. Dropping is dependency-aware and fails loudly rather than skipping:
+Ada's `bio` is gone with its column; `nickname` was added in the same connect. Dropping is dependency-aware, and a column it cannot drop is never skipped silently:
 
 - Explicit indexes covering a dropped column are dropped first, since they would be orphaned anyway.
-- Columns that are **primary keys**, enforced by table constraints, or referenced by other tables' **foreign keys** abort with an error naming the constraint and pointing at `ferro migrate new`, which writes the drop as a reviewed [migration](migrations.md).
+- Columns that are **primary keys**, enforced by a `UNIQUE` table constraint, or referenced by other tables' **foreign keys** abort with an error naming the constraint and pointing at `ferro migrate new`, which writes the drop as a reviewed [migration](migrations.md).
+- On SQLite, a column that the table's own **foreign key** or a **table check** names stays, with its values and its index, because SQLite drops such a column only by [rebuilding the table](#sqlite-changes-that-need-a-table-rebuild). The connect goes on and warns once per column, naming `ferro migrate new`. Postgres drops the column.
 
 It also drops a **foreign default**: a server default on a column that Ferro did not leave there. Ferro persists no server default of its own, so a default someone set by hand (`ALTER TABLE "author" ALTER COLUMN "slug" SET DEFAULT ''`) is removed, and the `PassReport` lists the statement:
 

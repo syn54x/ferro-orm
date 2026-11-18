@@ -8673,3 +8673,183 @@ fn a_generated_column_over_an_input_whose_type_change_is_refused_is_not_replaced
         }]
     );
 }
+
+// -- #610: a column SQLite cannot drop in place ---------------------------------------
+
+/// `author` with `extra` after its key and name.
+fn author_with(extra: Vec<SchemaColumn>) -> SchemaModel {
+    let mut columns = vec![pk_col("id", "int"), col("name", "text", false)];
+    columns.extend(extra);
+    schema_model("author", columns)
+}
+
+/// `author` with a `team_id` foreign key to `team`, indexed or not.
+fn author_with_team(index: bool) -> SchemaModel {
+    SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
+            column: "team_id".to_string(),
+            to_table: "team".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("SET NULL".to_string()),
+            name: None,
+        }],
+        indexes: index
+            .then(|| SchemaIndex {
+                name: "idx_author_team_id".to_string(),
+                columns: vec!["team_id".to_string()],
+                unique: false,
+            })
+            .into_iter()
+            .collect(),
+        ..author_with(vec![col("team_id", "int", true)])
+    }
+}
+
+/// `ck_author_age_positive`: `age > 0`.
+fn age_positive() -> SchemaTableCheck {
+    SchemaTableCheck {
+        name: "ck_author_age_positive".to_string(),
+        predicate: CheckExpr::Cmp {
+            column: "age".to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        },
+    }
+}
+
+/// The before side over `models`, declared or live. A live table holds the
+/// check `age_positive` as its catalog text; its IR carries no table check.
+fn before_side(mut models: Vec<SchemaModel>, live: bool) -> Side {
+    if !live {
+        return Side::declared(envelope(models));
+    }
+    let mut facts = LiveFacts::default();
+    for model in &mut models {
+        let checks = std::mem::take(&mut model.table_checks)
+            .into_iter()
+            .map(|check| live_check(&check.name, "CHECK (\"age\" > 0)"))
+            .collect();
+        facts
+            .tables
+            .insert(model.table_name.clone(), live_checks(checks));
+    }
+    Side::live(envelope(models), facts).expect("live side")
+}
+
+#[test]
+fn sqlite_leaves_a_column_its_tables_foreign_key_or_a_table_check_names() {
+    let team = || schema_model("team", vec![pk_col("id", "int")]);
+    let checked = SchemaModel {
+        table_checks: vec![age_positive()],
+        ..author_with(vec![col("age", "int", true)])
+    };
+    let fk_sentence = "Column 'author.team_id' is no longer declared, but foreign key \
+         'fk_author_team_id_team' names it, and SQLite cannot drop such a column in place (it \
+         requires a full table rebuild). The column stays with its values; generate a reviewed \
+         migration with `ferro migrate new` to drop it.";
+    let check_sentence = "Column 'author.age' is no longer declared, but CHECK constraint \
+         'ck_author_age_positive' reads it, and SQLite cannot drop such a column in place (it \
+         requires a full table rebuild). The column stays with its values; generate a reviewed \
+         migration with `ferro migrate new` to drop it.";
+    let cases = [
+        ("team_id", author_with_team(false), fk_sentence),
+        ("team_id", author_with_team(true), fk_sentence),
+        ("age", checked, check_sentence),
+    ];
+    for (column, author, sentence) in cases {
+        for live in [false, true] {
+            for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+                let context = format!("{column} live={live} {dialect:?}");
+                let plan = plan_from_ir(
+                    &before_side(vec![team(), author.clone()], live),
+                    &Side::declared(envelope(vec![team(), author_with(vec![])])),
+                    dialect,
+                    PlanOptions { destructive: true },
+                );
+                let rendered = plan.render().expect("renders");
+                let drop = plan
+                    .operations
+                    .iter()
+                    .position(|planned| matches!(planned.op, MigrationOp::DropColumn { .. }))
+                    .unwrap_or_else(|| panic!("{context}: {:?}", plan.op_list()));
+                if dialect == Dialect::Postgres {
+                    assert_eq!(
+                        rendered[drop].statements,
+                        vec![format!("ALTER TABLE \"author\" DROP COLUMN \"{column}\"")],
+                        "{context}"
+                    );
+                    assert!(rendered[drop].reports.is_empty(), "{context}");
+                    continue;
+                }
+                assert_eq!(
+                    plan.operations[drop].verdict.execution,
+                    Execution::Rebuild,
+                    "{context}"
+                );
+                for (planned, out) in plan.operations.iter().zip(&rendered) {
+                    if planned.verdict.goes_with == Some(Rider::DroppedColumn) {
+                        assert!(out.statements.is_empty(), "{context}: {out:?}");
+                        assert!(out.reports.is_empty(), "{context}: {out:?}");
+                    }
+                }
+                assert!(rendered[drop].statements.is_empty(), "{context}");
+                assert_eq!(
+                    rendered[drop].reports,
+                    vec![ferro_ddl_lowering::sqlite_in_place_report(
+                        InPlaceChange::DropColumn,
+                        ferro_ddl_lowering::Subject::column("author", column),
+                        sentence.to_string(),
+                    )],
+                    "{context}"
+                );
+            }
+        }
+    }
+    // The indexed case plans the index's drop, which rides the column's.
+    let plan = plan_from_ir(
+        &before_side(vec![team(), author_with_team(true)], false),
+        &Side::declared(envelope(vec![team(), author_with(vec![])])),
+        Dialect::Sqlite,
+        PlanOptions { destructive: true },
+    );
+    assert!(
+        plan.operations.iter().any(
+            |planned| matches!(planned.op, MigrationOp::DropIndex { .. })
+                && planned.verdict.goes_with == Some(Rider::DroppedColumn)
+        ),
+        "{:?}",
+        plan.op_list()
+    );
+}
+
+#[test]
+fn sqlite_drops_a_plain_column_in_place_while_a_table_check_on_another_stays() {
+    let author = |extra: Vec<SchemaColumn>| SchemaModel {
+        table_checks: vec![age_positive()],
+        ..author_with(extra)
+    };
+    let age = || col("age", "int", true);
+    for live in [false, true] {
+        let plan = plan_from_ir(
+            &before_side(
+                vec![author(vec![age(), col("nickname", "text", true)])],
+                live,
+            ),
+            &Side::declared(envelope(vec![author(vec![age()])])),
+            Dialect::Sqlite,
+            PlanOptions { destructive: true },
+        );
+        let [planned] = plan.operations.as_slice() else {
+            panic!("live={live}: {:?}", plan.op_list());
+        };
+        assert_eq!(planned.verdict.execution, Execution::Native, "live={live}");
+        assert_eq!(
+            plan.render().expect("renders")[0].statements,
+            vec!["ALTER TABLE \"author\" DROP COLUMN \"nickname\"".to_string()],
+            "live={live}"
+        );
+    }
+}

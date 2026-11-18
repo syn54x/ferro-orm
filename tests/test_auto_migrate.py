@@ -861,6 +861,82 @@ async def test_destructive_refuses_unique_constraint_column_on_sqlite(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
+@pytest.mark.parametrize(
+    ("column", "kept"),
+    [("team_id", "idx_author_team_id"), ("age", "ck_author_age_positive")],
+)
+async def test_destructive_leaves_a_column_a_foreign_key_or_a_table_check_names_on_sqlite(
+    db_url, clean_registry, column, kept
+):
+    import sqlite3
+    from typing import ClassVar
+
+    from ferro import Check, clear_registry
+
+    def declare(*, with_column: bool):
+        class Team(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+        if not with_column:
+
+            class Author(Model):
+                id: Annotated[int | None, FerroField(primary_key=True)] = None
+                name: str
+
+        elif column == "team_id":
+
+            class Author(Model):  # noqa: F811
+                id: Annotated[int | None, FerroField(primary_key=True)] = None
+                name: str
+                team_id: Annotated[
+                    int | None,
+                    FerroField(foreign_key=Team, on_delete="SET NULL", index=True),
+                ] = None
+
+        else:
+
+            class Author(Model):  # noqa: F811
+                id: Annotated[int | None, FerroField(primary_key=True)] = None
+                name: str
+                age: int | None = None
+
+                __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                    Check("age_positive", lambda author: author.age > 0),
+                )
+
+    declare(with_column=True)
+    await auto_migrate(db_url)
+    ferro.reset_engine()
+    clear_registry()
+    declare(with_column=False)
+
+    report = await warned_auto_migrate(db_url, destructive=True)
+
+    assert schema_steps(report) == []
+    [warning] = [
+        w
+        for w in report.warnings
+        if w.kind == "SqliteInPlace" and w.subject.column == column
+    ]
+    assert warning.subject.table == "author"
+    assert "`ferro migrate new`" in warning.text
+    assert column in _sqlite_columns(db_url, "author")
+    conn = sqlite3.connect(db_url.removeprefix("sqlite:").split("?", 1)[0])
+    try:
+        stored = " ".join(
+            row[0]
+            for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = 'author'"
+            )
+            if row[0]
+        )
+    finally:
+        conn.close()
+    assert kept in stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_added_indexed_and_unique_columns_get_their_indexes(
     db_url, clean_registry
 ):

@@ -4175,6 +4175,8 @@ pub enum InPlaceChange {
     DropGeneratedExpression,
     /// Add a generated column, or turn a plain column into one.
     AddGeneratedColumn,
+    /// Drop a column the table's foreign key or a table check names.
+    DropColumn,
 }
 
 /// [`ReportKind::ForeignDefault`]: `table.column` has the server default

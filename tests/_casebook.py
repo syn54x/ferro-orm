@@ -182,6 +182,11 @@ CASES: tuple[Case, ...] = (
         sqlite_rebuild.CHECKS + "    age: int | None = None\n",
     ),
     Case(
+        "A10-drop-a-column-a-table-check-reads",
+        sqlite_rebuild.checked("author.age > 0"),
+        sqlite_rebuild.CHECKS,
+    ),
+    Case(
         "A11-redefine-an-index-under-a-cut-name",
         indexes.NARROW,
         indexes.WIDE,
