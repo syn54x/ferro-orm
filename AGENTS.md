@@ -156,6 +156,10 @@ For a single model, every emitter must agree on:
       `_core._rls_command_matrix`). A foreign policy and an unverifiable raw
       body never become an op on any emitter (ADR-0019). Postgres-only; SQLite
       gets one warning per table and no DDL (ADR-0014).
+      A new table's flags and policies run after the last CREATE TABLE of the
+      plan, and a dropped table's Ferro-owned policies are dropped before the
+      first DROP TABLE, so a policy may read any table of the same plan; the
+      planner decides that order for every emitter (#753).
     - **Enum types** — a type the change introduces is always the pass's
       guarded `CREATE TYPE` (`render_pg_enum_create_type`) ahead of every
       table op, and a type it retires is `render_pg_enum_drop_type` after

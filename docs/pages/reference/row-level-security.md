@@ -104,8 +104,7 @@ Pass `using=`, `with_check=` or both, with `name=`, when one column compared wit
 
 Write the same `NULLIF(current_setting(key, true), '')` wrapper around a setting you read in SQL, so an unset setting matches no rows instead of raising.
 
-!!! note "A policy that reads another table"
-    Postgres resolves the tables a policy's SQL reads when it creates the policy, so they must exist by then. Ferro orders the tables it creates by their foreign keys, not by what a policy reads: a policy on `document` that reads `membership`, created in the same pass, fails with `relation "membership" does not exist`. Create the table the policy reads in an earlier migration, or declare the policy once that table exists.
+A policy's SQL may read any table the models declare, one created in the same pass or migration included: Ferro creates every new table before it creates any policy.
 
 ### Policy names
 
