@@ -332,9 +332,7 @@ RETURNED_TYPES = [
 @pytest.mark.parametrize(("package", "name", "module"), RETURNED_TYPES)
 def test_returned_types_are_public_names(package: str, name: str, module: str) -> None:
     public = importlib.import_module(package)
-    defining = importlib.import_module(
-        f"{package}.{module}" if package != "ferro" else f"ferro.{module}"
-    )
+    defining = importlib.import_module(f"{package}.{module}")
     assert name in public.__all__
     assert getattr(public, name) is getattr(defining, name)
 
