@@ -8853,3 +8853,130 @@ fn sqlite_drops_a_plain_column_in_place_while_a_table_check_on_another_stays() {
         );
     }
 }
+
+/// The destructive SQLite plan that drops `column` from a live `author`
+/// holding `kept` beside it and the hand-written check `definition`, with
+/// the `DropColumn`'s place in it.
+fn plan_live_drop_beside_check(column: &str, kept: &[&str], definition: &str) -> (Plan, usize) {
+    let columns = |names: &[&str]| names.iter().map(|name| col(name, "int", true)).collect();
+    let mut live: Vec<SchemaColumn> = columns(kept);
+    live.push(col(column, "int", true));
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "author".to_string(),
+        live_checks(vec![live_check("author_rule", definition)]),
+    );
+    let plan = plan_from_ir(
+        &Side::live(envelope(vec![author_with(live)]), facts).expect("live side"),
+        &Side::declared(envelope(vec![author_with(columns(kept))])),
+        Dialect::Sqlite,
+        PlanOptions { destructive: true },
+    );
+    let drop = plan
+        .operations
+        .iter()
+        .position(|planned| matches!(planned.op, MigrationOp::DropColumn { .. }))
+        .unwrap_or_else(|| panic!("{column}: {:?}", plan.op_list()));
+    (plan, drop)
+}
+
+#[test]
+fn a_live_check_keeps_a_column_only_when_it_references_it() {
+    // The stored text carries the column's name as a keyword, a call or a
+    // string literal, never as a reference: the column is dropped in place.
+    for (column, definition) in [
+        ("check", "CHECK (\"age\" > 0)"),
+        ("end", "CHECK (CASE WHEN \"age\" > 0 THEN 1 ELSE 0 END = 1)"),
+        ("length", "CHECK (length(\"name\") > 0)"),
+        ("draft", "CHECK (\"name\" IN ('draft', 'it''s draft'))"),
+    ] {
+        let (plan, drop) = plan_live_drop_beside_check(column, &["age"], definition);
+        assert_eq!(
+            plan.operations[drop].verdict.execution,
+            Execution::Native,
+            "{column}: {definition}"
+        );
+        assert_eq!(
+            plan.render().expect("renders")[drop].statements,
+            vec![format!("ALTER TABLE \"author\" DROP COLUMN \"{column}\"")],
+            "{column}: {definition}"
+        );
+    }
+    // A reference, bare, quoted, qualified or in another case, keeps it; so
+    // does a quoted name a keyword spells.
+    for (column, definition) in [
+        ("age", "CHECK (age > 0)"),
+        ("age", "CHECK (\"age\" > 0)"),
+        ("age", "CHECK (\"author\".\"age\" > 0)"),
+        ("age", "CHECK (AGE > 0)"),
+        ("age", "CHECK (abs(age) > 0)"),
+        ("end", "CHECK (\"end\" > 0)"),
+        ("my age", "CHECK (\"my age\" > 0)"),
+    ] {
+        let (plan, drop) = plan_live_drop_beside_check(column, &[], definition);
+        assert_eq!(
+            plan.operations[drop].verdict.execution,
+            Execution::Rebuild,
+            "{column}: {definition}"
+        );
+        let rendered = plan.render().expect("renders");
+        assert!(
+            rendered[drop].statements.is_empty(),
+            "{column}: {definition}"
+        );
+        assert!(
+            rendered[drop].reports[0]
+                .text
+                .contains("CHECK constraint 'author_rule' reads it"),
+            "{:?}",
+            rendered[drop].reports
+        );
+    }
+}
+
+#[test]
+fn an_index_over_several_dropped_columns_stays_only_when_every_one_of_them_stays() {
+    let author = |second: &str, extra: Vec<SchemaColumn>| {
+        let mut model = author_with_team(false);
+        model.columns.extend(extra);
+        model.table_checks = vec![age_positive()];
+        model.indexes = vec![SchemaIndex {
+            name: "idx_author_team_id_second".to_string(),
+            columns: vec!["team_id".to_string(), second.to_string()],
+            unique: false,
+        }];
+        model
+    };
+    let team = || schema_model("team", vec![pk_col("id", "int")]);
+    // (the index's second column, what the index's drop renders)
+    for (second, expected) in [
+        // `team_id` and `age` both stay: so does the index over them.
+        ("age", vec![]),
+        // `nickname` is dropped in place, and no index survives its column.
+        (
+            "nickname",
+            vec!["DROP INDEX IF EXISTS \"idx_author_team_id_second\"".to_string()],
+        ),
+    ] {
+        let before = author(
+            second,
+            vec![col("age", "int", true), col("nickname", "text", true)],
+        );
+        let plan = plan_from_ir(
+            &Side::declared(envelope(vec![team(), before])),
+            &Side::declared(envelope(vec![team(), author_with(vec![])])),
+            Dialect::Sqlite,
+            PlanOptions { destructive: true },
+        );
+        let index = plan
+            .operations
+            .iter()
+            .position(|planned| matches!(planned.op, MigrationOp::DropIndex { .. }))
+            .unwrap_or_else(|| panic!("{second}: {:?}", plan.op_list()));
+        assert_eq!(
+            plan.render().expect("renders")[index].statements,
+            expected,
+            "{second}"
+        );
+    }
+}

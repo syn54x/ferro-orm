@@ -3145,7 +3145,9 @@ pub(crate) enum DropBlocker {
 /// the table's foreign key on it, or the first check that reads it and is
 /// not the column's own inline one, which rides the drop. A declared side
 /// answers from each table check's predicate; a live side reads each stored
-/// definition as words ([`body_names_column`]), a hand-written check's too.
+/// definition as SQL tokens
+/// ([`ferro_ddl_lowering::check_definition_reads_column`]), a hand-written
+/// check's too.
 /// The verdict reads it ([`sqlite_rebuilds`]) and the renderer reports it.
 pub(crate) fn sqlite_drop_blocker(before: &Side, table: &str, column: &str) -> Option<DropBlocker> {
     let was = before.model(table)?;
@@ -3162,7 +3164,7 @@ pub(crate) fn sqlite_drop_blocker(before: &Side, table: &str, column: &str) -> O
             .iter()
             .find(|check| {
                 check.column.as_deref() != Some(column)
-                    && body_names_column(&check.definition, column)
+                    && ferro_ddl_lowering::check_definition_reads_column(&check.definition, column)
             })
             .map(|check| check.name.clone()),
     }
