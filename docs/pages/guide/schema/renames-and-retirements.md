@@ -81,7 +81,7 @@ The table, the column, every index named after them and the label are renamed in
 
 - `Field(renamed_from="nickname")` renames a column. A foreign-key column is renamed the same way, with its own `Field(foreign_key=Author, renamed_from="writer_id")`; a relation's name reaches no schema, so renaming the relation needs no hint.
 - `__ferro_renamed_from__ = "author"` on a model renames its table, and every index and constraint named after it. On Postgres the `DO` block renames the table's `serial` sequence too, to `writer_id_seq`, the name a table created as `writer` gives it; it refuses, naming the object, if something else already holds that name.
-- `__ferro_renamed_labels__ = {"cancelled": "canceled"}` on a `StrEnum` maps each new label to its old one. On SQLite, where labels are text in the rows, the rows are rewritten in a [table rebuild](migrations.md#sqlite-table-rebuilds).
+- `__ferro_renamed_labels__ = {"cancelled": "canceled"}` on a `StrEnum` maps each new label to its old one. On SQLite, where labels are text in the rows, the rows are rewritten by an `UPDATE`, or inside a [table rebuild](migrations.md#sqlite-table-rebuilds) when a check lists the labels.
 - An enum *type*'s rename needs no hint: it is read off the columns that moved to it.
 
 A hint is live only while the previous snapshot still holds the old name and lacks the new one. Once its migration is generated it is inert and may be deleted. A hint whose old name is still declared, or two hints naming one old name, is refused.

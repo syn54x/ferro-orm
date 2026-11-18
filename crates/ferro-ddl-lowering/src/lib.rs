@@ -245,12 +245,11 @@ pub fn information_schema_to_db_type_token(
     dialect: Dialect,
 ) -> String {
     let lower = declared_type.to_ascii_lowercase();
-    // SQLite's `PRAGMA table_info` reports the declared type verbatim, so a
-    // `varchar(n)` column ferro created reads back with its length — the
-    // token the declared side resolves to. (Postgres reports the length in
-    // `character_maximum_length` instead.)
+    // SQLite's `PRAGMA table_info` reports the declared type verbatim, length
+    // included. SQLite does not enforce that length, so it is not schema
+    // there (ADR-0034): a column created at any width reads as `varchar`.
     if dialect == Dialect::Sqlite && parse_varchar_token(&lower).is_some() {
-        return lower;
+        return "varchar".to_string();
     }
     let base = match lower.as_str() {
         "boolean" => match dialect {
@@ -322,9 +321,8 @@ pub fn schema_columns_storage_drift(
         return !old_col.postgres_native_enum;
     }
     // Both sides' scalar storage comes from the one storage decision (I-1
-    // item 3), so an enum's SQLite `varchar(<longest label>)` is compared as
-    // such — never as the bare string cascade. A live column carries no enum
-    // metadata, so for it this is the cascade over its introspected token.
+    // item 3). A live column carries no enum metadata, so for it this is the
+    // cascade over its introspected token.
     let scalar = |col: &SchemaColumn| match resolve_column_storage(col, dialect) {
         Ok(ResolvedStorage::Scalar(canonical)) => Ok(canonical),
         _ => canonical_from_schema_column(col, dialect),
@@ -338,7 +336,9 @@ pub fn schema_columns_storage_drift(
             // store as `DATETIME`, so a declared `datetime` (`timestamptz`)
             // does not drift against the live `DATETIME` (token `timestamp`).
             // Real changes (int → bigint everywhere; timestamp → timestamptz
-            // on Postgres) render different storage and still differ.
+            // on Postgres) render different storage and still differ. On
+            // SQLite a declared length is not storage (ADR-0034): `varchar(8)`
+            // and `varchar` are the same column.
             rendered_storage_type(old_c, dialect) != rendered_storage_type(new_c, dialect)
         }
         // Reached only when canonical resolution fails for both columns. At runtime
@@ -353,12 +353,15 @@ pub fn schema_columns_storage_drift(
 /// on Postgres), folded to lowercase because SQL type names are
 /// case-insensitive (`CHAR(32)` from `Uuid` is `char(32)` from `Char(32)`).
 /// Two canonicals with equal rendered storage are the same column type.
+/// SQLite does not enforce the length in `varchar(n)` or `char(n)`, so there
+/// the length is left out: `varchar(8)` and `varchar` are both `varchar`.
 fn rendered_storage_type(canonical: CanonicalType, dialect: Dialect) -> String {
-    match dialect {
-        Dialect::Sqlite => sqlite_declared_type(canonical),
-        Dialect::Postgres => pg_alter_type_target(canonical),
+    match (dialect, canonical) {
+        (Dialect::Sqlite, CanonicalType::Varchar(_)) => "varchar".to_string(),
+        (Dialect::Sqlite, CanonicalType::Char(_) | CanonicalType::Uuid) => "char".to_string(),
+        (Dialect::Sqlite, _) => sqlite_declared_type(canonical).to_ascii_lowercase(),
+        (Dialect::Postgres, _) => pg_alter_type_target(canonical).to_ascii_lowercase(),
     }
-    .to_ascii_lowercase()
 }
 
 /// Resolve a model property's `(logical_type, format, db_type)` to a canonical
@@ -3839,52 +3842,6 @@ pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SqliteTypeClass {
-    Integer,
-    Text,
-    Blob,
-    Real,
-    Numeric,
-    Temporal,
-}
-
-/// Storage-semantics class of a declared SQLite type.
-pub(crate) fn sqlite_type_class(declared: &str) -> SqliteTypeClass {
-    let declared = declared.to_ascii_lowercase();
-    if declared.contains("date") || declared.contains("time") {
-        return SqliteTypeClass::Temporal;
-    }
-    if declared.contains("json") {
-        return SqliteTypeClass::Text;
-    }
-    if declared.contains("bool") || declared.contains("int") {
-        return SqliteTypeClass::Integer;
-    }
-    if declared.contains("char") || declared.contains("clob") || declared.contains("text") {
-        return SqliteTypeClass::Text;
-    }
-    if declared.is_empty() || declared.contains("blob") {
-        return SqliteTypeClass::Blob;
-    }
-    if declared.contains("real")
-        || declared.contains("floa")
-        || declared.contains("doub")
-        || declared.contains("num")
-        || declared.contains("dec")
-    {
-        return SqliteTypeClass::Real;
-    }
-    SqliteTypeClass::Numeric
-}
-
-/// Compare old and new SQLite declared types for storage-class drift.
-pub fn sqlite_type_storage_drift(old_db_type: &str, new_canonical: CanonicalType) -> bool {
-    let old_class = sqlite_type_class(old_db_type);
-    let new_class = sqlite_type_class(&sqlite_declared_type(new_canonical));
-    old_class != new_class
-}
-
 /// Quote a SQL identifier for Postgres/SQLite DDL.
 pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
@@ -5731,16 +5688,20 @@ mod tests {
             information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite),
             "blob"
         );
-        // SQLite reports a declared length verbatim; it reads back as the
-        // token the declared column resolves to, so it is not drift (#517).
-        assert_eq!(
-            information_schema_to_db_type_token("VARCHAR(9)", None, Dialect::Sqlite),
-            "varchar(9)"
-        );
-        assert_eq!(
-            information_schema_to_db_type_token("varchar", None, Dialect::Sqlite),
-            "varchar"
-        );
+        // SQLite reports a declared length verbatim and does not enforce it:
+        // the length is not schema there, so every width reads as `varchar`
+        // (#614). `CHAR(32)` is the uuid storage.
+        for (live, token) in [
+            ("VARCHAR(9)", "varchar"),
+            ("varchar", "varchar"),
+            ("CHAR(32)", "uuid"),
+        ] {
+            assert_eq!(
+                information_schema_to_db_type_token(live, None, Dialect::Sqlite),
+                token,
+                "{live}"
+            );
+        }
     }
 
     #[test]
@@ -5875,36 +5836,55 @@ mod tests {
         }
     }
 
-    /// An enum stores as `varchar(<longest label>)` on SQLite; the live column
-    /// ferro created reads back as that token and is not drift (#517).
+    /// An enum is created as `varchar(<longest label>)` on SQLite, which does
+    /// not enforce the length: a live column of any width is the model's
+    /// column (#517, #614).
     #[test]
     fn sqlite_enum_model_does_not_drift_against_its_own_varchar_live() {
-        let live = col_with_db_type(
-            "status",
-            "unknown",
-            None,
-            Some(&information_schema_to_db_type_token(
-                "varchar(9)",
-                None,
-                Dialect::Sqlite,
-            )),
-        );
         let mut model = col_with_db_type("status", "string", None, None);
         model.enum_values = Some(vec![
             serde_json::json!("draft"),
             serde_json::json!("published"),
         ]);
-        assert!(!schema_columns_storage_drift(
-            &live,
-            &model,
-            Dialect::Sqlite
-        ));
-        let wider = col_with_db_type("status", "unknown", None, Some("varchar(4)"));
-        assert!(schema_columns_storage_drift(
-            &wider,
-            &model,
-            Dialect::Sqlite
-        ));
+        for live in ["varchar(9)", "varchar(4)", "VARCHAR"] {
+            let live = col_with_db_type(
+                "status",
+                "unknown",
+                None,
+                Some(&information_schema_to_db_type_token(
+                    live,
+                    None,
+                    Dialect::Sqlite,
+                )),
+            );
+            assert!(!schema_columns_storage_drift(
+                &live,
+                &model,
+                Dialect::Sqlite
+            ));
+        }
+    }
+
+    /// On SQLite a declared length is not schema (ADR-0034): two types that
+    /// differ only in the length of `varchar(n)` or `char(n)` are one
+    /// column. A different type name is still a change, and Postgres, which
+    /// enforces the length, still sees it.
+    #[test]
+    fn a_declared_length_is_not_a_storage_change_on_sqlite() {
+        let changes = |old: &str, new: &str, dialect| {
+            schema_columns_storage_drift(&drift_col("c", old), &drift_col("c", new), dialect)
+        };
+        for (old, new, change) in [
+            ("varchar(8)", "varchar", false),
+            ("varchar(8)", "varchar(11)", false),
+            ("char(10)", "char(12)", false),
+            ("varchar", "text", true),
+            ("int", "bigint", true),
+        ] {
+            assert_eq!(changes(old, new, Dialect::Sqlite), change, "{old} / {new}");
+            assert_eq!(changes(new, old, Dialect::Sqlite), change, "{new} / {old}");
+        }
+        assert!(changes("varchar(8)", "varchar(11)", Dialect::Postgres));
     }
 
     /// Since FF-B B2, `datetime.time` fields store as `time` on both dialects
@@ -5955,24 +5935,13 @@ mod tests {
         );
     }
 
-    /// The one cross-consumer guard: the token a live SQLite BLOB normalizes to
-    /// must satisfy BOTH planner consumers at once — `db_type_token_to_canonical`
-    /// (the IR planner) resolves it to `Blob`, AND `sqlite_type_class` (the legacy
-    /// planner's SQLite arm) classes it the same as the model's declared blob.
-    /// This is why the token is "blob", not the canonical "bytea": `sqlite_type_class`
-    /// only recognizes Blob for strings containing "blob". (#165)
+    /// The token a live SQLite BLOB normalizes to resolves to `Blob` (#165).
     #[test]
-    fn live_sqlite_blob_round_trips_through_both_consumers() {
+    fn live_sqlite_blob_resolves_to_blob() {
         let token = information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite);
-        // IR-path consumer.
         assert_eq!(
             db_type_token_to_canonical(&token, Dialect::Sqlite),
             Some(CanonicalType::Blob)
-        );
-        // Legacy-path consumer: same class as the model's declared blob type.
-        assert_eq!(
-            sqlite_type_class(&token),
-            sqlite_type_class(&sqlite_declared_type(CanonicalType::Blob))
         );
     }
 
@@ -6268,28 +6237,6 @@ mod tests {
             render_sqlite_add_column_references(&set_null),
             "REFERENCES \"author\"(\"id\") ON DELETE SET NULL"
         );
-    }
-
-    #[test]
-    fn sqlite_type_classes_group_storage_equivalent_spellings() {
-        for (a, b) in [
-            ("DATETIME", "timestamp_with_timezone_text"),
-            ("DATE", "date_text"),
-            ("uuid_text", "char(32)"),
-            ("JSON", "json_text"),
-            ("NUMERIC", "real"),
-            ("BOOLEAN", "integer"),
-            ("BIGINT", "integer"),
-            ("VARCHAR(3)", "varchar"),
-        ] {
-            assert_eq!(
-                sqlite_type_class(a),
-                sqlite_type_class(b),
-                "{a} and {b} should be storage-equivalent"
-            );
-        }
-        assert_ne!(sqlite_type_class("integer"), sqlite_type_class("varchar"));
-        assert_ne!(sqlite_type_class("blob"), sqlite_type_class("text"));
     }
 
     #[test]

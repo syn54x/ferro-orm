@@ -145,12 +145,16 @@ def _new_capturing(name: str) -> tuple[int, str, str]:
 
 
 @backend_matrix
+@pytest.mark.parametrize("label", ["refunded", "chargedback"])
 def test_d1_an_added_label_is_a_first_labels_step_that_reverses_nothing(
-    project, pkg, db
+    project, pkg, db, label
 ):
+    # `chargedback` is longer than every other label. SQLite created the
+    # column `varchar(8)` and does not enforce that length, so the longer
+    # label is no schema change there: the labels step alone (#614).
     start(project, pkg, db, models())
     db.execute('INSERT INTO "enmorder" ("status") VALUES (\'paid\')')
-    write_models(project, pkg, models(("paid", "canceled", "refunded")))
+    write_models(project, pkg, models(("paid", "canceled", label)))
     new("status_labels")
 
     assert step_files(project, 2) == files_of("01_labels")
@@ -171,12 +175,12 @@ def test_d1_an_added_label_is_a_first_labels_step_that_reverses_nothing(
         for sql in op["statements"]
     ]
     assert addition == [
-        "ALTER TYPE \"enmorderstatus\" ADD VALUE IF NOT EXISTS 'refunded'"
+        f"ALTER TYPE \"enmorderstatus\" ADD VALUE IF NOT EXISTS '{label}'"
     ]
     assert statements(step_file(project, "01_labels", "up", "postgres")) == addition
     assert step_file(project, "01_labels", "down", "postgres").read_text() == (
         "-- ferro: nothing-to-reverse Postgres cannot drop an enum label; "
-        "'refunded' stays\n"
+        f"'{label}' stays\n"
     )
     for direction in ("up", "down"):
         assert (
@@ -185,8 +189,8 @@ def test_d1_an_added_label_is_a_first_labels_step_that_reverses_nothing(
         )
 
     assert run("migrate", "up", "--url", db.url) == 0
-    db.execute('INSERT INTO "enmorder" ("status") VALUES (\'refunded\')')
-    assert statuses(db) == [(1, "paid"), (2, "refunded")]
+    db.execute(f'INSERT INTO "enmorder" ("status") VALUES (\'{label}\')')
+    assert statuses(db) == [(1, "paid"), (2, label)]
     assert plan_against(db, snapshot(project, 2), snapshot(project, 1)) == []
 
     # The down runs nothing and removes the record; the label stays, and an
@@ -194,7 +198,7 @@ def test_d1_an_added_label_is_a_first_labels_step_that_reverses_nothing(
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert keys(db) == [(1, 1)]
     assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
-    assert statuses(db) == [(1, "paid"), (2, "refunded")]
+    assert statuses(db) == [(1, "paid"), (2, label)]
 
 
 @backend_matrix
@@ -241,15 +245,21 @@ def test_d3_a_renamed_label_relabels_every_row_both_ways(project, pkg, db):
     assert statements(step_file(project, "01_schema", "down", "postgres")) == [
         "ALTER TYPE \"enmorderstatus\" RENAME VALUE 'cancelled' TO 'canceled'"
     ]
-    # SQLite stores the label in the rows, in a column as wide as its longest
-    # label: `cancelled` widens both tables, so each is rebuilt and its rows
-    # are relabelled as the rebuild copies them, and back on the down.
-    up = step_file(project, "01_schema", "up", "sqlite").read_text()
-    down = step_file(project, "01_schema", "down", "sqlite").read_text()
-    assert "UPDATE" not in up and "UPDATE" not in down
-    relabel = "CASE \"status\" WHEN '{}' THEN '{}' ELSE \"status\" END"
-    assert up.count(relabel.format("canceled", "cancelled")) == 2
-    assert down.count(relabel.format("cancelled", "canceled")) == 2
+    # SQLite stores the label in the rows: an `UPDATE` of each table. The
+    # longer spelling rebuilds nothing, since SQLite does not enforce the
+    # column's declared `varchar(8)` (#614).
+    relabel = 'UPDATE "{}" SET "status" = \'{}\' WHERE "status" = \'{}\''
+    assert statements(step_file(project, "01_schema", "up", "sqlite")) == [
+        relabel.format(table, "cancelled", "canceled")
+        for table in ("enmorder", "enmrefund")
+    ]
+    assert statements(step_file(project, "01_schema", "down", "sqlite")) == [
+        relabel.format(table, "canceled", "cancelled")
+        for table in ("enmorder", "enmrefund")
+    ]
+    for direction in ("up", "down"):
+        text = step_file(project, "01_schema", direction, "sqlite").read_text()
+        assert 'CREATE TABLE "_ferro_new_' not in text
 
     round_trip(project, db)
     assert statuses(db) == [(1, "cancelled"), (2, "paid"), (3, "cancelled")]
@@ -465,6 +475,27 @@ def test_b1_a_new_table_reusing_a_live_type_neither_creates_nor_drops_it(
     ]
 
     round_trip(project, db)
+
+
+# -- SQLite: a declared length is not schema (#614) -------------------------------------
+
+
+def test_sqlite_an_enum_column_redeclared_str_is_no_schema_change(project, pkg):
+    # `status` was created `varchar(8)`, its longest label; `str` is `varchar`.
+    # SQLite enforces neither length, so the two are one column.
+    write_config(project, pkg, '["sqlite"]')
+    write_models(project, pkg, models(refund=False))
+    new("create")
+    write_models(
+        project,
+        pkg,
+        models(refund=False).replace("status: EnmOrderStatus", "status: str"),
+    )
+
+    code, out, _ = _new_capturing("edit")
+
+    assert (code, out) == (0, f"{DIRECTORY_LINE}\nno schema change: nothing written\n")
+    assert not (project / "migrations" / "0002_edit").exists()
 
 
 # -- the declaration ------------------------------------------------------------------

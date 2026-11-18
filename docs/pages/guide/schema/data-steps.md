@@ -337,7 +337,7 @@ DROP TYPE "status";
 ALTER TYPE "status_new" RENAME TO "status";
 ```
 
-A row still holding `canceled` fails the cast, so the contract cannot run before the backfill has moved every such row. Its down adds the label back with `ALTER TYPE "status" ADD VALUE IF NOT EXISTS 'canceled' AFTER 'paid'`. On SQLite, where labels are text in the rows, the contract is a [table rebuild](migrations.md#sqlite-table-rebuilds) that narrows the column to the remaining labels.
+A row still holding `canceled` fails the cast, so the contract cannot run before the backfill has moved every such row. Its down adds the label back with `ALTER TYPE "status" ADD VALUE IF NOT EXISTS 'canceled' AFTER 'paid'`. On SQLite, where labels are text in the rows, the contract runs nothing, unless a check lists the labels: then it is a [table rebuild](migrations.md#sqlite-table-rebuilds) that rebuilds the check.
 
 ## See also
 

@@ -1079,7 +1079,6 @@ REBUILD_CASES = (
     "C2-drop-a-foreign-key-column",
     "C3-retarget-a-foreign-key",
     "C4-drop-a-foreign-key-keep-its-column",
-    "D3-rename-a-label",
     "G1-add-an-indexed-generated-column",
     "G2-change-a-generated-expression",
     "G3-change-an-input-column-type",
@@ -1108,7 +1107,11 @@ INDEX_STEP_CASES = (
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""
-LABEL_CASES = ("D1-add-a-label", "D1-add-a-label-and-a-column-of-its-type")
+LABEL_CASES = (
+    "D1-add-a-label",
+    "D1-add-a-label-longer-than-every-other",
+    "D1-add-a-label-and-a-column-of-its-type",
+)
 TYPE_CREATION_CASES = ("A1-optional-enum-column", "B1-new-model-with-a-new-type")
 VALIDATE_CASES = (
     "A1-optional-checked-column",

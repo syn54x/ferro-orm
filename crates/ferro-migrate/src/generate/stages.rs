@@ -64,7 +64,7 @@ pub(super) struct Placed {
     pub held: Vec<MigrationOp>,
     /// The contract's removed labels (D2): each label removal, and each
     /// change of a column of its type the removal makes (the column's check
-    /// rebuilt to the labels left, its storage narrowed).
+    /// rebuilt to the labels left).
     pub relabel: Vec<MigrationOp>,
 }
 
@@ -136,9 +136,10 @@ impl Layout {
         let loose =
             backfill::with_removed_labels(&backfill::relaxed(target, &demands), &before, &removals);
         let kept = backfill::with_drops_kept(&loose, &before, &held);
-        // A removed label's change of a column that the same migration also
-        // widens (a label added beside it) is the expand's first, so the
-        // backfill can write the added label, and the contract's after.
+        // A removed label's change of a column whose check the same
+        // migration also widens (a label added beside it) is the expand's
+        // first, so the backfill can write the added label, and the
+        // contract's after.
         for placement in &mut placed {
             let widened: Vec<MigrationOp> = placement
                 .relabel
@@ -251,8 +252,8 @@ fn place(dialect: Dialect, planned: Plan, data_steps: bool) -> Result<Placed, Ge
 }
 
 /// Whether the expand already changes `op`'s artifact (a label removal's
-/// rider) from `before` to `expanded`: the column's storage or its check's
-/// labels differ, because the same migration adds a label to the type.
+/// rider) from `before` to `expanded`: the column's type differs, or its
+/// check's labels do because the same migration adds a label to the type.
 fn widens(
     op: &MigrationOp,
     before: &IrEnvelope<SchemaIrPayload>,

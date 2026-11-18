@@ -62,6 +62,9 @@ For a single model, every emitter must agree on:
    derived annotation × both dialects, and every token through a generated
    `ADD COLUMN`). See
    `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.
+   On SQLite a declared length is not schema: `varchar(8)` and `varchar` are
+   the same storage to every emitter, to drift and to the live read, decided
+   by `schema_columns_storage_drift` alone (ADR-0034 as amended).
 4. **Index names** — `idx_<table>_<col>` for single-column indexes,
    `idx_<table>_<col1>_<col2>...` for composite indexes.
 5. **Unique constraint names** — `uq_<table>_<col>` for single-column,

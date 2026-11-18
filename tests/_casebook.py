@@ -257,6 +257,13 @@ CASES: tuple[Case, ...] = (
         enums.models(),
         enums.models(("paid", "canceled", "refunded")),
     ),
+    # SQLite created the column `varchar(8)` and does not enforce that
+    # length: the longer label changes no schema there (ADR-0034, #614).
+    Case(
+        "D1-add-a-label-longer-than-every-other",
+        enums.models(),
+        enums.models(("paid", "canceled", "chargedback")),
+    ),
     Case(
         "D1-add-a-label-and-a-column-of-its-type",
         enums.models(),

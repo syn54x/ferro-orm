@@ -9,7 +9,7 @@ related_files:
   - src/migrate.rs
   - src/ferro/pass_report.py
   - tests/test_cross_emitter_parity.py
-related_issues: [511, 517]
+related_issues: [511, 517, 614]
 captured: 2026-10-06
 ---
 
@@ -54,6 +54,13 @@ side, whose checks and policies render as the catalog printed them.
   enum (`varchar(<longest label>)`) always read as a phantom
   `AlterColumnType` that rendered to nothing. A plan that renders nothing is
   still not empty to a drift check.
+- **Whether a type changed is `schema_columns_storage_drift`, and nothing
+  else.** The pass's SQLite renderer once asked a second function
+  (`sqlite_type_storage_drift`, storage class only) whether to warn, so the
+  generator rebuilt a table for a `varchar(8)` to `varchar` change the pass
+  said nothing about (#614). An emitter reports or writes every type change
+  the planner hands it; a rule about what counts as a change (on SQLite a
+  declared length does not, ADR-0034) goes in the one function.
 - **`AddTable` ops in the pass belong to the create pass.** The pass reads
   only tables that existed before the create pass (ADR-0010), so tables it
   just created plan as adds, which the executor skips with their warnings.

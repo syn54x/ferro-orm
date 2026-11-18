@@ -8,7 +8,7 @@ related_files:
   - src/ferro/migrations/alembic.py
   - src/ferro/ir/compiler.py
   - crates/ferro-migrate/src/emit.rs
-related_issues: [141, 154]
+related_issues: [141, 154, 614]
 captured: 2026-07-02
 ---
 
@@ -59,11 +59,31 @@ The SQLite declared spellings are **SQLAlchemy's** (FF-B B5): sea-query's
 `date_text`, `time_text`, `real` for decimal) reflected as bare `TEXT`/`REAL`
 under SQLAlchemy and produced phantom `modify_type` diffs in the sentinel.
 SQLite's type affinity makes the storage classes identical either way, so
-existing databases keep working (the affinity-class comparison in
-`sqlite_type_storage_drift` treats both spellings as equivalent). PK columns
+an existing database still stores and reads the same values. Its type names
+are not the model's, though, and since #614 the reconciliation pass reports
+every such column on every pass (`SQLite cannot change column types in
+place`): a live `json_text` reads as `text` against `JSON`, a live `real`
+as `double` against `NUMERIC`. The pass's own comparison, which read both as
+one storage class and stayed silent, is gone. The warning clears once the
+column carries the name the model expects (the upgrade guide's "After
+0.28" section shows the column swap). PK columns
 also carry an explicit `NOT NULL` — SQLite's PRAGMA otherwise reports an
 `INTEGER PRIMARY KEY` as nullable, which read back as a phantom nullability
 diff; the IR compiler clamps PK `nullable` to `false` accordingly.
+
+**On SQLite a declared length is not schema** (#614, ADR-0034 as amended).
+SQLite does not enforce the length in `varchar(n)` or `char(n)`, so
+`varchar(8)` and `varchar` are the same column there: an enum column created
+`varchar(8)` and redeclared `str`, or given a label of 11 characters, is no
+change. One function decides whether a column's type changed,
+`schema_columns_storage_drift`, and it leaves the length out on SQLite; the
+live read (`information_schema_to_db_type_token`) reports `VARCHAR(n)` as
+`varchar`. The reconciliation pass has no comparison of its own
+(`sqlite_type_storage_drift` is gone): it warns for every type change the
+planner plans. A change of type name is still a change, so a live `text`
+column under a `str` field (`varchar`) is planned, warned about by the pass
+and rebuilt by `ferro migrate new`. Postgres enforces the length and still
+compares it.
 
 **Enum fields** (IR `enum_values` present, no explicit `db_type`) are not a
 scalar row: on **Postgres** they lower to a **native enum type** named
