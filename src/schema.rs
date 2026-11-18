@@ -41,11 +41,13 @@ use std::sync::Arc;
 /// behind the `CREATE TABLE`. A table that times out is rolled back and
 /// created again from the top; an enum type statement re-runs alone.
 ///
-/// Each new table is its own transaction ([`run_create_unit`]), unless one
-/// of them declares row security on Postgres. Then they are one
-/// transaction, in the one planner's order: every table first and every
-/// table's row security after the last, so a policy may read any table of
-/// the pass and a failure leaves none of them (ADR-0049 as amended, #753).
+/// Each new table is its own transaction ([`run_create_unit`]), unless on
+/// Postgres a statement of theirs runs after the last `CREATE TABLE`: a key
+/// to a table created later (#304), or row security (#753). Then they are
+/// one transaction, in the one planner's order: every table first, then the
+/// deferred keys, then every table's row security, so tables may reference
+/// each other, a policy may read any table of the pass and a failure leaves
+/// none of them (ADR-0049 as amended).
 /// When the reconciliation pass follows, that unit is its own: this pass
 /// creates none of them ([`CreatePass::left_to_plan`]) and the plan's ops
 /// do, after the renames and beside the tables held back for one, which a
@@ -163,13 +165,16 @@ pub async fn internal_create_tables(
         to_create.push((model, emission));
     }
 
-    // New tables with row security among them are one unit in the plan's
-    // order. A plan follows: it creates them, where it puts them.
-    let policed = dialect == Dialect::Postgres
-        && to_create
-            .iter()
-            .any(|(_, emission)| !emission.row_security_sqls.is_empty());
-    if policed && reconciliation_follows {
+    // New tables with a statement after the last `CREATE TABLE` are one unit
+    // in the plan's order. A plan follows: it creates them, where it puts
+    // them.
+    let unit = match dialect {
+        Dialect::Postgres if !to_create.is_empty() => {
+            planned_create_unit(&modelset, &to_create, dialect)?
+        }
+        _ => None,
+    };
+    if unit.is_some() && reconciliation_follows {
         return Ok(CreatePass {
             existing: existing_tables,
             held_back: held_back.into_keys().collect(),
@@ -245,12 +250,11 @@ pub async fn internal_create_tables(
         })?;
     }
 
-    if policed {
-        let unit = planned_create_unit(&modelset, &to_create, dialect)?;
-        run_create_unit(&engine, &unit, ddl, report).await?;
+    if let Some(unit) = &unit {
+        run_create_unit(&engine, unit, ddl, report).await?;
     }
     for (model, emission) in &to_create {
-        if !policed {
+        if unit.is_none() {
             run_create_unit(&engine, &table_steps(model, emission), ddl, report).await?;
         }
 
@@ -280,9 +284,10 @@ pub struct CreatePass {
     /// new table that references one, directly or through another.
     pub held_back: BTreeSet<String>,
     /// The new tables the pass left to the reconciliation pass's plan: every
-    /// table it would have created, when one of them declares row security
-    /// on Postgres and a reconciliation follows. The plan creates them as
-    /// one unit with their row security, after its renames (#753).
+    /// table it would have created, when on Postgres a statement of theirs
+    /// runs after the last `CREATE TABLE` (a deferred key, #304, or row
+    /// security, #753) and a reconciliation follows. The plan creates them
+    /// as one unit, after its renames.
     pub left_to_plan: BTreeSet<String>,
 }
 
@@ -368,9 +373,9 @@ fn warn_pending_renames(
 /// or `artifact`, for the error that names it) and the SQL.
 type CreateStep = (String, &'static str, String);
 
-/// The create pass's statements for one new table: its `CREATE TABLE`, then
-/// its indexes and checks. Its row security is the plan's
-/// ([`planned_create_unit`]).
+/// The create pass's statements for one new table created on its own: its
+/// `CREATE TABLE`, then its indexes and checks. A table with a statement
+/// after the last `CREATE TABLE` is the plan's ([`planned_create_unit`]).
 fn table_steps(
     model: &SchemaModel,
     emission: &ferro_migrate::CreateTableEmission,
@@ -386,18 +391,23 @@ fn table_steps(
         .collect()
 }
 
-/// The statements that create `to_create` in the one planner's order: the
-/// plan from no tables to these models, each `AddTable` as the create pass
-/// emits it ([`table_steps`]) and every other op (a new table's row-security
-/// flags and policies, after the last `AddTable`) as the plan renders it.
-/// The pass orders nothing itself (AGENTS.md § I-1, #753). The plan's enum
-/// type ops are left out: [`internal_create_tables`] created the types ahead
-/// of every table.
+/// The statements that create `to_create` as one unit, in the one planner's
+/// order: the plan from no tables to these models, as it renders. Each
+/// `AddTable` is the table with its indexes and checks, less any key the
+/// plan defers; after the last come the deferred keys (#304), then each
+/// table's row-security flags and policies (#753). The pass orders nothing
+/// and defers nothing itself (AGENTS.md § I-1). The plan's enum type ops are
+/// left out: [`internal_create_tables`] creates the types ahead of every
+/// table.
+///
+/// `None` when no op of the plan runs after its last `AddTable`
+/// ([`ferro_migrate::MigrationOp::follows_the_creates`]): each table is then
+/// its own unit ([`table_steps`]).
 fn planned_create_unit(
     modelset: &ferro_schema_ir::IrEnvelope<SchemaIrPayload>,
     to_create: &[(&SchemaModel, ferro_migrate::CreateTableEmission)],
     dialect: Dialect,
-) -> PyResult<Vec<CreateStep>> {
+) -> PyResult<Option<Vec<CreateStep>>> {
     let snapshot = |models: Vec<SchemaModel>| ferro_schema_ir::IrEnvelope {
         ir_kind: modelset.ir_kind.clone(),
         ir_version: modelset.ir_version,
@@ -417,33 +427,27 @@ fn planned_create_unit(
         dialect,
         ferro_migrate::PlanOptions { destructive: false },
     );
+    if !plan.ops().any(|op| op.follows_the_creates()) {
+        return Ok(None);
+    }
     let rendered = plan
         .render()
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
     let mut unit = Vec::new();
     for op in rendered {
-        match (&op.op, op.op.table()) {
-            (ferro_migrate::MigrationOp::AddTable { table }, _) => {
-                let (model, emission) = to_create
-                    .iter()
-                    .find(|(model, _)| &model.table_name == table)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "the plan creates '{table}', which the create pass does not; this \
-                             is a ferro bug, please file an issue"
-                        ))
-                    })?;
-                unit.extend(table_steps(model, emission));
-            }
-            (_, Some(table)) => unit.extend(
-                op.statements
-                    .into_iter()
-                    .map(|sql| (table.to_string(), "artifact", sql)),
-            ),
-            (_, None) => {}
-        }
+        let Some(table) = op.op.table().map(str::to_string) else {
+            continue;
+        };
+        unit.extend(op.statements.into_iter().map(|sql| {
+            let step = if sql.starts_with("CREATE TABLE ") {
+                "table"
+            } else {
+                "artifact"
+            };
+            (table.clone(), step, sql)
+        }));
     }
-    Ok(unit)
+    Ok(Some(unit))
 }
 
 /// Execute `steps` as ONE unit under the DDL lock timeout: one new table

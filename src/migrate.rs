@@ -968,7 +968,8 @@ async fn run_passes(
         Err(_) => (Vec::new(), BTreeSet::new()),
     };
     // The new tables the create pass left to this plan, whose ops create
-    // them with their row security where the plan puts it (#753).
+    // them with their deferred keys (#304) and their row security (#753)
+    // where the plan puts them.
     adds_after_renames.extend(created.left_to_plan.iter().cloned());
     let built: Vec<String> = modelset
         .payload
@@ -1056,7 +1057,8 @@ async fn run_passes(
     while index < rendered.len() {
         let current = &rendered[index];
         // Every op on a table the create pass built is the create pass's,
-        // which has already run: the add and the table's row security.
+        // which has already run: the add, a deferred key and the table's
+        // row security.
         if created_by_pass(&current.op) {
             index += 1;
             continue;
@@ -1252,12 +1254,13 @@ async fn stranded_label_warnings(
 
 /// The ops at the head of `rendered` that create the plan's new tables
 /// (`added`) when they run as one unit: every op up to the last on a new
-/// table, when one of them is a table's row security. The planner puts each
-/// new table's flags and policies after the last `AddTable`, so that a
-/// policy may read any of them; the tables then commit with their row
-/// security or not at all, as the create pass's do (#753). `None` when
-/// `rendered` does not start on a new table or no new table has row security:
-/// each table is then its own unit.
+/// table, when one of them runs after the last `AddTable`
+/// ([`MigrationOp::follows_the_creates`]). The planner puts a key to a table
+/// created later there (#304), then each new table's flags and policies, so
+/// that a policy may read any of them (#753); the tables then commit with
+/// those or not at all, as the create pass's do. `None` when `rendered` does
+/// not start on a new table or no new table has such an op: each table is
+/// then its own unit.
 fn new_tables_unit<'a>(
     rendered: &'a [RenderedOp],
     added: &BTreeSet<&str>,
@@ -1268,14 +1271,7 @@ fn new_tables_unit<'a>(
         .count();
     let unit = &rendered[..len];
     unit.iter()
-        .any(|op| {
-            matches!(
-                op.op,
-                MigrationOp::EnableRowSecurity { .. }
-                    | MigrationOp::ForceRowSecurity { .. }
-                    | MigrationOp::AddRowPolicy { .. }
-            )
-        })
+        .any(|op| op.op.follows_the_creates())
         .then_some(unit)
 }
 

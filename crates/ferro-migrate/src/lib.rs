@@ -350,6 +350,9 @@ pub enum MigrationOp {
     },
     /// A declared FK whose column exists live but has no FK constraint at all.
     /// (FKs on newly added columns ride the `AddColumn` emission instead.)
+    /// On Postgres also a deferred key: a new table's key to a new table
+    /// created later in the plan, left out of its `CREATE TABLE` and added
+    /// after the plan's last one, never `NOT VALID` (#304).
     AddForeignKey {
         /// Owning table.
         table: String,
@@ -361,6 +364,8 @@ pub enum MigrationOp {
     /// Postgres; a table rebuild on SQLite. Planned only under
     /// `migrate_destructive` (ADR-0013's ladder), though no row is lost; the
     /// generator always writes it. An FK on a dropped column goes with it.
+    /// On Postgres also the deferred key of a table the plan drops, ahead
+    /// of the plan's first `DROP TABLE` (#304).
     DropForeignKey {
         /// Owning table.
         table: String,
@@ -536,6 +541,20 @@ impl MigrationOp {
     /// autocommit block.
     pub(crate) fn commits_alone(&self) -> bool {
         matches!(self, MigrationOp::AddEnumLabel { .. })
+    }
+
+    /// Whether the op, on a table its plan creates, runs after the plan's
+    /// last `CREATE TABLE`: a deferred key (#304), or the table's row
+    /// security (#753). New tables with such an op are created in one
+    /// transaction, since a table committed without it would never get it.
+    pub fn follows_the_creates(&self) -> bool {
+        matches!(
+            self,
+            MigrationOp::AddForeignKey { .. }
+                | MigrationOp::EnableRowSecurity { .. }
+                | MigrationOp::ForceRowSecurity { .. }
+                | MigrationOp::AddRowPolicy { .. }
+        )
     }
 }
 

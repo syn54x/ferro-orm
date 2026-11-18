@@ -4,10 +4,11 @@
 
 use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
-    find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
+    find_foreign_key, find_model, render_add_fk_sql, render_create_table_deferring,
+    render_index_sql, standalone_indexes,
 };
 use crate::plan::{Body, DropBlocker, Side, index_models, planned_before, relabels_rows};
-use crate::{Dialect, EmissionError, MigrationOp, Report, render_create_table};
+use crate::{Dialect, EmissionError, MigrationOp, Report};
 use ferro_ddl_lowering::{
     ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
     fk_action_sql, is_pg_serial_column, primary_key_kept_warning, quote_ident,
@@ -260,7 +261,18 @@ pub(crate) fn render_from(
             }
             MigrationOp::AddTable { table } => {
                 let model = find_model(&new_models, table)?;
-                let emission = render_create_table(model, dialect)?;
+                // A key the plan adds after its last `CREATE TABLE` is left
+                // out of this one (#304): the plan decided which.
+                let deferred: Vec<&str> = ops
+                    .iter()
+                    .filter_map(|other| match other {
+                        MigrationOp::AddForeignKey { table: t, column } if t == table => {
+                            Some(column.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let emission = render_create_table_deferring(model, dialect, None, &deferred)?;
                 let created_guards = created_type_guards(model, &types_created_by_plan, dialect);
                 for guard in emission.pre_create_sqls {
                     if !created_guards.contains(&guard) && emitted_type_guards.insert(guard.clone())
@@ -625,11 +637,15 @@ pub(crate) fn render_from(
             MigrationOp::AddForeignKey { table, column } => {
                 let model = find_model(&new_models, table)?;
                 let fk = find_foreign_key(model, table, column)?;
+                // A deferred key's table is created by the same plan and
+                // holds no row: added validated in any mode (#304).
+                let mode = if old_models.contains_key(table) {
+                    constraints
+                } else {
+                    ConstraintMode::Plain
+                };
                 match dialect {
-                    Dialect::Postgres => {
-                        out.statements
-                            .push(render_add_fk_sql(table, fk, constraints))
-                    }
+                    Dialect::Postgres => out.statements.push(render_add_fk_sql(table, fk, mode)),
                     Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
                         InPlaceChange::AddForeignKey,
                         Subject::column(table, column),
@@ -651,10 +667,11 @@ pub(crate) fn render_from(
                 column,
                 name,
             } => {
-                let declared = find_model(&new_models, table)?
-                    .foreign_keys
-                    .iter()
-                    .any(|fk| fk.column == *column);
+                // A table the plan drops is not among the new models: its
+                // deferred key goes ahead of the first `DROP TABLE` (#304).
+                let declared = new_models
+                    .get(table.as_str())
+                    .is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == *column));
                 if declared {
                     return Err(EmissionError {
                         message: format!(

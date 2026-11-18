@@ -1310,7 +1310,8 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
     // it that (a raw body is not parsed, ADR-0019, and two policies may read
     // each other's tables) (#753).
     let mut row_security = Vec::new();
-    for model in emit::order_models_for_create(&added) {
+    let created = emit::order_models_for_create(&added);
+    for model in &created {
         plan.operations.push(MigrationOp::AddTable {
             table: model.table_name.clone(),
         });
@@ -1321,6 +1322,17 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
         plan.operations.extend(checks);
         row_security.extend(security);
     }
+    // A key to a table created later, after the last `CREATE TABLE` and
+    // ahead of the row security: a policy may read through a key, a key
+    // never reads a policy (#304).
+    plan.operations.extend(
+        emit::deferred_foreign_keys(&created, dialect)
+            .into_iter()
+            .map(|(model, fk)| MigrationOp::AddForeignKey {
+                table: model.table_name.clone(),
+                column: fk.column.clone(),
+            }),
+    );
     plan.operations.extend(row_security);
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
@@ -1328,10 +1340,9 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
     }
 
     if options.destructive {
-        let dropped: Vec<&SchemaModel> = emit::order_models_for_create(&dropped)
-            .into_iter()
-            .rev()
-            .collect();
+        let created = emit::order_models_for_create(&dropped);
+        let deferred = emit::deferred_foreign_keys(&created, dialect);
+        let dropped: Vec<&SchemaModel> = created.into_iter().rev().collect();
         // Postgres refuses to drop a table another table's policy reads, so
         // every ferro-owned policy of a dropped table goes before the first
         // `DROP TABLE`. The flags stay: the drop takes them. A policy ferro
@@ -1352,6 +1363,19 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
                 );
             }
         }
+        // Nor a table another table's key references: every key deferred
+        // when these tables are created goes before the first `DROP TABLE`
+        // (#304).
+        plan.operations
+            .extend(
+                deferred
+                    .into_iter()
+                    .map(|(model, fk)| MigrationOp::DropForeignKey {
+                        table: model.table_name.clone(),
+                        column: fk.column.clone(),
+                        name: emit::fk_constraint_name(&model.table_name, fk),
+                    }),
+            );
         for model in dropped {
             plan.operations.push(MigrationOp::DropTable {
                 table: model.table_name.clone(),
@@ -2679,9 +2703,9 @@ pub enum Rider {
     DroppedColumn,
     /// An index, check or foreign key over a column the same plan adds.
     AddedColumn,
-    /// A ferro-owned row policy of a table the same plan drops, dropped
-    /// ahead of the plan's first `DROP TABLE` (#753): it goes when its table
-    /// goes, never earlier.
+    /// A ferro-owned row policy of a table the same plan drops (#753), or a
+    /// deferred key of one (#304), dropped ahead of the plan's first
+    /// `DROP TABLE`: it goes when its table goes, never earlier.
     DroppedTable,
     /// A change an enum label's removal makes to a column that held it
     /// (#536): the column's own check rebuilt to the labels left, or its
@@ -2782,6 +2806,10 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         },
         fails_on_rows: if generated_add {
             RowRisk::Always
+        } else if was.is_none() && matches!(op, MigrationOp::AddForeignKey { .. }) {
+            // A deferred key ([`emit::deferred_foreign_keys`]): its table is
+            // created by the same plan and holds no row.
+            RowRisk::None
         } else {
             fails_on_rows(op, now)
         },
@@ -2913,8 +2941,12 @@ pub(crate) fn goes_with(op: &MigrationOp, before: &Side, target: &Side) -> Optio
     let table = op.table()?;
     let (Some(was), Some(now)) = (before.model(table), target.model(table)) else {
         let dropped = before.model(table).is_some() && target.model(table).is_none();
-        return (dropped && matches!(op, MigrationOp::DropRowPolicy { .. }))
-            .then_some(Rider::DroppedTable);
+        return (dropped
+            && matches!(
+                op,
+                MigrationOp::DropRowPolicy { .. } | MigrationOp::DropForeignKey { .. }
+            ))
+        .then_some(Rider::DroppedTable);
     };
     let dropped = |name: &str| {
         find_column(Some(was), name).is_some() && find_column(Some(now), name).is_none()

@@ -4684,3 +4684,105 @@ async def test_a_move_to_or_from_a_native_enum_type_reports_the_generators_recip
         ferro.reset_engine()
         again = await auto_migrate(db_url, updates=True)
         assert (schema_steps(again), warning_texts(again)) == ([], [])
+
+
+def _define_captain_and_crew() -> tuple[type[Model], type[Model]]:
+    """Two tables whose foreign keys point at each other (#304)."""
+
+    class Captain(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        crew_id: int | None = Field(default=None, foreign_key="Crew")
+
+    class Crew(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        captain_id: int | None = Field(default=None, foreign_key=Captain)
+
+    return Captain, Crew
+
+
+_CAPTAIN_CREW_KEY = 'ALTER TABLE "captain" ADD CONSTRAINT "fk_captain_crew_id_crew" FOREIGN KEY ("crew_id") REFERENCES "crew" ("id") ON DELETE CASCADE'
+
+
+@pytest.mark.asyncio
+async def test_two_tables_that_reference_each_other_are_created(db_url, clean_registry):
+    """Postgres refuses a `REFERENCES` to a table that does not exist yet, so
+    the key to the table created later is added after the last `CREATE TABLE`;
+    SQLite accepts the forward reference and keeps every key inline."""
+    captain_model, crew_model = _define_captain_and_crew()
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "captain",
+                'CREATE TABLE IF NOT EXISTS "captain" ( "crew_id" integer, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT "fk_captain_crew_id_crew" FOREIGN KEY ("crew_id") REFERENCES "crew" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "crew",
+                'CREATE TABLE IF NOT EXISTS "crew" ( "captain_id" integer, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT "fk_crew_captain_id_captain" FOREIGN KEY ("captain_id") REFERENCES "captain" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+        postgres=[
+            (
+                "captain",
+                'CREATE TABLE IF NOT EXISTS "captain" ( "crew_id" integer, "id" serial PRIMARY KEY NOT NULL )',
+            ),
+            (
+                "crew",
+                'CREATE TABLE IF NOT EXISTS "crew" ( "captain_id" integer, "id" serial PRIMARY KEY NOT NULL, CONSTRAINT "fk_crew_captain_id_captain" FOREIGN KEY ("captain_id") REFERENCES "captain" ("id") ON DELETE CASCADE )',
+            ),
+            ("captain", _CAPTAIN_CREW_KEY),
+        ],
+    )
+    assert warning_texts(report) == []
+
+    async with ferro.engines.session():
+        captain = captain_model()
+        await captain.save()
+        crew = crew_model(captain_id=captain.id)
+        await crew.save()
+        captain.crew_id = crew.id
+        await captain.save()
+        assert (await captain_model.get(captain.id)).crew_id == crew.id
+        assert (await crew_model.get(crew.id)).captain_id == captain.id
+        if "postgres" in db_url:
+            rows = await fetch_all(
+                "SELECT conname FROM pg_constraint WHERE contype = 'f' "
+                "AND connamespace = current_schema()::regnamespace ORDER BY conname"
+            )
+            assert [row["conname"] for row in rows] == [
+                "fk_captain_crew_id_crew",
+                "fk_crew_captain_id_captain",
+            ]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_create_rolls_back_the_tables_that_reference_each_other(
+    db_url, clean_registry
+):
+    """The new tables of a pass with a deferred key are one transaction: a
+    `CREATE TABLE` that fails leaves none of them, the two tables created
+    before it included."""
+    captain_model, _ = _define_captain_and_crew()
+
+    # It references a table of the pair, so it is created after both.
+    class Zebra(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        captain_id: int | None = Field(default=None, foreign_key=captain_model)
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        # A table's row type takes the table's name, which this type holds.
+        await execute("CREATE TYPE zebra AS ENUM ('stripe')")
+        with pytest.raises(ferro.OperationalError) as excinfo:
+            await ferro.create_tables()
+        message = str(excinfo.value)
+        assert "'zebra'" in message
+        assert 'CREATE TABLE IF NOT EXISTS "zebra"' in message
+        assert schema_steps(excinfo.value.report) == []
+        rows = await fetch_all(
+            "SELECT relname FROM pg_class WHERE relname IN ('captain', 'crew', 'zebra') "
+            "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace"
+        )
+        assert rows == []
