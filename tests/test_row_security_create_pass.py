@@ -25,6 +25,7 @@ import pytest
 from ferro import (
     Field,
     Model,
+    OperationalError,
     RowPolicy,
     RowSecurity,
     clear_registry,
@@ -66,10 +67,11 @@ CREATE_POLICY_SQL = (
 def created_row_security(
     envelope: dict, table: str, dialect: str = "postgres"
 ) -> tuple[list[str], list[str]]:
-    """The row-security statements and warnings of the one planner's
-    ``AddTable`` for ``table`` (``_plan_from_ir`` from no tables, rendered):
-    what the create pass executes after the table's other artifacts, from
-    the same function (AGENTS.md § I-1)."""
+    """The row-security statements the one planner plans for the new table
+    ``table`` (``_plan_from_ir`` from no tables, rendered: its flag and policy
+    ops, after the ``AddTable``) and the ``AddTable``'s warnings: what the
+    create pass executes after its last ``CREATE TABLE``, from the same
+    functions (AGENTS.md § I-1)."""
     target = {
         **envelope,
         "payload": {
@@ -91,8 +93,14 @@ def created_row_security(
             True,
         )
     )
-    (add_table,) = [op for op in plan["operations"] if op["kind"] == "AddTable"]
-    return add_table["row_security_statements"], [
+    add_table, *row_security = plan["operations"]
+    assert add_table["kind"] == "AddTable"
+    assert {op["kind"] for op in row_security} <= {
+        "EnableRowSecurity",
+        "ForceRowSecurity",
+        "AddRowPolicy",
+    }
+    return [sql for op in row_security for sql in op["statements"]], [
         report["text"] for report in add_table["reports"]
     ]
 
@@ -973,3 +981,98 @@ async def test_a_failed_policy_leaves_no_table_rather_than_a_locked_out_one(db_u
             POLICY_NAME
         ]
         await LedgerRow.create(ledger_id=LEDGER_A, label="fine")
+
+
+# ---------------------------------------------------------------------------
+# A policy may read any table of the same pass (#753)
+# ---------------------------------------------------------------------------
+
+
+def _define_document_and_membership() -> None:
+    """``document`` is created first (no foreign key orders the two, and it
+    sorts first), and its policy reads ``membership``."""
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="members",
+                using='"owner_id" IN (SELECT user_id FROM membership)',
+            ),
+        )
+
+    class Membership(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        user_id: int
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_policy_may_read_a_table_created_in_the_same_pass(db_url):
+    _define_document_and_membership()
+    report = await auto_migrate(db_url)
+
+    # Both tables first, then the row security of the one that declares it.
+    assert schema_steps(report) == [
+        (
+            "document",
+            'CREATE TABLE IF NOT EXISTS "document" ( "id" serial PRIMARY KEY NOT NULL, "owner_id" integer NOT NULL )',
+        ),
+        (
+            "membership",
+            'CREATE TABLE IF NOT EXISTS "membership" ( "id" serial PRIMARY KEY NOT NULL, "user_id" integer NOT NULL )',
+        ),
+        ("document", 'ALTER TABLE "document" ENABLE ROW LEVEL SECURITY'),
+        ("document", 'ALTER TABLE "document" FORCE ROW LEVEL SECURITY'),
+        (
+            "document",
+            'CREATE POLICY "rls_document_members" ON "document" FOR ALL USING ("owner_id" IN (SELECT user_id FROM membership))',
+        ),
+    ]
+    assert warning_texts(report) == []
+    async with engines.session():
+        policies = await fetch_all(
+            "SELECT policyname FROM pg_policies WHERE schemaname = current_schema()"
+        )
+        assert [row["policyname"] for row in policies] == ["rls_document_members"]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_policy_rolls_back_every_new_table_of_the_pass(db_url):
+    """The new tables of a pass with row security are one transaction: a
+    policy that fails takes the table created before it along, row security
+    or not."""
+
+    class Alpha(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="members",
+                using='"owner_id" IN (SELECT user_id FROM table_that_does_not_exist)',
+            ),
+        )
+
+    await connect(db_url)
+    with pytest.raises(OperationalError) as excinfo:
+        await create_tables()
+    message = str(excinfo.value)
+    assert "'document'" in message
+    assert 'CREATE POLICY "rls_document_members" ON "document"' in message
+    assert schema_steps(excinfo.value.report) == []
+
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT relname FROM pg_class WHERE relname IN ('alpha', 'document') "
+            "AND relnamespace = current_schema()::regnamespace"
+        )
+        assert rows == []

@@ -187,13 +187,31 @@ pub enum Unit {
 pub enum Sender<'a> {
     /// The create or reconciliation pass, on this table or enum type.
     Pass(&'a str),
+    /// The create or reconciliation pass, running several new tables as one
+    /// unit (a policy of one may read another, #753): the table of each
+    /// statement, by its place in the unit's list. The unit's lock-timeout
+    /// statement is reported under the first.
+    PassEach(&'a [&'a str]),
     /// `ferro migrate`, running this step (`0003_add_slug/01_expand.up.sql`).
     Run(&'a str),
 }
 
 impl Sender<'_> {
+    /// The sender of the unit's statement at `index`.
+    fn at(self, index: usize) -> Self {
+        match self {
+            Sender::PassEach(tables) => {
+                Sender::Pass(tables.get(index).or(tables.first()).copied().unwrap_or(""))
+            }
+            one => one,
+        }
+    }
+
     fn statement(self, role: Role, sql: &str) -> Statement {
-        let (Sender::Pass(subject) | Sender::Run(subject)) = self;
+        let subject = match self {
+            Sender::Pass(subject) | Sender::Run(subject) => subject,
+            Sender::PassEach(tables) => tables.first().copied().unwrap_or(""),
+        };
         Statement {
             subject: subject.to_string(),
             sql: sql.to_string(),
@@ -787,7 +805,7 @@ impl<S: AsRef<str>> LiveUnit<'_, '_, S> {
     ) -> Result<(), Failed> {
         for (index, sql) in self.statements.iter().enumerate() {
             executed
-                .send(conn, self.sender, Role::Schema, sql.as_ref())
+                .send(conn, self.sender.at(index), Role::Schema, sql.as_ref())
                 .await
                 .map_err(|error| Failed::at(index, error))?;
         }

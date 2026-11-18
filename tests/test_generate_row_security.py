@@ -102,6 +102,27 @@ class RlsOrder(Model):
 """
 
 
+#: Two more models, neither referencing the other by a foreign key:
+#: ``document`` is created first, and its policy reads ``membership`` (#753).
+READS_ANOTHER_TABLE = """
+
+class Document(Model):
+    __ferro_rls__ = RowSecurity(
+        RowPolicy(
+            name="members",
+            using='"owner_id" IN (SELECT user_id FROM membership)',
+        )
+    )
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    owner_id: int
+
+
+class Membership(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    user_id: int
+"""
+
+
 def start(project: Path, pkg: str, db, body: str) -> None:
     """``0001`` creates ``body``'s model for both dialects, is applied, and
     the table holds two rows of tenant A and one of tenant B."""
@@ -137,7 +158,7 @@ def generated(project: Path, pkg: str, body: str) -> tuple[list[str], list[str]]
 
 def created(project: Path, number: int) -> list[str]:
     """The create pass's row-security statements for snapshot ``number``'s
-    table: the one planner's ``AddTable``, rendered."""
+    table: the one planner's flag and policy ops for the new table, rendered."""
     statements, _ = created_row_security(snapshot(project, number), TABLE)
     return statements
 
@@ -272,7 +293,7 @@ def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down
 
 
 @backend_matrix
-def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_table_alone(
+def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_its_policy_first(
     project, pkg, db, pg_role
 ):
     write_config(project, pkg)
@@ -281,7 +302,12 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
     up = statements(step_file(project, 1, "up", "postgres"))
     at = next(i for i, s in enumerate(up) if s.startswith("CREATE TABLE"))
     assert up[at + 1 :] == created(project, 1)
+    # The policy goes ahead of the table; the flags go with the table.
     assert statements(step_file(project, 1, "down", "postgres")) == [
+        drop_policy(TENANT_POLICY),
+        f'DROP TABLE "{TABLE}"',
+    ]
+    assert statements(step_file(project, 1, "down", "sqlite")) == [
         f'DROP TABLE "{TABLE}"'
     ]
     assert "POLICY" not in step_file(project, 1, "up", "sqlite").read_text()
@@ -298,6 +324,44 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert keys(db) == []
     assert TABLE not in db.tables()
+    assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
+
+
+@backend_matrix
+def test_b1_a_policy_may_read_a_table_the_same_migration_creates(project, pkg, db):
+    """Every new table's row security runs after the last ``CREATE TABLE`` of
+    the step, and its policies are dropped before the first ``DROP TABLE``
+    of the down: Postgres refuses a policy over a table that does not exist
+    yet, and the drop of a table a policy still reads (#753)."""
+    write_config(project, pkg)
+    write_models(project, pkg, READS_ANOTHER_TABLE)
+    new("create")
+    up = statements(step_file(project, 1, "up", "postgres"))
+    assert [s.split(" (")[0] for s in up[:2]] == [
+        'CREATE TABLE IF NOT EXISTS "document"',
+        'CREATE TABLE IF NOT EXISTS "membership"',
+    ]
+    assert up[2:] == [
+        'ALTER TABLE "document" ENABLE ROW LEVEL SECURITY',
+        'ALTER TABLE "document" FORCE ROW LEVEL SECURITY',
+        'CREATE POLICY "rls_document_members" ON "document" FOR ALL '
+        'USING ("owner_id" IN (SELECT user_id FROM membership))',
+    ]
+    assert statements(step_file(project, 1, "down", "postgres")) == [
+        'DROP POLICY "rls_document_members" ON "document"',
+        'DROP TABLE "membership"',
+        'DROP TABLE "document"',
+    ]
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 1), empty_snapshot(project)) == []
+    if db.backend == "postgres":
+        assert db.rows(
+            "SELECT policyname FROM pg_policies "
+            f"WHERE schemaname = '{db.schema}' AND tablename = 'document'"
+        ) == [("rls_document_members",)]
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert not {"document", "membership"} & db.tables()
     assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
 
 

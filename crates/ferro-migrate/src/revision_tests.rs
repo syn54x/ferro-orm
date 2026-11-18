@@ -290,7 +290,6 @@ fn an_op_rendering_nothing_is_left_out() {
         op: planned.op.clone(),
         statements: Vec::new(),
         reports: vec![report],
-        row_security_statements: Vec::new(),
     };
     assert_eq!(upgrade_op(planned, Some(skipped.clone()), &plan), Ok(None));
     assert_eq!(downgrade_op(planned, Some(skipped), &plan), Ok(None));
@@ -609,7 +608,15 @@ fn a_dropped_table_goes_before_its_type_and_comes_back_after_it() {
         Dialect::Postgres,
     )
     .expect("a revision");
-    assert_eq!(kinds(&revision.upgrade), ["DropTable", "DropEnumType"]);
+    // The table's ferro policy goes ahead of the first `DROP TABLE` (#753).
+    assert_eq!(
+        kinds(&revision.upgrade),
+        ["DropRowPolicy", "DropTable", "DropEnumType"]
+    );
+    assert_eq!(
+        revision.upgrade[0].statements,
+        ["DROP POLICY \"rls_tag_owner\" ON \"tag\""]
+    );
     assert_eq!(
         revision
             .upgrade
@@ -617,6 +624,7 @@ fn a_dropped_table_goes_before_its_type_and_comes_back_after_it() {
             .map(|op| op.marker.as_ref().map(Marker::comment))
             .collect::<Vec<_>>(),
         [
+            None,
             Some("destructive (drops tag and the data it holds)"),
             Some("destructive (drops tagkind and the data it holds)"),
         ]
@@ -752,7 +760,6 @@ fn a_revision_op_serialises_its_marker_with_its_comment() {
         serde_json::json!({
             "op": {"kind": "AddColumn", "table": "card", "column": "flavor"},
             "statements": [],
-            "row_security_statements": [],
             "twin": true,
             "autocommit": false,
             "foreign_key": null,

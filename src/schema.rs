@@ -41,6 +41,12 @@ use std::sync::Arc;
 /// behind the `CREATE TABLE`. A table that times out is rolled back and
 /// created again from the top; an enum type statement re-runs alone.
 ///
+/// Each new table is its own transaction ([`create_one_table`]), unless one
+/// of them declares row security on Postgres: then they are all one
+/// ([`create_tables_together`]), every table first and every table's row
+/// security after the last, so a policy may read any table of the pass and a
+/// failure leaves none of them (ADR-0049 as amended, #753).
+///
 /// What it executes and warns goes into `report` (ADR-0049).
 ///
 /// # Errors
@@ -217,8 +223,17 @@ pub async fn internal_create_tables(
         })?;
     }
 
+    let together = dialect == Dialect::Postgres
+        && to_create
+            .iter()
+            .any(|(_, emission)| !emission.row_security_sqls.is_empty());
+    if together {
+        create_tables_together(&engine, &to_create, ddl, report).await?;
+    }
     for (model, emission) in &to_create {
-        create_one_table(&engine, model, emission, ddl, report).await?;
+        if !together {
+            create_one_table(&engine, model, emission, ddl, report).await?;
+        }
 
         for warning in &emission.reports {
             report.warn(warning.clone());
@@ -324,26 +339,109 @@ fn warn_pending_renames(
     }
 }
 
+/// Execute the create emissions of a pass in which a new table declares row
+/// security, on Postgres, as ONE transaction: each table's `CREATE TABLE`
+/// with its indexes and checks, in the order given (foreign-key order), then
+/// each table's row-security flags and policies. Their enum types were
+/// created ahead of every table by [`internal_create_tables`].
+///
+/// A policy's SQL may read any table of the pass, so no policy runs until
+/// the last table exists; and the tables commit with their row security or
+/// not at all. That is not a nicety, it is the whole contract. A table
+/// committed ahead of its row security would be open to every role until
+/// the policies land; one committed with `ENABLE`/`FORCE` and a policy that
+/// then fails would be default-deny for every role including the owner. The
+/// create pass could repair neither, because it only ever touches missing
+/// tables (ADR-0010). Rolling every new table back instead leaves the
+/// database exactly as it was and the connect fails loudly, naming the table
+/// and the statement.
+///
+/// The unit runs under the DDL lock timeout as one table's does (`SET LOCAL
+/// lock_timeout` first; a timeout rolls it back and runs it again). Each
+/// statement is reported under its own table.
+async fn create_tables_together(
+    engine: &Arc<EngineHandle>,
+    to_create: &[(&SchemaModel, ferro_migrate::CreateTableEmission)],
+    ddl: &DdlExecutor,
+    report: &mut PassReport,
+) -> PyResult<()> {
+    // Each statement with its table and what it creates there.
+    let mut unit: Vec<(&str, &str, &String)> = Vec::new();
+    for (model, emission) in to_create {
+        let table = model.table_name.as_str();
+        unit.push((table, "table", &emission.create_sql));
+        unit.extend(
+            emission
+                .post_create_sqls
+                .iter()
+                .map(|sql| (table, "artifact", sql)),
+        );
+    }
+    for (model, emission) in to_create {
+        let table = model.table_name.as_str();
+        unit.extend(
+            emission
+                .row_security_sqls
+                .iter()
+                .map(|sql| (table, "artifact", sql)),
+        );
+    }
+    let tables: Vec<&str> = unit.iter().map(|(table, ..)| *table).collect();
+    let statements: Vec<&String> = unit.iter().map(|(.., sql)| *sql).collect();
+    // The table a lock wait names when it is one of the pass's, else the
+    // first: the unit is all of them.
+    let named = |table: &Option<String>| {
+        tables
+            .iter()
+            .copied()
+            .find(|own| table.as_deref() == Some(own))
+            .or(tables.first().copied())
+            .unwrap_or_default()
+    };
+    let result = ddl
+        .run(
+            engine,
+            Unit::Transactional,
+            Sender::PassEach(&tables),
+            &statements,
+            |attempt| {
+                report.warn(pass_attempt_warning(
+                    Subject::table(named(&attempt.table)),
+                    &attempt,
+                ))
+            },
+            None,
+        )
+        .await;
+    report.unit(result).map_err(|err| match err {
+        DdlError::LockTimeout(timeout) => pass_lock_timeout_error(named(&timeout.table), &timeout),
+        DdlError::Failed(Failed {
+            index: Some(index),
+            error,
+            ..
+        }) => {
+            let (table, step, sql) = unit[index];
+            create_step_error(table, step, sql, error)
+        }
+        DdlError::Failed(Failed {
+            index: None, error, ..
+        }) => crate::errors::map_db_error("Auto-migrate failed to create the new tables", error),
+    })
+}
+
 /// Execute one model's create emission — `CREATE TABLE` and every
-/// post-create artifact (indexes, checks, row-security flags and
-/// policies) — as ONE unit. Its enum types were created ahead of every table
-/// by [`internal_create_tables`].
+/// post-create artifact (indexes, checks) — as ONE unit, in a pass whose new
+/// tables declare no row security on this dialect
+/// ([`create_tables_together`] runs the others). Its enum types were created
+/// ahead of every table by [`internal_create_tables`].
 ///
 /// On Postgres this is a single transaction, mirroring the reconciliation
 /// pass's per-table transaction (FF-G G3), under the DDL lock timeout
 /// (`SET LOCAL lock_timeout` first; a timeout rolls the table back and
-/// creates it again): a table ends fully created or not created at all. That is not a nicety for row security, it is the whole
-/// contract. `ENABLE`/`FORCE ROW LEVEL SECURITY` land before the policies, so a
-/// `CREATE POLICY` that fails halfway would otherwise leave a live table with
-/// row security forced on and **zero** policies — default-deny for every role
-/// including the owner — that the create pass can never repair, because it only
-/// ever touches missing tables (ADR-0010). Rolling the table back instead
-/// leaves the database exactly as it was and the connect fails loudly, naming
-/// the statement.
+/// creates it again): a table ends fully created or not created at all.
 ///
 /// SQLite runs the same statements unwrapped, one at a time, matching the
-/// reconciliation pass; it emits no row-security DDL at all, so the lockout
-/// shape cannot occur there.
+/// reconciliation pass; it emits no row-security DDL at all.
 async fn create_one_table(
     engine: &Arc<EngineHandle>,
     model: &ferro_schema_ir::SchemaModel,
@@ -534,11 +632,11 @@ pub fn _render_create_table_sql_for_test(
             model.table_name, err.message
         ))
     })?;
-    Ok((
-        emission.create_sql,
-        emission.post_create_sqls,
-        emission.pre_create_sqls,
-    ))
+    // What a pass creating this one table runs after its `CREATE TABLE`:
+    // its indexes and checks, then its row security.
+    let mut post_create = emission.post_create_sqls;
+    post_create.extend(emission.row_security_sqls);
+    Ok((emission.create_sql, post_create, emission.pre_create_sqls))
 }
 
 /// Build minimal SchemaIR columns from a JSON schema fixture for Rust unit tests.

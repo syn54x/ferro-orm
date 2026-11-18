@@ -285,6 +285,11 @@ CASES: tuple[Case, ...] = (
             row_security.TENANT.format(setting="app.tenant"), row_security.OWNER
         ),
     ),
+    Case(
+        "E4-new-tables-whose-policy-reads-the-other",
+        row_security.models(),
+        row_security.models() + row_security.READS_ANOTHER_TABLE,
+    ),
     # -- G: generated columns -----------------------------------------------------
     Case("G1-add-an-indexed-generated-column", generated.HEAD, generated.INDEXED),
     Case("G2-change-a-generated-expression", generated.INDEXED, generated.ABS),

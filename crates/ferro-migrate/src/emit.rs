@@ -38,6 +38,11 @@ pub struct CreateTableEmission {
     /// Standalone `CREATE [UNIQUE] INDEX` statements plus the Postgres `db_check`
     /// `ALTER`. Never contains foreign keys (those are inline in `create_sql`).
     pub post_create_sqls: Vec<String>,
+    /// The table's row-security flags and policies
+    /// ([`row_security_statements`]). They run after the last `CREATE TABLE`
+    /// of whatever creates the table, never right after this one: a policy
+    /// may read a table created later (#753). Empty on SQLite.
+    pub row_security_sqls: Vec<String>,
     /// What the emission reports (the SQLite row-security skip).
     pub reports: Vec<Report>,
 }
@@ -285,11 +290,15 @@ pub fn render_create_table_as(
     };
     let create_sql = append_named_table_checks(create_sql, model, dialect)?;
 
-    let (post_create_sqls, reports) = post_create_artifacts(model, &check_emissions, dialect)?;
+    let (post_create_sqls, mut reports) = post_create_artifacts(model, &check_emissions, dialect);
+    let rls =
+        row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
+    reports.extend(rls.warning);
     Ok(CreateTableEmission {
         pre_create_sqls,
         create_sql,
         post_create_sqls,
+        row_security_sqls: rls.statements,
         reports,
     })
 }
@@ -411,7 +420,7 @@ fn post_create_artifacts(
     model: &SchemaModel,
     check_emissions: &[(&ferro_schema_ir::SchemaCheck, CheckEmission)],
     dialect: Dialect,
-) -> Result<(Vec<String>, Vec<Report>), EmissionError> {
+) -> (Vec<String>, Vec<Report>) {
     let table_lower = model.table_name.as_str();
     let mut statements = Vec::new();
     let mut reports = Vec::new();
@@ -435,15 +444,7 @@ fn post_create_artifacts(
         reports.extend(emission.warning.iter().cloned());
     }
 
-    // Row security lands last: the flags and policies go on after the table's
-    // columns, indexes and checks exist, so nothing this pass runs against the
-    // fresh table is itself filtered (PRD #406).
-    let rls =
-        row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
-    statements.extend(rls.statements);
-    reports.extend(rls.warning);
-
-    Ok((statements, reports))
+    (statements, reports)
 }
 
 /// Order `AddTable` models so each table's FK targets are created before it.

@@ -2884,12 +2884,13 @@ fn a_snapshot_down_disables_row_security_exactly_when_its_migration_introduced_i
 }
 
 #[test]
-fn create_pass_emits_row_security_after_the_tables_other_artifacts() {
+fn create_pass_emits_row_security_apart_from_the_tables_other_artifacts() {
     let model = ledgerrow_model_with_row_security(true);
     let emission = render_create_table(&model, Dialect::Postgres).unwrap();
     assert!(emission.create_sql.starts_with("CREATE TABLE"));
+    assert!(emission.post_create_sqls.is_empty());
     assert_eq!(
-        emission.post_create_sqls,
+        emission.row_security_sqls,
         vec![
             "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
             "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string(),
@@ -2906,13 +2907,14 @@ fn create_pass_emits_row_security_after_the_tables_other_artifacts() {
 fn create_pass_omits_force_when_the_declaration_does() {
     let model = ledgerrow_model_with_row_security(false);
     let emission = render_create_table(&model, Dialect::Postgres).unwrap();
+    assert_eq!(emission.row_security_sqls.len(), 2);
     assert!(
         !emission
-            .post_create_sqls
+            .row_security_sqls
             .iter()
             .any(|sql| sql.contains("FORCE")),
         "{:?}",
-        emission.post_create_sqls
+        emission.row_security_sqls
     );
 }
 
@@ -2921,42 +2923,136 @@ fn create_pass_skips_row_security_on_sqlite_with_one_warning() {
     let model = ledgerrow_model_with_row_security(true);
     let emission = render_create_table(&model, Dialect::Sqlite).unwrap();
     assert!(emission.create_sql.starts_with("CREATE TABLE"));
-    assert!(
-        !emission
-            .post_create_sqls
-            .iter()
-            .any(|sql| sql.contains("ROW LEVEL SECURITY") || sql.contains("CREATE POLICY")),
-        "{:?}",
-        emission.post_create_sqls
-    );
+    assert!(emission.post_create_sqls.is_empty());
+    assert!(emission.row_security_sqls.is_empty());
     assert_eq!(emission.reports.len(), 1);
     assert!(emission.reports[0].text.contains("ledgerrow"));
     assert!(emission.reports[0].text.contains("PostgreSQL-only"));
 }
 
 #[test]
-fn add_table_pass_carries_row_security_through_emit_sql_with_ir() {
+fn a_new_tables_row_security_is_the_plans_own_ops_rendered_as_the_create_pass_does() {
     let model = ledgerrow_model_with_row_security(true);
-    let new_ir = envelope(vec![model]);
-    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
-        table: "ledgerrow".to_string(),
-    }]);
-    let emitted = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
-    assert!(
-        emitted
-            .statements
-            .iter()
-            .any(|sql| sql == "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY"),
-        "{:?}",
-        emitted.statements
+    let plan = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(envelope(vec![model.clone()])),
+        Dialect::Postgres,
+        updates_only(),
     );
-    assert!(
-        emitted
-            .statements
+    let table = || "ledgerrow".to_string();
+    assert_eq!(
+        plan.op_list(),
+        vec![
+            MigrationOp::AddTable { table: table() },
+            MigrationOp::EnableRowSecurity { table: table() },
+            MigrationOp::ForceRowSecurity { table: table() },
+            MigrationOp::AddRowPolicy {
+                table: table(),
+                name: "rls_ledgerrow_ledger_id".to_string(),
+            },
+        ]
+    );
+    // The `AddTable` renders the table alone; the three ops render the
+    // statements the create pass runs for it, byte for byte.
+    let emission = render_create_table(&model, Dialect::Postgres).unwrap();
+    let rendered = plan.render().unwrap();
+    assert_eq!(rendered[0].statements, vec![emission.create_sql]);
+    assert_eq!(statements_of(&plan)[1..], emission.row_security_sqls[..]);
+}
+
+/// `document`, whose policy reads `membership`, and `membership`: no foreign
+/// key orders the two, so `document` is created first (#753).
+fn document_and_membership() -> IrEnvelope<SchemaIrPayload> {
+    let document = SchemaModel {
+        row_security: Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                name: "rls_document_members".to_string(),
+                command: ferro_schema_ir::RowPolicyCommand::All,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                    using: Some("\"owner_id\" IN (SELECT user_id FROM membership)".to_string()),
+                    with_check: None,
+                },
+            }],
+        }),
+        ..schema_model(
+            "document",
+            vec![pk_col("id", "int"), col("owner_id", "int", false)],
+        )
+    };
+    let membership = schema_model(
+        "membership",
+        vec![pk_col("id", "int"), col("user_id", "int", false)],
+    );
+    envelope(vec![document, membership])
+}
+
+#[test]
+fn a_new_tables_row_security_runs_after_the_last_create_table_of_the_plan() {
+    let up = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(document_and_membership()),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    let statements = statements_of(&up);
+    let at = |start: &str| {
+        statements
             .iter()
-            .any(|sql| sql.starts_with("CREATE POLICY \"rls_ledgerrow_ledger_id\"")),
-        "{:?}",
-        emitted.statements
+            .position(|sql| sql.starts_with(start))
+            .unwrap_or_else(|| panic!("no statement starts with {start}: {statements:?}"))
+    };
+    assert!(
+        at("CREATE TABLE IF NOT EXISTS \"membership\"")
+            < at("ALTER TABLE \"document\" ENABLE ROW LEVEL SECURITY"),
+        "{statements:?}"
+    );
+    assert_eq!(
+        statements[2..],
+        [
+            "ALTER TABLE \"document\" ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE \"document\" FORCE ROW LEVEL SECURITY",
+            "CREATE POLICY \"rls_document_members\" ON \"document\" FOR ALL \
+             USING (\"owner_id\" IN (SELECT user_id FROM membership))",
+        ]
+    );
+    // SQLite renders no row security: the two creates and the one warning.
+    let sqlite = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(document_and_membership()),
+        Dialect::Sqlite,
+        updates_only(),
+    );
+    assert_eq!(statements_of(&sqlite).len(), 2);
+}
+
+#[test]
+fn a_dropped_tables_ferro_policies_are_dropped_before_the_first_drop_table() {
+    let down = plan_from_ir(
+        &Side::declared(document_and_membership()),
+        &Side::declared(empty_envelope()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        statements_of(&down),
+        [
+            "DROP POLICY \"rls_document_members\" ON \"document\"",
+            "DROP TABLE \"membership\"",
+            "DROP TABLE \"document\"",
+        ]
+    );
+    // SQLite has no policy to drop.
+    let sqlite = plan_from_ir(
+        &Side::declared(document_and_membership()),
+        &Side::declared(empty_envelope()),
+        Dialect::Sqlite,
+        destructive(),
+    );
+    assert_eq!(
+        statements_of(&sqlite),
+        ["DROP TABLE \"membership\"", "DROP TABLE \"document\""]
     );
 }
 

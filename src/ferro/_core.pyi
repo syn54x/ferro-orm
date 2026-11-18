@@ -83,7 +83,8 @@ def _render_create_table_sql_for_test(
 ) -> tuple[str, list[str], list[str]]:
     """Test-only: render CREATE TABLE SQL + post-create + pre-create fragments
     (``(create_sql, post_create_sqls, pre_create_sqls)``) without executing.
-    Pre-create carries the idempotent native-enum ``CREATE TYPE`` guards.
+    Pre-create carries the idempotent native-enum ``CREATE TYPE`` guards;
+    post-create is the table's indexes and checks, then its row security.
 
     ``schema_json`` is a SchemaIR *payload* JSON string of the shape
     ``{"dialect_agnostic": bool, "models": [<SchemaModel>...]}`` produced by
@@ -133,8 +134,7 @@ def _plan_revision(
 
     Returns ``{"upgrade": [op, ...], "downgrade": [op, ...], "reports":
     [report, ...], "refusal": None}``. Each op is ``{"op": {"kind": ...,
-    <fields>}, "statements": [...], "row_security_statements": [...],
-    "twin": bool, "autocommit": bool, "foreign_key": {"name", "column",
+    <fields>}, "statements": [...], "twin": bool, "autocommit": bool, "foreign_key": {"name", "column",
     "to_table", "to_column", "on_delete"} | None, "index": {"columns",
     "unique"} | None, "marker": {"kind", "comment"} | None, "irreversible":
     str | None}``: ``twin`` says Alembic's own op writes it (else
@@ -200,7 +200,7 @@ def _plan_from_ir(
     ``{"irreversible": <reason>}``), ``demands_values``, ``drops_data``,
     ``fails_on_rows`` (``"none"``, ``"always"``, ``"when_validated"``),
     ``recreates`` and ``goes_with`` (``null``, ``"dropped_column"``,
-    ``"added_column"``). Each report is ``{"kind", "subject", "text", "recurs",
+    ``"added_column"``, ``"removed_label"``, ``"dropped_table"``). Each report is ``{"kind", "subject", "text", "recurs",
     "blocks"}``:
     ``kind`` is its name (``"PrimaryKeyKept"``) or ``{name: fields}``
     (``{"HintRefused": {...}}``), ``subject`` is ``{"scope": "table",
@@ -209,8 +209,9 @@ def _plan_from_ir(
     acts, ``blocks`` whether it stands in for a statement its op does not
     render (the op is left out, so a reviewed file refuses it). With ``render`` each op also carries its ``statements`` and
     ``reports`` for ``dialect`` — the byte-identical statements the
-    reconciliation pass executes (I-1) — and an ``AddTable`` its
-    ``row_security_statements``.
+    reconciliation pass executes (I-1). A new table's row security is the
+    plan's own ops (``EnableRowSecurity``, ``ForceRowSecurity``,
+    ``AddRowPolicy``), after its last ``AddTable``.
     """
     ...
 

@@ -60,10 +60,6 @@ pub struct RevisionOp {
     /// that demands values of existing rows, which the pass refuses and the
     /// revision writes as Alembic's plain op).
     pub statements: Vec<String>,
-    /// For an `AddTable`, the row-security statements that close its
-    /// `statements`: what the revision runs as written beside Alembic's
-    /// `create_table`.
-    pub row_security_statements: Vec<String>,
     /// Written as Alembic's own op (ADR-0041: a table, a column, its type
     /// and nullability, an index, a foreign key, a table or column rename),
     /// or, when `false`, as `op.execute` of each of `statements`.
@@ -266,10 +262,9 @@ impl serde::Serialize for RevisionOp {
             kind: &'static str,
             comment: &'a str,
         }
-        let mut out = serializer.serialize_struct("RevisionOp", 9)?;
+        let mut out = serializer.serialize_struct("RevisionOp", 8)?;
         out.serialize_field("op", &self.op)?;
         out.serialize_field("statements", &self.statements)?;
-        out.serialize_field("row_security_statements", &self.row_security_statements)?;
         out.serialize_field("twin", &self.twin)?;
         out.serialize_field("autocommit", &self.autocommit)?;
         out.serialize_field("foreign_key", &self.foreign_key)?;
@@ -507,10 +502,9 @@ fn written(
     let target = plan.target.writable_ir();
     let target = target.as_ref();
     let demanding = rendered.is_none();
-    let (statements, row_security_statements) = match rendered {
-        Some(rendered) => (rendered.statements, rendered.row_security_statements),
-        None => (Vec::new(), Vec::new()),
-    };
+    let statements = rendered
+        .map(|rendered| rendered.statements)
+        .unwrap_or_default();
     let foreign_key = match &planned.op {
         MigrationOp::AddForeignKey { table, column } => Some(
             plan.target
@@ -582,7 +576,6 @@ fn written(
     Ok(RevisionOp {
         op: planned.op.clone(),
         statements,
-        row_security_statements,
         twin,
         autocommit: planned.op.commits_alone(),
         foreign_key,
