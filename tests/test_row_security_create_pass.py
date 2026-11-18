@@ -1159,3 +1159,58 @@ async def test_a_failed_policy_rolls_back_the_tables_created_after_a_rename(db_u
             "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace"
         )
         assert [row["relname"] for row in rows] == ["author"]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reads", "column"), [("membership", "author_id"), ("author", "id")]
+)
+async def test_a_policy_may_read_a_table_the_pass_renames_or_creates_after_a_rename(
+    db_url, reads, column
+):
+    """``document`` waits on no rename, but its policy reads a table that
+    does: ``membership``, created after the rename, or ``author``, the
+    renamed table itself. Its row security runs where the plan puts it,
+    after the rename and after every new table of the pass."""
+    await _create_writer(db_url)
+
+    class Author(Model):
+        __ferro_renamed_from__ = "writer"
+
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="members",
+                using=f'"owner_id" IN (SELECT {column} FROM {reads})',
+            ),
+        )
+
+    class Membership(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        author_id: int = Field(foreign_key=Author)
+
+    report = await auto_migrate(db_url, updates=True)
+
+    ran = [(subject, sql.split(" (")[0]) for subject, sql in schema_steps(report)]
+    assert ran[0] == ("author", 'ALTER TABLE "writer" RENAME TO "author"')
+    assert ran[-5:] == [
+        ("document", 'CREATE TABLE IF NOT EXISTS "document"'),
+        ("membership", 'CREATE TABLE IF NOT EXISTS "membership"'),
+        ("document", 'ALTER TABLE "document" ENABLE ROW LEVEL SECURITY'),
+        ("document", 'ALTER TABLE "document" FORCE ROW LEVEL SECURITY'),
+        (
+            "document",
+            'CREATE POLICY "rls_document_members" ON "document" FOR ALL USING',
+        ),
+    ]
+    async with engines.session():
+        assert [p["policyname"] for p in await _pg_policies("document")] == [
+            "rls_document_members"
+        ]

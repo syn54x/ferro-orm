@@ -353,6 +353,18 @@ pub(crate) fn pass_attempt_warning(subject: Subject, attempt: &crate::ddl_exec::
     ddl_lock_retry_warning(subject, &attempt.describe())
 }
 
+/// The table a lock wait of a unit over `tables` is reported under: the
+/// one the waiting statement names (`waited_on`) when it is one of the
+/// unit's, else the unit's first. A unit of one table is always that table.
+pub(crate) fn lock_wait_table<'a>(tables: &[&'a str], waited_on: &Option<String>) -> &'a str {
+    tables
+        .iter()
+        .copied()
+        .find(|table| waited_on.as_deref() == Some(table))
+        .or(tables.first().copied())
+        .unwrap_or_default()
+}
+
 /// The error for a create or reconciliation unit that timed out on every
 /// attempt: `OperationalError` naming `ddl_lock_timeout`.
 pub(crate) fn pass_lock_timeout_error(
@@ -559,13 +571,21 @@ async fn execute_table_ops(
             Unit::Transactional,
             Sender::PassEach(&tables),
             &sqls,
-            |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
+            |attempt| {
+                report.warn(pass_attempt_warning(
+                    Subject::table(lock_wait_table(&tables, &attempt.table)),
+                    &attempt,
+                ))
+            },
             None,
         )
         .await;
     match report.unit(result) {
         Ok(()) => Ok((statements - drops, drops)),
-        Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(table, &timeout)),
+        Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(
+            lock_wait_table(&tables, &timeout.table),
+            &timeout,
+        )),
         Err(DdlError::Failed(Failed { index, error, .. })) => {
             Err(match index.and_then(|index| ops_statements.get(index)) {
                 Some((
@@ -941,16 +961,24 @@ async fn run_passes(
     // Which tables are read is the one rule every emitter reads by
     // ([`tables_to_read`], ADR-0047).
     let live_names: BTreeSet<String> = tables_before_create.iter().cloned().collect();
-    let (renames, adds_after_renames) = match live_table_renames(&live_names, &modelset.payload) {
+    let (renames, mut adds_after_renames) = match live_table_renames(&live_names, &modelset.payload)
+    {
         Ok(renames) => (renames, created.held_back.clone()),
         Err(_) => (Vec::new(), BTreeSet::new()),
     };
+    // The new tables the create pass left to this plan, whose ops create
+    // them with their row security where the plan puts it (#753).
+    adds_after_renames.extend(created.left_to_plan.iter().cloned());
     let built: Vec<String> = modelset
         .payload
         .models
         .iter()
         .map(|model| model.table_name.clone())
-        .filter(|table| !tables_before_create.contains(table) && !created.held_back.contains(table))
+        .filter(|table| {
+            !tables_before_create.contains(table)
+                && !created.held_back.contains(table)
+                && !created.left_to_plan.contains(table)
+        })
         .collect();
     let existing = tables_to_read(&engine, &modelset, &built, &[]).await?;
     // The tables this pass reconciles, by their declared names: the renamed

@@ -86,16 +86,33 @@ needs neither.
 A table used to be its own Postgres transaction, policies included, so a
 failed policy left no table. With the policies after the last table, that unit
 has to be the whole set. On Postgres, when any new table of a pass declares
-row security, `create_tables_together` (`src/schema.rs`) runs every
+row security, the pass runs every
 `CREATE TABLE` with its indexes and checks, then every table's row security,
 as one transaction under the DDL lock timeout. A failure rolls back all of
 them, the error names the table and the statement, and `.report` lists none
 (ADR-0049, amended 2026-11-17). A pass with no row security among its new
 tables keeps one transaction per table.
 
-The reconciliation pass follows the same rule for the tables the create pass
-held back for a rename (`new_tables_unit` in `src/migrate.rs`), and skips
-every op on a table the create pass built, its row security included.
+The pass never decides where row security goes. Which code runs that one
+transaction depends on whether a plan follows:
+
+- **`auto_migrate=True` alone, or `create_tables()`.** No plan follows, so
+  the create pass asks the planner for one, from no tables to the tables it
+  creates (`planned_create_unit` in `src/schema.rs`), and runs its ops in
+  order: its own emission for each `AddTable`, the plan's rendering for
+  everything else.
+- **`migrate_updates`.** The create pass creates none of those tables and
+  hands them over (`CreatePass::left_to_plan`). The reconciliation pass runs
+  the plan's ops for them as one unit (`new_tables_unit` in
+  `src/migrate.rs`), beside the tables held back for a rename and after the
+  plan's renames. So a policy may read a table the pass renames, or one that
+  could only be created after a rename.
+
+The first version of this fix let the create pass run row security for the
+tables it built, before the reconciliation pass had renamed anything or
+created the held-back tables. A policy on a built table that read a held-back
+one failed with the old `relation … does not exist`. Two places decided the
+order, and they disagreed as soon as a rename was in the pass.
 
 The unit's statements belong to several tables, so the executor takes
 `Sender::PassEach(&tables)`: each statement is reported under its own table.
