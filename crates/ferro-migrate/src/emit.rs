@@ -9,7 +9,7 @@ use ferro_ddl_lowering::{
     render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
     render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
     row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_generated_guard, sqlite_type_storage_drift,
+    sqlite_generated_guard,
 };
 use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
@@ -994,21 +994,22 @@ pub(crate) fn emit_alter_column_type(
                 canonical_from_schema_column(new_col, ld).map_err(|message| EmissionError {
                     message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
                 })?;
-            if sqlite_type_storage_drift(old_col.db_type.as_deref().unwrap_or(""), new_canonical) {
-                result.reports.push(sqlite_in_place_report(
-                    InPlaceChange::AlterColumnType,
-                    Subject::column(table, column),
-                    format!(
-                        "Column '{}.{}' is declared '{}' in the database but the model expects \
-                         '{}'. SQLite cannot change column types in place; generate a \
-                         reviewed migration with `ferro migrate new` to migrate this column.",
-                        table,
-                        column,
-                        old_col.db_type.as_deref().unwrap_or(""),
-                        sqlite_declared_type(new_canonical),
-                    ),
-                ));
-            }
+            // Whether the type changed is the planner's one decision
+            // (`schema_columns_storage_drift`): every change it plans is
+            // reported, with no second comparison here (I-1 item 3).
+            result.reports.push(sqlite_in_place_report(
+                InPlaceChange::AlterColumnType,
+                Subject::column(table, column),
+                format!(
+                    "Column '{}.{}' is declared '{}' in the database but the model expects \
+                     '{}'. SQLite cannot change column types in place; generate a \
+                     reviewed migration with `ferro migrate new` to migrate this column.",
+                    table,
+                    column,
+                    old_col.db_type.as_deref().unwrap_or(""),
+                    sqlite_declared_type(new_canonical),
+                ),
+            ));
         }
     }
     Ok(result)

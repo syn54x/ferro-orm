@@ -228,9 +228,8 @@ fn ops_class(ops: &[PlannedOp], sides: Sides<'_>) -> StepClass {
 /// kind.
 fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     let verdict = &planned.verdict;
-    // A label added to a column's enum (on SQLite, where labels are text, a
-    // rebuild widening the column; a text column's check widened to admit
-    // it) admits every value the previous release writes.
+    // A label added to a column's enum (a text column's check widened to
+    // admit it) admits every value the previous release writes.
     if adds_labels_only(&planned.op, sides) {
         return StepClass::Expand;
     }
@@ -307,69 +306,26 @@ fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepCla
 }
 
 /// Whether `op` changes nothing of its column but the labels it admits, and
-/// only adds to them: a column's type or check rebuilt because an enum
-/// gained a label.
+/// only adds to them: a column's check rebuilt because an enum gained a
+/// label.
 fn adds_labels_only(op: &MigrationOp, sides: Sides<'_>) -> bool {
-    let model = |ir: &IrEnvelope<SchemaIrPayload>, table: &str| {
+    let MigrationOp::RebuildCheck { table, name } = op else {
+        return false;
+    };
+    let check_of = |ir: &IrEnvelope<SchemaIrPayload>| {
         ir.payload
             .models
             .iter()
-            .find(|model| model.table_name == table)
-            .cloned()
+            .find(|model| &model.table_name == table)
+            .and_then(|m| m.checks.iter().find(|c| &c.name == name).cloned())
     };
-    let superset = |old: &[serde_json::Value], new: &[serde_json::Value]| {
-        new.len() > old.len() && old.iter().all(|label| new.contains(label))
-    };
-    match op {
-        MigrationOp::AlterColumnType { table, column } => {
-            let column_of = |ir| {
-                model(ir, table).and_then(|m| m.columns.into_iter().find(|c| &c.name == column))
-            };
-            match (column_of(sides.before), column_of(sides.target)) {
-                (Some(old), Some(new)) => match (&old.enum_values, &new.enum_values) {
-                    (Some(was), Some(now)) => {
-                        superset(was, now) && storage_facts(&old) == storage_facts(&new)
-                    }
-                    _ => false,
-                },
-                _ => false,
-            }
-        }
-        MigrationOp::RebuildCheck { table, name } => {
-            let check_of =
-                |ir| model(ir, table).and_then(|m| m.checks.into_iter().find(|c| &c.name == name));
-            match (check_of(sides.before), check_of(sides.target)) {
-                (Some(old), Some(new)) => {
-                    old.column == new.column
-                        && new.values.len() > old.values.len()
-                        && old.values.iter().all(|value| new.values.contains(value))
-                }
-                _ => false,
-            }
+    match (check_of(sides.before), check_of(sides.target)) {
+        (Some(old), Some(new)) => {
+            old.column == new.column
+                && new.values.len() > old.values.len()
+                && old.values.iter().all(|value| new.values.contains(value))
         }
         _ => false,
-    }
-}
-
-/// `column` without its labels and the facts that render no storage. The
-/// schema IR offers no DDL-bearing projection of a column, so this is the
-/// one list, and its rule is: a field is left out only when it renders no
-/// storage (the labels it retires (ADR-0053), whether it is retired, its
-/// server default and its Python default factory), or it is the labels it
-/// admits, which [`adds_labels_only`] compares on its own (a superset).
-/// Every field that renders storage (the type, `db_type`, nullability,
-/// length, key and enum-type facts) stays in the comparison. Two columns
-/// with equal storage facts differ, if at all, in what they admit and in
-/// what no statement changes.
-fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::SchemaColumn {
-    ferro_schema_ir::SchemaColumn {
-        enum_values: None,
-        enum_retired_labels: None,
-        retired: false,
-        generated: None,
-        default: None,
-        default_factory: None,
-        ..column.clone()
     }
 }
 
@@ -1103,8 +1059,8 @@ mod tests {
     #[test]
     fn an_added_label_beside_a_retired_one_is_expand() {
         // Release B adds `cancelled_by_user` and retires `canceled` (the
-        // online label-rename recipe). On SQLite the longer label widens the
-        // column's `varchar`, a rebuild; the retirement renders nothing.
+        // online label-rename recipe). The longer label changes no column
+        // on SQLite (ADR-0034), and the retirement renders nothing.
         let before = author(vec![status(&["draft", "canceled"])]);
         let after = author(vec![SchemaColumn {
             enum_retired_labels: Some(vec!["canceled".into()]),

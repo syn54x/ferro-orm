@@ -2708,8 +2708,9 @@ pub enum Rider {
     /// `DROP TABLE`: it goes when its table goes, never earlier.
     DroppedTable,
     /// A change an enum label's removal makes to a column that held it
-    /// (#536): the column's own check rebuilt to the labels left, or its
-    /// storage narrowed to them. It runs once no row holds the label.
+    /// (#536): the column's own check rebuilt to the labels left, or a
+    /// change of its type made beside the removal. It runs once no row holds
+    /// the label.
     RemovedLabel,
 }
 
@@ -3958,11 +3959,11 @@ fn claim(claims: &mut Vec<(String, Vec<String>)>, previous: &str, claimant: &str
     }
 }
 
-/// The `hints` whose renames leave a column's storage on `dialect` as the
-/// rest of a plan should see it. On SQLite an enum column is text as wide as
-/// its longest label, so a label rename is an `UPDATE` of its rows that can
-/// also widen or narrow the column: the label hints are left out, and the
-/// plan still meets the width change as the column's type change.
+/// The `hints` whose renames leave a table on `dialect` as the rest of a
+/// plan should see it. On SQLite a label lives in the rows, so its rename is
+/// an `UPDATE` of them and renames nothing of the schema: the label hints
+/// are left out, and the plan still meets a check that lists the labels as
+/// that check's rebuild.
 pub(crate) fn storage_hints(hints: &[Hint], dialect: Dialect) -> Vec<Hint> {
     hints
         .iter()

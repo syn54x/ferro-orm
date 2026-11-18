@@ -5436,26 +5436,17 @@ mod enum_renames {
                 new: "cancelled".to_string(),
             }]
         );
-        // On SQLite the column is text as wide as its longest label: the
-        // longer spelling widens every column of the type too.
-        let widened = || {
-            columns()
-                .into_iter()
-                .map(|(table, column)| MigrationOp::AlterColumnType { table, column })
-        };
+        // The longer spelling is the rename alone on SQLite too: the
+        // column's declared length is not schema there (ADR-0034).
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let plan = plan(&parent(), &relabelled(), dialect);
-            let mut expected = vec![MigrationOp::RenameEnumLabel {
+            let expected = vec![MigrationOp::RenameEnumLabel {
                 type_name: "orderstatus".to_string(),
                 old: "canceled".to_string(),
                 new: "cancelled".to_string(),
                 columns: columns(),
             }];
-            if dialect == Dialect::Sqlite {
-                expected.extend(widened());
-            }
             assert_eq!(plan.op_list(), expected, "{dialect:?}");
-            assert!(plan.reports.is_empty(), "{:?}", plan.reports);
             assert!(plan.reports.is_empty(), "{:?}", plan.reports);
         }
     }
@@ -5652,15 +5643,11 @@ mod enum_renames {
             plan(&parent(), &both_renamed, Dialect::Postgres).op_list(),
             vec![expected_type, expected_label.clone()]
         );
-        let mut sqlite = vec![expected_label];
-        sqlite.extend(
-            columns()
-                .into_iter()
-                .map(|(table, column)| MigrationOp::AlterColumnType { table, column }),
-        );
+        // SQLite has no enum type to rename, and the longer label changes no
+        // column there.
         assert_eq!(
             plan(&parent(), &both_renamed, Dialect::Sqlite).op_list(),
-            sqlite
+            vec![expected_label]
         );
     }
 

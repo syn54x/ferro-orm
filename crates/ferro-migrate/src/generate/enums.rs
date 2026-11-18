@@ -35,8 +35,9 @@
 //! holding it, then the contract — on Postgres the swap-type recipe
 //! ([`render_swap_type`]), whose down puts the label back with the pass's
 //! `ADD VALUE IF NOT EXISTS`; on SQLite, where labels are text in the rows,
-//! nothing beyond the backfill (a check or a narrower column is the table's
-//! rebuild). A down meeting the removal of a label its up added is answered
+//! nothing beyond the backfill (a check that lists the labels is the table's
+//! rebuild; the column's declared length is not schema there, ADR-0034). A
+//! down meeting the removal of a label its up added is answered
 //! by the `labels` step's down, which says the label stays.
 
 use super::{GenerateError, Rendering, refuse_unrendered, step_text};

@@ -884,8 +884,8 @@ fn nullability(
 /// ([`label_contract`]). On Postgres the swap-type recipe for a native type
 /// and the pass's own statements for the rest (a text enum's check rebuilt
 /// to the new labels), the down putting each label back; on SQLite a rebuild
-/// only of a table whose shape changes (its check, or a column narrowed to
-/// the longest label left), else nothing.
+/// only of a table whose check lists the labels, else nothing: a column's
+/// declared length is not schema there (ADR-0034).
 ///
 /// # Errors
 /// A demanded table missing from either side, or a statement that does not
@@ -972,8 +972,7 @@ pub(super) fn contract_step(
                         tables.push(d.table.clone());
                     }
                 }
-                // A table a removed label reshapes (its check, or a column
-                // narrowed to the longest label left).
+                // A table a removed label reshapes (its check).
                 for op in relabel {
                     if let Some(table) = op.table()
                         && !tables.iter().any(|t| t == table)

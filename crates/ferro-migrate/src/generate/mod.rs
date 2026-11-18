@@ -3708,23 +3708,20 @@ mod tests {
     }
 
     #[test]
-    fn a_label_longer_than_every_other_widens_the_sqlite_column_in_the_schema_step() {
-        // SQLite stores an enum as varchar(<longest label>): a longer label
-        // is that column's type change, a rebuild after the labels step.
+    fn a_label_longer_than_every_other_is_the_labels_step_alone() {
+        // SQLite created the column `varchar(5)`, its longest label, and
+        // does not enforce that length: a longer label changes no schema
+        // there (ADR-0034), so nothing follows the labels step.
         let added = relabelled("status", &["draft", "live", "archived"], &[]);
         let migration = edit(vec![author()], vec![added], &BOTH);
-        assert_eq!(step_names(&migration), ["01_labels", "02_schema"]);
+        assert_eq!(step_names(&migration), ["01_labels"]);
         assert_eq!(
-            step(&migration, "02_schema", Dialect::Postgres).up,
-            NOT_APPLICABLE
+            step(&migration, "01_labels", Dialect::Postgres).up,
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'archived';\n"
         );
-        let sqlite = step(&migration, "02_schema", Dialect::Sqlite);
-        assert!(sqlite.up.contains("\"status\" varchar(8)"), "{}", sqlite.up);
-        assert!(
-            sqlite.down.contains("\"status\" varchar(5)"),
-            "{}",
-            sqlite.down
-        );
+        let sqlite = step(&migration, "01_labels", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
     }
 
     #[test]
@@ -3811,34 +3808,21 @@ mod tests {
         let parent = snapshot_of(&ir(vec![after.clone()]), None);
         assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
 
-        // A longer spelling widens SQLite's column: the table is rebuilt at
-        // the new width, its rows relabelled as the rebuild copies them, and
-        // back the same way on the down.
-        let wider = relabelled("status", &["draft", "published"], &[("published", "live")]);
-        let migration = edit(vec![author()], vec![wider], &[Dialect::Sqlite]);
+        // A longer spelling is the same `UPDATE`: SQLite does not enforce
+        // the column's declared length, so no table is rebuilt for it
+        // (ADR-0034).
+        let longer = relabelled("status", &["draft", "published"], &[("published", "live")]);
+        let migration = edit(vec![author()], vec![longer], &[Dialect::Sqlite]);
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
-        assert!(!sqlite.up.contains("UPDATE"), "{}", sqlite.up);
-        assert!(sqlite.headers.data_dependent && sqlite.headers.foreign_keys_off);
-        assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
-        assert!(
-            sqlite.up.contains(
-                "SELECT \"id\", \"name\", CASE \"status\" WHEN 'live' THEN 'published' \
-                 ELSE \"status\" END FROM \"author\""
-            ),
-            "{}",
-            sqlite.up
+        assert_eq!(
+            sqlite.up,
+            "-- ferro: data-dependent\n\n\
+             UPDATE \"author\" SET \"status\" = 'published' WHERE \"status\" = 'live';\n"
         );
-        assert!(
-            sqlite
-                .down
-                .contains("CASE \"status\" WHEN 'published' THEN 'live' ELSE \"status\" END"),
-            "{}",
-            sqlite.down
-        );
-        assert!(
-            sqlite.down.contains("\"status\" varchar(5)"),
-            "{}",
-            sqlite.down
+        assert_eq!(
+            sqlite.down,
+            "-- ferro: data-dependent\n\n\
+             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published';\n"
         );
     }
 
@@ -4079,27 +4063,23 @@ mod tests {
             "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'draft' BEFORE 'live';\n\n\
              ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'draft';\n"
         );
-        // SQLite stores the label as text in a column as wide as the longest
-        // label, which stays: nothing beyond the backfill.
-        let sqlite = step(&migration, "02_contract", Dialect::Sqlite);
-        assert_eq!(sqlite.up, NOT_APPLICABLE);
-        assert_eq!(sqlite.down, NOT_APPLICABLE);
-
-        // Removing the longest label narrows the SQLite column: the contract
-        // rebuilds the table into it (and back on the down).
-        let narrowed = edit(
-            with_status(&["draft", "canceled", "live"], false),
-            with_status(&["draft", "live"], false),
-            &BOTH,
-        );
-        assert_eq!(step_names(&narrowed), ["01_backfill_author", "02_contract"]);
-        let sqlite = step(&narrowed, "02_contract", Dialect::Sqlite);
-        assert!(sqlite.up.contains("\"status\" varchar(5)"), "{}", sqlite.up);
-        assert!(
-            sqlite.down.contains("\"status\" varchar(8)"),
-            "{}",
-            sqlite.down
-        );
+        // SQLite stores the label as text in the rows: nothing beyond the
+        // backfill, the longest label included, since the column's declared
+        // length is not schema there (ADR-0034).
+        for labels in [["draft", "gone", "live"], ["draft", "canceled", "live"]] {
+            let migration = edit(
+                with_status(&labels, false),
+                with_status(&["draft", "live"], false),
+                &BOTH,
+            );
+            assert_eq!(
+                step_names(&migration),
+                ["01_backfill_author", "02_contract"]
+            );
+            let sqlite = step(&migration, "02_contract", Dialect::Sqlite);
+            assert_eq!(sqlite.up, NOT_APPLICABLE);
+            assert_eq!(sqlite.down, NOT_APPLICABLE);
+        }
     }
 
     #[test]

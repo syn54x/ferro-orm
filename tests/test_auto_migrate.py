@@ -533,6 +533,58 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
+async def test_sqlite_a_declared_length_is_no_type_change(db_url, clean_registry):
+    """SQLite does not enforce the length in `varchar(8)`, the type an enum
+    column was created with: a `str` field over it is the same column (#614)."""
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "miglength" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "status" varchar(8) NOT NULL)'
+        )
+    ferro.reset_engine()
+
+    class MigLength(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: str
+
+    report = await auto_migrate(db_url, destructive=True)
+
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_a_live_text_column_under_a_str_field_warns_and_runs_nothing(
+    db_url, clean_registry
+):
+    """`text` and `varchar` are two type names, a change the planner plans:
+    the pass reports every one it plans, with no comparison of its own (#614)."""
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migtext" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "body" text NOT NULL)'
+        )
+    ferro.reset_engine()
+
+    class MigText(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        body: str
+
+    with pytest.warns(UserWarning, match=r"migtext\.body.*ferro migrate new"):
+        report = await auto_migrate(db_url, destructive=True)
+
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Column 'migtext.body' is declared 'text' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+    ]
+    assert _sqlite_columns(db_url, "migtext")["body"][2].lower() == "text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_sqlite_bytes_field_does_not_false_positive_blob_drift(
     db_url, clean_registry
 ):
