@@ -3112,36 +3112,70 @@ fn lex_check_sql(input: &str) -> Vec<(CheckToken, bool)> {
     tokens
 }
 
-/// The words of a check's SQL that are never a bare column reference: a
-/// column a keyword names is written quoted.
+/// The words of a check's SQL that are not a bare column reference: a column
+/// a keyword names is written quoted. `any` and `valid` are not here, since
+/// SQLite never reads either as an operator in a check. The
+/// [`POSITIONAL_KEYWORDS`] are here but count only where they act as the
+/// keyword. `true` and `false` stay: SQLite lets that drop run, so nothing
+/// fails.
 const CHECK_KEYWORDS: &[&str] = &[
-    "all", "and", "any", "as", "between", "case", "cast", "check", "collate", "distinct", "else",
-    "end", "escape", "exists", "false", "from", "glob", "in", "is", "isnull", "like", "match",
-    "not", "notnull", "null", "or", "regexp", "then", "true", "valid", "when",
+    "all", "and", "as", "between", "case", "cast", "check", "collate", "distinct", "else", "end",
+    "escape", "exists", "false", "from", "glob", "in", "is", "isnull", "like", "match", "not",
+    "notnull", "null", "or", "regexp", "then", "true", "when",
 ];
+
+/// The keywords SQLite reads as one only after an operand (`name LIKE 'a%'`,
+/// `... ELSE 0 END`) and as a column name anywhere else (`x > end`).
+const POSITIONAL_KEYWORDS: &[&str] = &["end", "glob", "like", "match", "regexp"];
 
 /// Whether the check whose stored SQL is `definition` (`CHECK (…)`, as the
 /// catalog holds it) references `column`: a double-quoted identifier that is
-/// its name, or a bare one that is no keyword ([`CHECK_KEYWORDS`]). A name
-/// followed by `(` is a call and a string literal's contents are text, so
-/// neither is a reference. Names compare without case, as SQLite resolves
+/// its name, or a bare one that is no keyword ([`CHECK_KEYWORDS`]). A
+/// positional keyword is the keyword when the token before it closes an
+/// operand: a string, a number, `)`, a quoted name, a bare word that is no
+/// keyword, `null`, `true`, `false`, `isnull`, `notnull`, an `end` that is
+/// itself the keyword, or a `not` whose own previous token closes an operand.
+/// A name followed by `(` is a call and a string literal's contents are text,
+/// so neither is a reference. Names compare without case, as SQLite resolves
 /// them. A word the read cannot place (a number's exponent, a `[bracketed]`
 /// name) counts as a reference, so its column is kept.
 pub fn check_definition_reads_column(definition: &str, column: &str) -> bool {
     let tokens = lex_check_sql(definition);
-    tokens.iter().enumerate().any(|(at, (token, quoted))| {
-        let CheckToken::Word(word) = token else {
-            return false;
+    // Whether the token before the current one closes an operand.
+    let mut closes_before = false;
+    for (at, (token, quoted)) in tokens.iter().enumerate() {
+        let closes = match token {
+            CheckToken::String(_) => true,
+            CheckToken::Punct(ch) => *ch == ')' || ch.is_ascii_digit(),
+            CheckToken::Word(word) => {
+                // A quoted name that is no simple identifier keeps its quotes.
+                let name = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+                    Some(inner) if *quoted => inner.replace("\"\"", "\""),
+                    _ => word.clone(),
+                };
+                let lower = name.to_ascii_lowercase();
+                let called = matches!(tokens.get(at + 1), Some((CheckToken::Punct('('), _)));
+                let listed = !quoted && CHECK_KEYWORDS.contains(&lower.as_str());
+                let positional = POSITIONAL_KEYWORDS.contains(&lower.as_str());
+                let keyword = listed && (closes_before || !positional);
+                if name.eq_ignore_ascii_case(column) && !called && !keyword {
+                    return true;
+                }
+                if !listed {
+                    true
+                } else {
+                    match lower.as_str() {
+                        "null" | "true" | "false" | "isnull" | "notnull" | "end" => true,
+                        "not" => closes_before,
+                        // A positional word read as a column closes the operand.
+                        _ => positional && !keyword,
+                    }
+                }
+            }
         };
-        // A quoted name that is no simple identifier keeps its quotes.
-        let name = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
-            Some(inner) if *quoted => inner.replace("\"\"", "\""),
-            _ => word.clone(),
-        };
-        let called = matches!(tokens.get(at + 1), Some((CheckToken::Punct('('), _)));
-        let keyword = !quoted && CHECK_KEYWORDS.contains(&name.to_ascii_lowercase().as_str());
-        name.eq_ignore_ascii_case(column) && !called && !keyword
-    })
+        closes_before = closes;
+    }
+    false
 }
 
 fn take_quoted(chars: &[char], start: usize, quote: char) -> (String, usize) {
