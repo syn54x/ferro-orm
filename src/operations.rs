@@ -3551,10 +3551,18 @@ async fn build_fetch(
             };
             apply_order_by_term(&mut select, col.into(), order)?;
         }
-        if let Some(limit) = plan.limit.flatten() {
-            select.limit(limit);
+        let offset = plan.offset.flatten();
+        match (plan.limit.flatten(), offset) {
+            (Some(limit), _) => {
+                select.limit(limit);
+            }
+            // SQLite takes OFFSET only after a LIMIT; i64::MAX is no limit.
+            (None, Some(_)) if matches!(backend, crate::state::Dialect::Sqlite) => {
+                select.limit(i64::MAX as u64);
+            }
+            _ => {}
         }
-        if let Some(offset) = plan.offset.flatten() {
+        if let Some(offset) = offset {
             select.offset(offset);
         }
         let (sql, values) = sea_query_build_for_backend!(select, backend);
