@@ -4838,3 +4838,60 @@ async def test_a_failed_create_rolls_back_the_tables_that_reference_each_other(
             "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace"
         )
         assert rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize(
+    ("column", "body", "read"),
+    [
+        ("age", "age > 0", True),
+        ("valid", "valid IN (0, 1)", True),
+        ("any", "x IN (any, 1)", True),
+        ("end", "x > end", True),
+        ("end", "CASE WHEN x > 0 THEN end ELSE 0 END = 1", True),
+        ("end", "CASE WHEN x > 0 THEN 1 ELSE 0 END = 1", False),
+        ("end", "CASE WHEN x > 0 THEN NULL END IS NULL", False),
+        ("like", "NOT like", True),
+        ("like", "name LIKE like", True),
+        ("like", "like LIKE 'a%'", True),
+        ("like", "name LIKE 'a%'", False),
+        ("like", "name NOT LIKE 'a%'", False),
+        ("glob", "name GLOB 'a*'", False),
+        ("match", "x = match", True),
+        ("regexp", "regexp IS NOT NULL", True),
+    ],
+)
+async def test_destructive_reads_a_bare_keyword_named_column_in_a_hand_written_check_on_sqlite(
+    db_url, clean_registry, column, body, read
+):
+    import sqlite3
+
+    class Gadget(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        x: int
+
+    conn = sqlite3.connect(db_url.removeprefix("sqlite:").split("?", 1)[0])
+    try:
+        conn.execute(
+            'CREATE TABLE "gadget" ("id" integer PRIMARY KEY AUTOINCREMENT, '
+            '"name" varchar NOT NULL, "x" integer NOT NULL, '
+            f'"{column}" integer, CONSTRAINT "gadget_rule" CHECK ({body}))'
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if read:
+        report = await warned_auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == []
+        [warning] = [w for w in report.warnings if w.kind == "SqliteInPlace"]
+        assert warning.subject.table == "gadget"
+        assert warning.subject.column == column
+        assert column in _sqlite_columns(db_url, "gadget")
+    else:
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == [
+            ("gadget", f'ALTER TABLE "gadget" DROP COLUMN "{column}"')
+        ]
