@@ -916,3 +916,62 @@ async def test_generated_teardown_revision_round_trips(
         assert flags["relrowsecurity"] is True
         assert flags["relforcerowsecurity"] is True
         assert await _pg_policy_names("ledgerrow") == [POLICY_NAME]
+
+
+# ---------------------------------------------------------------------------
+# A policy may read a table the same revision creates (#753)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_policy_may_read_a_table_the_same_revision_creates(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``document`` is created first and its policy reads ``membership``: the
+    upgrade creates both tables before any row security, and the downgrade
+    drops the policy before either table, which Postgres would otherwise
+    refuse to drop under it."""
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="members",
+                using='"owner_id" IN (SELECT user_id FROM membership)',
+            ),
+        )
+
+    class Membership(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        user_id: int
+
+    await connect(db_url)  # register the models; never create the tables
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    enable = 'ALTER TABLE "document" ENABLE ROW LEVEL SECURITY'
+    _assert_statement_in_code(enable, upgrade_code)
+    assert upgrade_code.count("op.create_table(") == 2, upgrade_code
+    assert upgrade_code.rindex("op.create_table(") < upgrade_code.index(repr(enable))
+    drop_policy = 'DROP POLICY "rls_document_members" ON "document"'
+    _assert_statement_in_code(drop_policy, downgrade_code)
+    assert downgrade_code.index(repr(drop_policy)) < downgrade_code.index(
+        "op.drop_table("
+    )
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        assert await _pg_policy_names("document") == ["rls_document_members"]
+
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT relname FROM pg_class WHERE relname IN ('document', 'membership') "
+            "AND relnamespace = current_schema()::regnamespace"
+        )
+        assert rows == []

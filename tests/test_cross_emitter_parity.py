@@ -2054,9 +2054,7 @@ def _plan_live(
     )["operations"]
 
 
-_SAID_OF_AN_OP = frozenset(
-    {"verdict", "statements", "reports", "row_security_statements"}
-)
+_SAID_OF_AN_OP = frozenset({"verdict", "statements", "reports"})
 
 
 def _bare_op(op: dict) -> dict:

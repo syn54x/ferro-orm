@@ -1305,20 +1305,54 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
         plan_enum_label_removals(old.ir(), new.ir(), &mut plan);
     }
 
+    // Every new table first, then every new table's row security: a policy
+    // may read any table of the plan, and no order of the tables could give
+    // it that (a raw body is not parsed, ADR-0019, and two policies may read
+    // each other's tables) (#753).
+    let mut row_security = Vec::new();
     for model in emit::order_models_for_create(&added) {
         plan.operations.push(MigrationOp::AddTable {
             table: model.table_name.clone(),
         });
-        plan.operations
-            .extend(beyond_the_create(new, model, dialect));
+        let (checks, security): (Vec<MigrationOp>, Vec<MigrationOp>) =
+            beyond_the_create(new, model, dialect)
+                .into_iter()
+                .partition(|op| matches!(op, MigrationOp::AddCheck { .. }));
+        plan.operations.extend(checks);
+        row_security.extend(security);
     }
+    plan.operations.extend(row_security);
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
         plan_existing_table(old, new, old_model, new_model, dialect, options, &mut plan);
     }
 
     if options.destructive {
-        for model in emit::order_models_for_create(&dropped).into_iter().rev() {
+        let dropped: Vec<&SchemaModel> = emit::order_models_for_create(&dropped)
+            .into_iter()
+            .rev()
+            .collect();
+        // Postgres refuses to drop a table another table's policy reads, so
+        // every ferro-owned policy of a dropped table goes before the first
+        // `DROP TABLE`. The flags stay: the drop takes them. A policy ferro
+        // does not own is never touched (ADR-0019).
+        if dialect == Dialect::Postgres {
+            for model in &dropped {
+                let facts = old.table_facts(model);
+                plan.operations.extend(
+                    facts
+                        .row_security
+                        .policies
+                        .iter()
+                        .filter(|policy| policy.ferro_owned)
+                        .map(|policy| MigrationOp::DropRowPolicy {
+                            table: model.table_name.clone(),
+                            name: policy.name.clone(),
+                        }),
+                );
+            }
+        }
+        for model in dropped {
             plan.operations.push(MigrationOp::DropTable {
                 table: model.table_name.clone(),
             });
@@ -1332,10 +1366,11 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
 }
 
 /// What a table `side` holds needs beyond its `CREATE TABLE`, which renders
-/// the table's IR: each check, row-security flag and policy its facts hold
-/// that its IR does not declare. A declaration's facts are its IR, so it
-/// needs nothing more; a live table's checks and row security are facts
-/// only, put back after the table as the catalog printed them.
+/// the table's columns, indexes and declared checks: each check its facts
+/// hold that its IR does not declare (a live table's, put back as the
+/// catalog printed it), then, on Postgres, its row security as the side
+/// holds it: `ENABLE`, `FORCE`, each policy. The caller runs the row
+/// security after the last `AddTable` of the plan.
 fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<MigrationOp> {
     let table = model.table_name.as_str();
     let facts = side.table_facts(model);
@@ -1352,19 +1387,17 @@ fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<
     if dialect != Dialect::Postgres {
         return ops;
     }
-    let declared = model.row_security.as_ref();
-    let live = &facts.row_security;
-    if live.enabled && declared.is_none() {
+    let security = &facts.row_security;
+    if security.enabled {
         ops.push(flag_op(table, RowSecurityFlag::Enable));
     }
-    if live.forced && !declared.is_some_and(|declaration| declaration.force) {
+    if security.forced {
         ops.push(flag_op(table, RowSecurityFlag::Force));
     }
-    let declared_policies = declared_row_policy_names(model);
     ops.extend(
-        live.policies
+        security
+            .policies
             .iter()
-            .filter(|policy| !declared_policies.contains(&policy.name))
             .map(|policy| MigrationOp::AddRowPolicy {
                 table: table.to_string(),
                 name: policy.name.clone(),
@@ -2646,6 +2679,10 @@ pub enum Rider {
     DroppedColumn,
     /// An index, check or foreign key over a column the same plan adds.
     AddedColumn,
+    /// A ferro-owned row policy of a table the same plan drops, dropped
+    /// ahead of the plan's first `DROP TABLE` (#753): it goes when its table
+    /// goes, never earlier.
+    DroppedTable,
     /// A change an enum label's removal makes to a column that held it
     /// (#536): the column's own check rebuilt to the labels left, or its
     /// storage narrowed to them. It runs once no row holds the label.
@@ -2875,7 +2912,9 @@ fn fails_on_rows(op: &MigrationOp, now: Option<&SchemaModel>) -> RowRisk {
 pub(crate) fn goes_with(op: &MigrationOp, before: &Side, target: &Side) -> Option<Rider> {
     let table = op.table()?;
     let (Some(was), Some(now)) = (before.model(table), target.model(table)) else {
-        return None;
+        let dropped = before.model(table).is_some() && target.model(table).is_none();
+        return (dropped && matches!(op, MigrationOp::DropRowPolicy { .. }))
+            .then_some(Rider::DroppedTable);
     };
     let dropped = |name: &str| {
         find_column(Some(was), name).is_some() && find_column(Some(now), name).is_none()

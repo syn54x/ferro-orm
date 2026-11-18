@@ -684,7 +684,15 @@ fn summarize(
                 labels_removed.insert(format!("{type_name}.{label}"));
             }
             other => {
-                if let Some(table) = other.table() {
+                // An op on a table the migration creates or drops (its row
+                // security, #753) is part of the new or the dropped model.
+                let whole = |op: &MigrationOp| {
+                    matches!(op, MigrationOp::AddTable { table } | MigrationOp::DropTable { table }
+                        if Some(table.as_str()) == other.table())
+                };
+                if let Some(table) = other.table()
+                    && !ups.iter().flatten().any(whole)
+                {
                     changed.insert(model_of(target, table));
                 }
             }
@@ -1451,12 +1459,14 @@ mod tests {
             .expect("load")
     }
 
-    /// Every statement the create pass executes for `model`, in its order.
+    /// Every statement the create pass executes for `model` alone, in its
+    /// order: its row security last, after the pass's last `CREATE TABLE`.
     pub(super) fn create_pass(model: &SchemaModel, dialect: Dialect) -> Vec<String> {
         let emission = render_create_table(model, dialect).expect("create");
         let mut out = emission.pre_create_sqls;
         out.push(emission.create_sql);
         out.extend(emission.post_create_sqls);
+        out.extend(emission.row_security_sqls);
         out
     }
 
@@ -4624,7 +4634,7 @@ mod tests {
     }
 
     #[test]
-    fn b1_a_new_table_with_row_security_creates_it_after_the_table_and_drops_only_the_table() {
+    fn b1_a_new_table_with_row_security_creates_it_after_the_table_and_drops_its_policy_first() {
         let after = order(Some((true, vec![tenant_policy("app.tenant")])));
         let migration = edit(vec![], vec![after.clone()], &BOTH);
         let pg = step(&migration, "01_schema", Dialect::Postgres);
@@ -4643,10 +4653,38 @@ mod tests {
             ]
         );
         assert_eq!(pg.up.matches("CREATE POLICY").count(), 1, "{}", pg.up);
-        assert_eq!(pg.down, "DROP TABLE \"order\";\n");
+        // The policy goes ahead of the table (another table's drop could
+        // wait on it, #753); the flags go with the table.
+        assert_eq!(
+            pg.down,
+            file(
+                &[
+                    drop_policy("rls_order_tenant_id"),
+                    "DROP TABLE \"order\"".to_string()
+                ],
+                ""
+            )
+        );
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
         assert!(!sqlite.up.contains("POLICY"), "{}", sqlite.up);
         assert_eq!(sqlite.down, "DROP TABLE \"order\";\n");
+        // A new table's row security is part of the new model, and a dropped
+        // table's policy part of the dropped one: neither is a changed model.
+        assert_eq!(migration.summary.text, "new models: Order");
+        let dropping = edit(vec![after.clone()], vec![], &BOTH);
+        assert_eq!(dropping.summary.text, "dropped models: Order");
+        // Beside a data step the policy waits for the contract with its
+        // table: the data step may still read the table, and a forced table
+        // with no policy shows it no row.
+        let drops = plan(&ir(vec![after]), &ir(vec![]), Dialect::Postgres);
+        assert_eq!(
+            drops
+                .operations
+                .iter()
+                .map(|op| phase_of(op, true))
+                .collect::<Vec<_>>(),
+            [Ok(Phase::Contract), Ok(Phase::Contract)]
+        );
     }
 
     #[test]

@@ -334,15 +334,15 @@ def _foreign_key(written: dict[str, Any]) -> list[ops.MigrateOperation]:
 def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     """Alembic's own op(s) for one revision op the core writes as its twin,
     built from the side the revision leads to; a statement of the pass's
-    beyond the one the twin stands for (an index riding an added column, a
-    row-security statement after a created table) runs as written."""
+    beyond the one the twin stands for (an index riding an added column)
+    runs as written."""
     op = written["op"]
     kind = op["kind"]
     statements: list[str] = written["statements"]
     if kind == "AddTable":
-        return _create_table(target, op["table"]) + _executed(
-            written, written["row_security_statements"]
-        )
+        # A new table's row security is the planner's own ops, after its
+        # last ``AddTable``.
+        return _create_table(target, op["table"])
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
     # A serial key's sequence follows a rename on Postgres: the pass's

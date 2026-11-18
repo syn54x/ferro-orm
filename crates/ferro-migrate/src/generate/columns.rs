@@ -60,7 +60,7 @@ impl Phase {
 /// | an enum label added | labels |
 /// | demands values of existing rows | backfill (the migration's expand → backfill → contract) |
 /// | rides a removed label (its column's check, its storage) | contract |
-/// | drops data, or goes with a dropped column, beside a data step | contract |
+/// | drops data, or goes with a dropped column or table, beside a data step | contract |
 /// | an index built, dropped or redefined on a table that stays, also over a column the migration adds (ADR-0044) | index |
 /// | anything else, natively or by a SQLite rebuild | schema |
 pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
@@ -78,7 +78,12 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     } else if verdict.goes_with == Some(Rider::RemovedLabel) {
         // After the backfill has moved every row off the label.
         Phase::Contract
-    } else if data_steps && (verdict.drops_data || verdict.goes_with == Some(Rider::DroppedColumn))
+    } else if data_steps
+        && (verdict.drops_data
+            || matches!(
+                verdict.goes_with,
+                Some(Rider::DroppedColumn | Rider::DroppedTable)
+            ))
     {
         Phase::Contract
     } else if matches!(

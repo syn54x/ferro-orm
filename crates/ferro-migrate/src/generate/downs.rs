@@ -496,7 +496,10 @@ mod tests {
         let empty = ir(vec![]);
         let with = ir(vec![guarded.clone()]);
         let created = render(&empty, &with, Dialect::Postgres);
-        assert_eq!(created.down, "DROP TABLE \"ledger\";\n");
+        assert_eq!(
+            created.down,
+            "DROP POLICY \"rls_ledger_owner_id\" ON \"ledger\";\n\nDROP TABLE \"ledger\";\n"
+        );
         let dropped = render(&with, &empty, Dialect::Postgres);
         assert_eq!(
             dropped.down,

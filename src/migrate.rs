@@ -353,6 +353,18 @@ pub(crate) fn pass_attempt_warning(subject: Subject, attempt: &crate::ddl_exec::
     ddl_lock_retry_warning(subject, &attempt.describe())
 }
 
+/// The table a lock wait of a unit over `tables` is reported under: the
+/// one the waiting statement names (`waited_on`) when it is one of the
+/// unit's, else the unit's first. A unit of one table is always that table.
+pub(crate) fn lock_wait_table<'a>(tables: &[&'a str], waited_on: &Option<String>) -> &'a str {
+    tables
+        .iter()
+        .copied()
+        .find(|table| waited_on.as_deref() == Some(table))
+        .or(tables.first().copied())
+        .unwrap_or_default()
+}
+
 /// The error for a create or reconciliation unit that timed out on every
 /// attempt: `OperationalError` naming `ddl_lock_timeout`.
 pub(crate) fn pass_lock_timeout_error(
@@ -510,6 +522,10 @@ fn type_name_of(op: &MigrationOp) -> &str {
 /// A mid-plan failure leaves the table exactly as it was, so a failed run is
 /// safely re-runnable. SQLite runs statement at a time, with each column
 /// drop going through its index-dependency path, and sets no timeout.
+///
+/// On Postgres the group may hold the ops of several new tables
+/// ([`new_tables_unit`]): each statement is reported, and its failure named,
+/// under its own op's table, and `table` is the first of them.
 /// What ran (or committed before a failure) goes into `report`. Returns how
 /// many statements ran and how many columns were dropped.
 async fn execute_table_ops(
@@ -545,19 +561,31 @@ async fn execute_table_ops(
         .flat_map(|op| op.statements.iter().map(move |sql| (*op, sql)))
         .collect();
     let sqls: Vec<&String> = ops_statements.iter().map(|(_, sql)| *sql).collect();
+    let tables: Vec<&str> = ops_statements
+        .iter()
+        .map(|(op, _)| op.op.table().unwrap_or(table))
+        .collect();
     let result = ddl
         .run(
             engine,
             Unit::Transactional,
-            Sender::Pass(table),
+            Sender::PassEach(&tables),
             &sqls,
-            |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
+            |attempt| {
+                report.warn(pass_attempt_warning(
+                    Subject::table(lock_wait_table(&tables, &attempt.table)),
+                    &attempt,
+                ))
+            },
             None,
         )
         .await;
     match report.unit(result) {
         Ok(()) => Ok((statements - drops, drops)),
-        Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(table, &timeout)),
+        Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(
+            lock_wait_table(&tables, &timeout.table),
+            &timeout,
+        )),
         Err(DdlError::Failed(Failed { index, error, .. })) => {
             Err(match index.and_then(|index| ops_statements.get(index)) {
                 Some((
@@ -568,6 +596,7 @@ async fn execute_table_ops(
                     _,
                 )) => map_drop_column_error(table, column, error),
                 Some((op, sql)) => {
+                    let table = op.op.table().unwrap_or(table);
                     map_op_statement_error(engine, table, &op.op, declared, sql, error).await
                 }
                 None => crate::errors::map_db_error(
@@ -932,16 +961,24 @@ async fn run_passes(
     // Which tables are read is the one rule every emitter reads by
     // ([`tables_to_read`], ADR-0047).
     let live_names: BTreeSet<String> = tables_before_create.iter().cloned().collect();
-    let (renames, adds_after_renames) = match live_table_renames(&live_names, &modelset.payload) {
+    let (renames, mut adds_after_renames) = match live_table_renames(&live_names, &modelset.payload)
+    {
         Ok(renames) => (renames, created.held_back.clone()),
         Err(_) => (Vec::new(), BTreeSet::new()),
     };
+    // The new tables the create pass left to this plan, whose ops create
+    // them with their row security where the plan puts it (#753).
+    adds_after_renames.extend(created.left_to_plan.iter().cloned());
     let built: Vec<String> = modelset
         .payload
         .models
         .iter()
         .map(|model| model.table_name.clone())
-        .filter(|table| !tables_before_create.contains(table) && !created.held_back.contains(table))
+        .filter(|table| {
+            !tables_before_create.contains(table)
+                && !created.held_back.contains(table)
+                && !created.left_to_plan.contains(table)
+        })
         .collect();
     let existing = tables_to_read(&engine, &modelset, &built, &[]).await?;
     // The tables this pass reconciles, by their declared names: the renamed
@@ -1001,12 +1038,25 @@ async fn run_passes(
         plan.reports.iter().partition(|report| report.recurs);
     let mut ddl_ran = false;
     let mut index = 0;
+    // The tables the plan adds: the create pass's own, which have already
+    // been created with their row security, and the ones it held back for a
+    // rename, which are created here, after the renames they wait on.
+    let added: BTreeSet<&str> = rendered
+        .iter()
+        .filter_map(|rendered| match &rendered.op {
+            MigrationOp::AddTable { table } => Some(table.as_str()),
+            _ => None,
+        })
+        .collect();
+    let created_by_pass = |op: &MigrationOp| {
+        op.table()
+            .is_some_and(|table| added.contains(table) && !adds_after_renames.contains(table))
+    };
     while index < rendered.len() {
         let current = &rendered[index];
-        // An add is the create pass's, which has already run — except a
-        // table it held back for a rename, which is created here, after the
-        // renames it waits on.
-        if is_create_pass_add(&current.op, &adds_after_renames) {
+        // Every op on a table the create pass built is the create pass's,
+        // which has already run: the add and the table's row security.
+        if created_by_pass(&current.op) {
             index += 1;
             continue;
         }
@@ -1039,15 +1089,22 @@ async fn run_passes(
             index += 1;
             continue;
         };
-        let group: Vec<&RenderedOp> = rendered[index..]
-            .iter()
-            .take_while(|op| op.op.table() == Some(table))
-            .filter(|op| !is_create_pass_add(&op.op, &adds_after_renames))
-            .collect();
-        let consumed = rendered[index..]
-            .iter()
-            .take_while(|op| op.op.table() == Some(table))
-            .count();
+        let (group, consumed) = match new_tables_unit(&rendered[index..], &added) {
+            Some(unit) => (
+                unit.iter()
+                    .filter(|op| !created_by_pass(&op.op))
+                    .collect::<Vec<&RenderedOp>>(),
+                unit.len(),
+            ),
+            None => {
+                let group: Vec<&RenderedOp> = rendered[index..]
+                    .iter()
+                    .take_while(|op| op.op.table() == Some(table))
+                    .collect();
+                let consumed = group.len();
+                (group, consumed)
+            }
+        };
         let (statements, dropped) =
             execute_table_ops(&engine, table, &group, &modelset, backend, &ddl, report).await?;
         if statements + dropped > 0 {
@@ -1192,10 +1249,33 @@ async fn stranded_label_warnings(
     Ok(warnings)
 }
 
-/// An `AddTable` the create pass executed: every add but those of the tables
-/// it held back for a rename (`after_renames`).
-fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> bool {
-    matches!(op, MigrationOp::AddTable { table } if !after_renames.contains(table))
+/// The ops at the head of `rendered` that create the plan's new tables
+/// (`added`) when they run as one unit: every op up to the last on a new
+/// table, when one of them is a table's row security. The planner puts each
+/// new table's flags and policies after the last `AddTable`, so that a
+/// policy may read any of them; the tables then commit with their row
+/// security or not at all, as the create pass's do (#753). `None` when
+/// `rendered` does not start on a new table or no new table has row security:
+/// each table is then its own unit.
+fn new_tables_unit<'a>(
+    rendered: &'a [RenderedOp],
+    added: &BTreeSet<&str>,
+) -> Option<&'a [RenderedOp]> {
+    let len = rendered
+        .iter()
+        .take_while(|op| op.op.table().is_some_and(|table| added.contains(table)))
+        .count();
+    let unit = &rendered[..len];
+    unit.iter()
+        .any(|op| {
+            matches!(
+                op.op,
+                MigrationOp::EnableRowSecurity { .. }
+                    | MigrationOp::ForceRowSecurity { .. }
+                    | MigrationOp::AddRowPolicy { .. }
+            )
+        })
+        .then_some(unit)
 }
 
 /// Manually run the auto-migrate pass against a connected engine.
@@ -1344,7 +1424,7 @@ pub fn _render_migration_sql_for_test(
 ///
 /// The result is a dict: `{"upgrade": [op…], "downgrade": [op…], "reports":
 /// [report…], "refusal": None}`, each op `{"op": {"kind": …, <fields>},
-/// "statements", "row_security_statements", "twin", "index", "marker",
+/// "statements", "twin", "index", "marker",
 /// "irreversible"}` ([`ferro_migrate::RevisionOp`]) and each report in the
 /// plan's report shape; or, when no revision is written, the same keys
 /// empty with `"refusal": {"kind", "text", "op"}`, `text` the sentence after
@@ -1486,8 +1566,7 @@ fn reports_json(reports: &[Report]) -> PyResult<serde_json::Value> {
     })
 }
 
-/// One rendered op as plan JSON: the op, its `statements` and `reports`,
-/// and an `AddTable`'s `row_security_statements`.
+/// One rendered op as plan JSON: the op, its `statements` and `reports`.
 fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
     let mut op = serde_json::to_value(&rendered.op).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
@@ -1495,12 +1574,6 @@ fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
     if let Some(fields) = op.as_object_mut() {
         fields.insert("statements".into(), rendered.statements.into());
         fields.insert("reports".into(), reports_json(&rendered.reports)?);
-        if matches!(rendered.op, MigrationOp::AddTable { .. }) {
-            fields.insert(
-                "row_security_statements".into(),
-                rendered.row_security_statements.into(),
-            );
-        }
     }
     Ok(op)
 }
@@ -1591,8 +1664,7 @@ pub fn _plan_from_ir(
 /// `plan` as the FFI's plan JSON: `{"operations": [{"kind": …, <op fields>,
 /// "verdict": {…}}], "reports": […]}` — each op beside its verdict (the one
 /// every emitter reads, ADR-0050). With `render`, each op also carries the
-/// `statements` and `reports` it renders to (and an `AddTable` its
-/// `row_security_statements`).
+/// `statements` and `reports` it renders to.
 fn plan_json(plan: &Plan, render: bool) -> PyResult<String> {
     let to_value = |value: serde_json::Result<serde_json::Value>| {
         value.map_err(|e| {

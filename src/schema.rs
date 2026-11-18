@@ -5,7 +5,7 @@
 
 use crate::backend::EngineHandle;
 use crate::ddl_exec::{DdlError, DdlExecutor, Failed, Sender, Unit};
-use crate::migrate::{PassReport, pass_attempt_warning, pass_lock_timeout_error};
+use crate::migrate::{PassReport, lock_wait_table, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY};
 use ferro_migrate::Subject;
 use ferro_migrate::plan::{
@@ -40,6 +40,17 @@ use std::sync::Arc;
 /// waiting behind an open write on it would queue every query on the parent
 /// behind the `CREATE TABLE`. A table that times out is rolled back and
 /// created again from the top; an enum type statement re-runs alone.
+///
+/// Each new table is its own transaction ([`run_create_unit`]), unless one
+/// of them declares row security on Postgres. Then they are one
+/// transaction, in the one planner's order: every table first and every
+/// table's row security after the last, so a policy may read any table of
+/// the pass and a failure leaves none of them (ADR-0049 as amended, #753).
+/// When the reconciliation pass follows, that unit is its own: this pass
+/// creates none of them ([`CreatePass::left_to_plan`]) and the plan's ops
+/// do, after the renames and beside the tables held back for one, which a
+/// policy may read too. Otherwise this pass runs the unit
+/// ([`planned_create_unit`]).
 ///
 /// What it executes and warns goes into `report` (ADR-0049).
 ///
@@ -152,6 +163,23 @@ pub async fn internal_create_tables(
         to_create.push((model, emission));
     }
 
+    // New tables with row security among them are one unit in the plan's
+    // order. A plan follows: it creates them, where it puts them.
+    let policed = dialect == Dialect::Postgres
+        && to_create
+            .iter()
+            .any(|(_, emission)| !emission.row_security_sqls.is_empty());
+    if policed && reconciliation_follows {
+        return Ok(CreatePass {
+            existing: existing_tables,
+            held_back: held_back.into_keys().collect(),
+            left_to_plan: to_create
+                .iter()
+                .map(|(model, _)| model.table_name.clone())
+                .collect(),
+        });
+    }
+
     // Every native enum type the created tables declare comes into being
     // ahead of every table, by type name — the one planner's order (a type
     // comes into being before any table op that uses it), so a generated
@@ -217,8 +245,14 @@ pub async fn internal_create_tables(
         })?;
     }
 
+    if policed {
+        let unit = planned_create_unit(&modelset, &to_create, dialect)?;
+        run_create_unit(&engine, &unit, ddl, report).await?;
+    }
     for (model, emission) in &to_create {
-        create_one_table(&engine, model, emission, ddl, report).await?;
+        if !policed {
+            run_create_unit(&engine, &table_steps(model, emission), ddl, report).await?;
+        }
 
         for warning in &emission.reports {
             report.warn(warning.clone());
@@ -233,6 +267,7 @@ pub async fn internal_create_tables(
     Ok(CreatePass {
         existing: existing_tables,
         held_back: held_back.into_keys().collect(),
+        left_to_plan: BTreeSet::new(),
     })
 }
 
@@ -244,6 +279,11 @@ pub struct CreatePass {
     /// table rename: a table whose live hint names a live table, and every
     /// new table that references one, directly or through another.
     pub held_back: BTreeSet<String>,
+    /// The new tables the pass left to the reconciliation pass's plan: every
+    /// table it would have created, when one of them declares row security
+    /// on Postgres and a reconciliation follows. The plan creates them as
+    /// one unit with their row security, after its renames (#753).
+    pub left_to_plan: BTreeSet<String>,
 }
 
 /// The declared tables absent live that wait on a table rename, each with
@@ -324,65 +364,155 @@ fn warn_pending_renames(
     }
 }
 
-/// Execute one model's create emission — `CREATE TABLE` and every
-/// post-create artifact (indexes, checks, row-security flags and
-/// policies) — as ONE unit. Its enum types were created ahead of every table
-/// by [`internal_create_tables`].
+/// One statement of a create unit: its table, what it creates there (`table`
+/// or `artifact`, for the error that names it) and the SQL.
+type CreateStep = (String, &'static str, String);
+
+/// The create pass's statements for one new table: its `CREATE TABLE`, then
+/// its indexes and checks. Its row security is the plan's
+/// ([`planned_create_unit`]).
+fn table_steps(
+    model: &SchemaModel,
+    emission: &ferro_migrate::CreateTableEmission,
+) -> Vec<CreateStep> {
+    let table = &model.table_name;
+    std::iter::once((table.clone(), "table", emission.create_sql.clone()))
+        .chain(
+            emission
+                .post_create_sqls
+                .iter()
+                .map(|sql| (table.clone(), "artifact", sql.clone())),
+        )
+        .collect()
+}
+
+/// The statements that create `to_create` in the one planner's order: the
+/// plan from no tables to these models, each `AddTable` as the create pass
+/// emits it ([`table_steps`]) and every other op (a new table's row-security
+/// flags and policies, after the last `AddTable`) as the plan renders it.
+/// The pass orders nothing itself (AGENTS.md § I-1, #753). The plan's enum
+/// type ops are left out: [`internal_create_tables`] created the types ahead
+/// of every table.
+fn planned_create_unit(
+    modelset: &ferro_schema_ir::IrEnvelope<SchemaIrPayload>,
+    to_create: &[(&SchemaModel, ferro_migrate::CreateTableEmission)],
+    dialect: Dialect,
+) -> PyResult<Vec<CreateStep>> {
+    let snapshot = |models: Vec<SchemaModel>| ferro_schema_ir::IrEnvelope {
+        ir_kind: modelset.ir_kind.clone(),
+        ir_version: modelset.ir_version,
+        payload: SchemaIrPayload {
+            dialect_agnostic: modelset.payload.dialect_agnostic,
+            models,
+        },
+    };
+    let plan = ferro_migrate::plan_from_ir(
+        &ferro_migrate::Side::declared(snapshot(Vec::new())),
+        &ferro_migrate::Side::declared(snapshot(
+            to_create
+                .iter()
+                .map(|(model, _)| (*model).clone())
+                .collect(),
+        )),
+        dialect,
+        ferro_migrate::PlanOptions { destructive: false },
+    );
+    let rendered = plan
+        .render()
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
+    let mut unit = Vec::new();
+    for op in rendered {
+        match (&op.op, op.op.table()) {
+            (ferro_migrate::MigrationOp::AddTable { table }, _) => {
+                let (model, emission) = to_create
+                    .iter()
+                    .find(|(model, _)| &model.table_name == table)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "the plan creates '{table}', which the create pass does not; this \
+                             is a ferro bug, please file an issue"
+                        ))
+                    })?;
+                unit.extend(table_steps(model, emission));
+            }
+            (_, Some(table)) => unit.extend(
+                op.statements
+                    .into_iter()
+                    .map(|sql| (table.to_string(), "artifact", sql)),
+            ),
+            (_, None) => {}
+        }
+    }
+    Ok(unit)
+}
+
+/// Execute `steps` as ONE unit under the DDL lock timeout: one new table
+/// with its indexes and checks, or, in a pass whose new tables declare row
+/// security, all of them and then their row security
+/// ([`planned_create_unit`]). Their enum types were created ahead of every
+/// table by [`internal_create_tables`].
 ///
-/// On Postgres this is a single transaction, mirroring the reconciliation
-/// pass's per-table transaction (FF-G G3), under the DDL lock timeout
-/// (`SET LOCAL lock_timeout` first; a timeout rolls the table back and
-/// creates it again): a table ends fully created or not created at all. That is not a nicety for row security, it is the whole
-/// contract. `ENABLE`/`FORCE ROW LEVEL SECURITY` land before the policies, so a
-/// `CREATE POLICY` that fails halfway would otherwise leave a live table with
-/// row security forced on and **zero** policies — default-deny for every role
-/// including the owner — that the create pass can never repair, because it only
-/// ever touches missing tables (ADR-0010). Rolling the table back instead
-/// leaves the database exactly as it was and the connect fails loudly, naming
-/// the statement.
+/// On Postgres the unit is a single transaction, mirroring the
+/// reconciliation pass's (FF-G G3): `SET LOCAL lock_timeout` first, and a
+/// timeout rolls it back and runs it again. What it creates ends fully
+/// created or not created at all. That is not a nicety for row security, it
+/// is the whole contract. A table committed ahead of its row security would
+/// be open to every role until the policies land; one committed with
+/// `ENABLE`/`FORCE` and a policy that then fails would be default-deny for
+/// every role including the owner. The create pass could repair neither,
+/// because it only ever touches missing tables (ADR-0010). Rolling the unit
+/// back instead leaves the database exactly as it was and the connect fails
+/// loudly, naming the table and the statement.
 ///
 /// SQLite runs the same statements unwrapped, one at a time, matching the
 /// reconciliation pass; it emits no row-security DDL at all, so the lockout
-/// shape cannot occur there.
-async fn create_one_table(
+/// shape cannot occur there. Each statement is reported under its own table.
+async fn run_create_unit(
     engine: &Arc<EngineHandle>,
-    model: &ferro_schema_ir::SchemaModel,
-    emission: &ferro_migrate::CreateTableEmission,
+    steps: &[CreateStep],
     ddl: &DdlExecutor,
     report: &mut PassReport,
 ) -> PyResult<()> {
-    let table = model.table_name.as_str();
     let unit = match engine.backend() {
         Dialect::Postgres => Unit::Transactional,
         Dialect::Sqlite => Unit::Unwrapped,
     };
-    let statements: Vec<&String> = std::iter::once(&emission.create_sql)
-        .chain(&emission.post_create_sqls)
-        .collect();
+    let tables: Vec<&str> = steps.iter().map(|(table, ..)| table.as_str()).collect();
+    let statements: Vec<&String> = steps.iter().map(|(.., sql)| sql).collect();
     let result = ddl
         .run(
             engine,
             unit,
-            Sender::Pass(table),
+            Sender::PassEach(&tables),
             &statements,
-            |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
+            |attempt| {
+                report.warn(pass_attempt_warning(
+                    Subject::table(lock_wait_table(&tables, &attempt.table)),
+                    &attempt,
+                ))
+            },
             None,
         )
         .await;
     report.unit(result).map_err(|err| match err {
-        DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
+        DdlError::LockTimeout(timeout) => {
+            pass_lock_timeout_error(lock_wait_table(&tables, &timeout.table), &timeout)
+        }
         DdlError::Failed(Failed {
             index: Some(index),
             error,
             ..
         }) => {
-            let step = if index == 0 { "table" } else { "artifact" };
-            create_step_error(table, step, statements[index], error)
+            let (table, step, sql) = &steps[index];
+            create_step_error(table, step, sql, error)
         }
         DdlError::Failed(Failed {
             index: None, error, ..
         }) => crate::errors::map_db_error(
-            &format!("Auto-migrate failed to create table '{table}'"),
+            &format!(
+                "Auto-migrate failed to create table '{}'",
+                tables.first().copied().unwrap_or_default()
+            ),
             error,
         ),
     })
@@ -534,11 +664,11 @@ pub fn _render_create_table_sql_for_test(
             model.table_name, err.message
         ))
     })?;
-    Ok((
-        emission.create_sql,
-        emission.post_create_sqls,
-        emission.pre_create_sqls,
-    ))
+    // What a pass creating this one table runs after its `CREATE TABLE`:
+    // its indexes and checks, then its row security.
+    let mut post_create = emission.post_create_sqls;
+    post_create.extend(emission.row_security_sqls);
+    Ok((emission.create_sql, post_create, emission.pre_create_sqls))
 }
 
 /// Build minimal SchemaIR columns from a JSON schema fixture for Rust unit tests.
@@ -753,7 +883,7 @@ mod tests {
     /// may change, so neither may stay prepared on the connection it ran on
     /// (`docs/solutions/patterns/ddl-on-live-engine.md`).
     mod unprepared {
-        use super::super::create_one_table;
+        use super::super::{run_create_unit, table_steps};
         use crate::backend::{EngineConnection, EngineHandle, PoolSpec};
         use crate::ddl_exec::DdlExecutor;
         use crate::session_settings::SettingsDelivery;
@@ -830,10 +960,9 @@ mod tests {
             );
 
             let mut report = crate::migrate::PassReport::default();
-            create_one_table(
+            run_create_unit(
                 &engine,
-                &model,
-                &emission,
+                &table_steps(&model, &emission),
                 &DdlExecutor::new(None),
                 &mut report,
             )
