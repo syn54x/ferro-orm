@@ -479,7 +479,7 @@ async def test_cross_scope_outer_column_rejected(db_url):
     """An inner-tree leaf built from the OUTER lambda's parameter is a
     build-time error, not a silently re-scoped column."""
     await connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError, match="#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         ExTxn.where(lambda t: t.lines.exists(lambda line: t.amount > 5))
 
 
@@ -488,11 +488,11 @@ async def test_cross_scope_field_proxy_rhs_rejected(db_url):
     """A FieldProxy as a comparison right-hand side (column-to-column) is a
     build-time error pointing at #309 — whichever scope it came from."""
     await connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError, match="#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         ExTxn.where(
             lambda t: t.lines.exists(lambda line: line.category_id == t.category_id)
         )
-    with pytest.raises(TypeError, match="#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         ExTxn.where(lambda t: t.lines.exists(lambda line: line.amount == line.amount))
 
 
@@ -501,7 +501,7 @@ async def test_cross_scope_nested_exists_rejected(db_url):
     """A nested existence test built from the OUTER proxy inside the inner
     lambda is cross-scope too."""
     await connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError, match="#309"):
+    with pytest.raises(TypeError, match="not supported yet"):
         ExTxn.where(lambda t: t.lines.exists(lambda line: t.transfer_out.exists()))
 
 

@@ -41,6 +41,7 @@ from .nodes import (
     _aggregate_source_family,
     _json_column_shape,
     _query_value_kind,
+    _snake,
     now,
     reject_fn_in_query,
     validate_query_column,
@@ -584,7 +585,7 @@ def _where_node_traverses(node: QueryNode) -> bool:
     """True if any leaf under ``node`` carries a non-empty relation path (#273).
 
     Used by the mutate guardrails to reject relation traversal on
-    ``update()``/``delete()``. A join-free foreign-key column leaf (``t.account ==
+    ``update()``/``delete()``. A join-free foreign-key column leaf (``post.author ==
     instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
     A negation traverses iff its child does (``~`` never adds a path). An
     existence test always counts as traversal: it correlates a subquery to
@@ -684,23 +685,23 @@ def _materialization(query: "Query[Any]") -> Materialization:
     return RootInstances()
 
 
-_RECIPE_FORM = 'update(lambda t: {"col": ...})'
-
 #: The arithmetic an `update()` recipe compiles; `*` and `/` are value
 #: expressions for generated columns only.
 _SET_BINARY_OPS: dict[str, Literal["add", "sub"]] = {"+": "add", "-": "sub"}
 
 
-def _reject_kwargs_value_expr(value: Any) -> None:
+def _reject_kwargs_value_expr(model_cls: type, value: Any) -> None:
     """Kwargs stay literals-only; expressions belong in the recipe form."""
     reject_fn_in_query(value, "update()")
     if isinstance(
         value,
         (FieldProxy, ValueExpr, RelationProxy, ReverseRelationProxy),
     ):
+        row = _snake(model_cls.__name__)
         raise TypeError(
             "update() keyword values must be literals; use the recipe form "
-            f"{_RECIPE_FORM} to assign a column or value expression"
+            f'update(lambda {row}: {{"col": ...}}) to assign a column or '
+            "value expression"
         )
 
 
@@ -743,7 +744,7 @@ def _literal_set(
         _reject_relation(model_cls, column, role="target")
         validate_query_column(model_cls, column)
         _refuse_generated_target(model_cls, column)
-        _reject_kwargs_value_expr(value)
+        _reject_kwargs_value_expr(model_cls, value)
         compiled.append(_guarded_literal_assignment(model_cls, column, value))
     return tuple(compiled)
 
@@ -1071,7 +1072,8 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
             f"{operation}() does not support relation traversal: portable SQL "
             f"has no {operation.upper()} ... JOIN. Fetch primary keys via the "
             f"joined query first, then {operation} by primary-key set. "
-            "(A join-free relation filter like `t.account == instance` is "
+            "(A join-free relation filter like "
+            f"`{_snake(query.model_cls.__name__)}.<relation> == instance` is "
             "allowed.)"
         )
     if query._includes:

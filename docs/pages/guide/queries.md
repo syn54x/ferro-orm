@@ -1839,7 +1839,7 @@ Aggregates build on projection: `select(lambda transaction: {"total": transactio
 
 These query features are not available yet; the [Roadmap](../roadmap.md) tracks them:
 
-- `having()`, to filter on an aggregate. `where()` refuses an aggregate and names `having()`.
+- `having()`, to filter on an aggregate. `where()` refuses an aggregate and says what to do instead.
 - Loading a reverse (`Reverse`) or many-to-many (`ManyToMany`) relation with its rows. `include()` covers forward relations; until then, run the relation's query (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
 - Referring to the outer row inside an existence test's inner lambda, for example comparing a split line's amount to its transaction's amount. Ferro refuses it when you build the query.
 - Case-insensitive `ilike()`.

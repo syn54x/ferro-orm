@@ -53,6 +53,8 @@ from .nodes import (
     ReverseRelationProxy,
     RowSelector,
     ValueExpr,
+    _snake,
+    _row_name,
     validate_query_column,
 )
 from .rendered import Terminal, send, terminal
@@ -129,28 +131,28 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             "where() expected a predicate callable "
             f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
         )
-    result = predicate(QueryProxy(model_cls))
+    result = predicate(QueryProxy(model_cls, root=_row_name(predicate, model_cls)))
     if isinstance(result, RelationProxy):
-        relation = result._path[-1]
         raise TypeError(
-            f"where() predicate returned the bare relation {relation!r}; compare "
-            f"a column (e.g. t.{relation}.<column> == ...) or use == None / "
-            "== an instance to filter by the relation."
+            f"where() predicate returned the bare relation {result._path[-1]!r}; "
+            f"compare a column (e.g. {result._dotted()}.<column> == ...) or use "
+            "== None / == an instance to filter by the relation."
         )
     if isinstance(result, ReverseRelationProxy):
-        relation = result._name
+        dotted = result._dotted()
         raise TypeError(
             f"where() predicate returned the bare reverse relation "
-            f"{relation!r}; test membership with t.{relation}.exists() "
-            f"(negate with ~t.{relation}.exists(), ADR-0007)."
+            f"{result._name!r}; test membership with {dotted}.exists() "
+            f"(negate with ~{dotted}.exists())."
         )
     if isinstance(result, AggregateExpr):
         # Comparing an aggregate already raises inside the lambda (#294); a
         # BARE aggregate returned from where() gets the same having() story.
         raise TypeError(
             f"where() cannot filter on the aggregate {result._dotted()}: "
-            "WHERE filters rows before aggregation. Post-aggregation "
-            "filtering is having() (#291)."
+            "WHERE filters rows before aggregation, and Ferro has no having() "
+            "yet. Filter rows with where() and compare the aggregated result "
+            "in Python."
         )
     if isinstance(result, ValueExpr):
         result._reject_clause("where")
@@ -172,7 +174,7 @@ def _resolve_update_recipe(
             '(e.g. `lambda user: {"email": "x", "bonus": user.score}`), '
             f"got {type(recipe).__name__}"
         )
-    result = recipe(QueryProxy(model_cls))
+    result = recipe(QueryProxy(model_cls, root=_row_name(recipe, model_cls)))
     if not isinstance(result, dict):
         raise TypeError(
             f"update() recipe must return a dict, got {type(result).__name__}"
@@ -212,10 +214,11 @@ def _resolve_join_selector(
     """Resolve a join-chainer selector into a relation path (#272).
 
     ``selector`` is a lambda receiving a validating `QueryProxy` and
-    naming a RELATION path (``lambda t: t.account``, ``lambda t: t.account.owner``)
-    — i.e. it must return a `RelationProxy`. Each hop is validated against
-    the relevant model at build time (the proxy raises ``AttributeError`` with a
-    did-you-mean for a bad hop, same as ``where()``).
+    naming a RELATION path (``lambda post: post.author``,
+    ``lambda post: post.author.owner``) — i.e. it must return a
+    `RelationProxy`. Each hop is validated against the relevant model at
+    build time (the proxy raises ``AttributeError`` with a did-you-mean for a
+    bad hop, same as ``where()``).
 
     Returns:
         The relation ``path`` tuple the selector names (length ≥ 1).
@@ -226,39 +229,39 @@ def _resolve_join_selector(
             non-relation value — a join selector names a relation path, not a
             column.
     """
+    row = _row_name(selector, model_cls)
     if not callable(selector):
         raise TypeError(
             "join()/left_join() expected a selector callable "
-            f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
+            f"(e.g. `lambda {row}: {row}.<relation>`), got {type(selector).__name__}"
         )
-    result = selector(QueryProxy(model_cls))
+    result = selector(QueryProxy(model_cls, root=row))
     if isinstance(result, FieldProxy):
         raise TypeError(
-            "join()/left_join() selector resolved to a column, not a relation "
-            "(e.g. `lambda t: t.account.name`); a join selector names a relation "
-            "path (e.g. `lambda t: t.account`)."
+            "join()/left_join() selector resolved to the column "
+            f"{result._dotted()}, not a relation; a join selector names a "
+            f"relation path (e.g. `lambda {row}: {row}.<relation>`)."
         )
     if isinstance(result, ReverseRelationProxy):
         # Joining a reverse/M2M edge would multiply root rows — the pinned
         # "a join never multiplies root rows" property is preserved by
         # rejection (ADR-0007); membership is the existence test's job.
-        relation = result._name
         raise TypeError(
             f"join()/left_join() cannot join the reverse relation "
-            f"{relation!r}: a join on a reverse or many-to-many edge would "
+            f"{result._name!r}: a join on a reverse or many-to-many edge would "
             "multiply root rows. Test membership with a predicate instead — "
-            f"where(lambda t: t.{relation}.exists(...)), negated with ~ — "
-            "reverse relations are tested, not traversed (ADR-0007)."
+            f"where(lambda {row}: {result._dotted()}.exists(...)), negated "
+            "with ~ — reverse relations are tested, not traversed."
         )
     if not isinstance(result, RelationProxy):
         raise TypeError(
             "join()/left_join() selector must return a relation path "
-            f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
+            f"(e.g. `lambda {row}: {row}.<relation>`), got {type(result).__name__}"
         )
     return result._path
 
 
-def _reject_reverse_relation_include(exc: AttributeError) -> None:
+def _reject_reverse_relation_include(exc: AttributeError, row: str) -> None:
     """Raise pointedly when an include selector names a reverse or M2M relation (#287).
 
     The validating proxies raise ``AttributeError`` for any name that is not
@@ -276,10 +279,10 @@ def _reject_reverse_relation_include(exc: AttributeError) -> None:
     if not name or model is None:
         return
     if isinstance(getattr(model, name, None), RelationshipDescriptor):
-        raise _reverse_load_error(name) from None
+        raise _reverse_load_error(name, row) from None
 
 
-def _reverse_load_error(name: str) -> TypeError:
+def _reverse_load_error(name: str, row: str) -> TypeError:
     """The pinned include()-cannot-load-a-reverse-relation error (#287).
 
     One construction site for the two paths that reach it: a reverse relation
@@ -291,7 +294,7 @@ def _reverse_load_error(name: str) -> TypeError:
     return TypeError(
         f"include() cannot load {name!r}: it is a reverse (Reverse) "
         "or many-to-many relation, and include() loads forward "
-        "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
+        f"foreign-key paths only (e.g. lambda {row}: {row}.<relation>). Reverse and "
         "M2M loading will be a separate mechanism — a batched second "
         "query stitched onto the results — not include(). Until it "
         f"lands, fetch the collection through the relation itself "
@@ -305,8 +308,8 @@ def _resolve_include_selector(
     """Resolve an ``include()`` selector into a relation path (#286).
 
     ``selector`` is a lambda receiving a validating `QueryProxy` and
-    naming a forward relation path (``lambda t: t.account``,
-    ``lambda t: t.account.owner``) — the same traversal syntax as ``join()``,
+    naming a forward relation path (``lambda post: post.author``,
+    ``lambda post: post.author.owner``) — the same traversal syntax as ``join()``,
     resolving to a `RelationProxy`. Each hop is validated against the
     relevant model at build time (the proxy raises ``AttributeError`` with a
     did-you-mean for a bad hop, exactly like ``where()``).
@@ -321,38 +324,39 @@ def _resolve_include_selector(
             names a reverse or M2M relation (reverse loading is a separate
             future mechanism, #287), or returns any other non-relation value.
     """
+    row = _row_name(selector, model_cls)
     if isinstance(selector, str):
         raise TypeError(
             f"include() takes a lambda selector naming a relation path, not a "
             f"string: include({selector!r}) is not supported (strings never "
-            f"traverse). Use include(lambda t: t.{selector})."
+            f"traverse). Use include(lambda {row}: {row}.{selector})."
         )
     if not callable(selector):
         raise TypeError(
             "include() expected a selector callable "
-            f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
+            f"(e.g. `lambda {row}: {row}.<relation>`), got {type(selector).__name__}"
         )
     try:
-        result = selector(QueryProxy(model_cls))
+        result = selector(QueryProxy(model_cls, root=row))
     except AttributeError as exc:
-        _reject_reverse_relation_include(exc)
+        _reject_reverse_relation_include(exc, row)
         raise
     if isinstance(result, FieldProxy):
         dotted = ".".join((*result.path, result.column))
         raise TypeError(
             f"include() selector resolved to the column {dotted!r}, not a "
             "relation; include() loads whole related instances "
-            "(e.g. `lambda t: t.account`) — every loaded hop is a complete "
-            "row, so there is nothing to select per column."
+            f"(e.g. `lambda {row}: {row}.<relation>`) — every loaded hop is a "
+            "complete row, so there is nothing to select per column."
         )
     if isinstance(result, ReverseRelationProxy):
         # The predicate proxies resolve reverse relations now (#314), so the
         # loading rejection fires here rather than via AttributeError.
-        raise _reverse_load_error(result._name)
+        raise _reverse_load_error(result._name, row)
     if not isinstance(result, RelationProxy):
         raise TypeError(
             "include() selector must return a relation path "
-            f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
+            f"(e.g. `lambda {row}: {row}.<relation>`), got {type(result).__name__}"
         )
     return result._path
 
@@ -375,10 +379,9 @@ class _ProjectedField(NamedTuple):
     path: tuple[str, ...]
     agg: str | None = None
 
-    @property
-    def dotted(self) -> str:
-        """The selector expression this field came from (error messages)."""
-        base = "t." + ".".join((*self.path, self.column))
+    def dotted(self, row: str) -> str:
+        """The selector expression this field came from, read from `row` (errors)."""
+        base = ".".join((row, *self.path, self.column))
         return f"{base}.{self.agg}()" if self.agg else base
 
 
@@ -388,10 +391,10 @@ def _resolve_projection_selector(
     """Resolve a ``select()`` lambda selector into projected fields (#279/#293).
 
     ``selector`` receives a validating `QueryProxy` and returns one
-    field (``lambda t: t.amount``), a tuple/list of fields
-    (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
-    output fields (``lambda t: {"account_name": t.account.name}`` — output
-    aliases, GLOSSARY.md). Fields may traverse declared forward relations
+    field (``lambda post: post.views``), a tuple/list of fields
+    (``lambda post: (post.id, post.author.name)``), or a dict whose keys name
+    the output fields (``lambda post: {"author_name": post.author.name}`` —
+    output aliases, GLOSSARY.md). Fields may traverse declared forward relations
     at any depth; every hop validates at build time with did-you-mean,
     exactly like ``where()``/``order_by()``. Mixed nesting — a dict inside a
     tuple, a tuple inside a dict — is rejected: one selector, one shape.
@@ -400,23 +403,24 @@ def _resolve_projection_selector(
         The projected fields, in selection/insertion order.
 
     Raises:
-        TypeError: If an element is a bare relation (``lambda t: t.account``),
-            a comparison (``lambda t: t.id == 1``), a nested dict/tuple, a
+        TypeError: If an element is a bare relation (``lambda post: post.author``),
+            a comparison (``lambda post: post.id == 1``), a nested dict/tuple, a
             non-string dict key, or any other non-field value.
         ValueError: If the selection is empty, or two fields resolve to the
             same output name (the collision error names the dict form).
     """
-    result = selector(QueryProxy(model_cls))
+    row = _row_name(selector, model_cls)
+    result = selector(QueryProxy(model_cls, root=row))
     if isinstance(result, dict):
-        fields = _collect_dict_projection(result)
+        fields = _collect_dict_projection(result, row)
     else:
         items = tuple(result) if isinstance(result, (tuple, list)) else (result,)
-        fields = _collect_tuple_projection(items)
+        fields = _collect_tuple_projection(items, row)
     if not fields:
         raise ValueError(
             "select() projection selected no columns; select at least one "
-            "(e.g. `lambda t: (t.id, t.amount)`), or call select() with no "
-            "arguments for the full query."
+            f"(e.g. `lambda {row}: ({row}.id, {row}.<column>)`), or call "
+            "select() with no arguments for the full query."
         )
     seen: dict[str, _ProjectedField] = {}
     for field in fields:
@@ -424,10 +428,10 @@ def _resolve_projection_selector(
         if first is not None:
             raise ValueError(
                 f"select() projects two fields named {field.name!r} "
-                f"({first.dotted} and {field.dotted}); output names must be "
-                "unique. Name them explicitly with the dict selector form "
-                f'(e.g. select(lambda t: {{"{first.name}": {first.dotted}, '
-                f'"<other name>": {field.dotted}}})).'
+                f"({first.dotted(row)} and {field.dotted(row)}); output names "
+                "must be unique. Name them explicitly with the dict selector "
+                f'form (e.g. select(lambda {row}: {{"{first.name}": '
+                f'{first.dotted(row)}, "<other name>": {field.dotted(row)}}})).'
             )
         seen[field.name] = field
     return fields
@@ -450,13 +454,14 @@ def _resolve_projection_strings(
             (did-you-mean, from `validate_query_column`).
     """
     columns: list[str] = []
+    row = _snake(model_cls.__name__)
     for name in names:
         if "." in name:
             raise ValueError(
                 f"select() string selectors name root columns only and never "
                 f"traverse: {name!r} is not a column. String paths are "
                 "rejected permanently; traversed projection is lambda-only "
-                f"(select(lambda t: t.{name})). Select root columns "
+                f"(select(lambda {row}: {row}.{name})). Select root columns "
                 '(e.g. select("id", "amount")).'
             )
         validate_query_column(model_cls, name)
@@ -469,65 +474,71 @@ def _resolve_projection_strings(
     return tuple(columns)
 
 
-def _projection_item_field(item: Any, *, context: str) -> _ProjectedField:
+def _projection_item_field(item: Any, row: str, *, context: str) -> _ProjectedField:
     """Validate one selector item into an unaliased field (#279/#293).
 
     Shared by the single-field and tuple forms; ``context`` names the
-    selector shape in error messages. The output name defaults to the bare
-    leaf column name (GLOSSARY.md: Traversed projection).
+    selector shape in error messages and ``row`` the lambda's parameter. The
+    output name defaults to the bare leaf column name (GLOSSARY.md:
+    Traversed projection).
     """
     if isinstance(item, dict):
         raise TypeError(
             "select() selector cannot nest a dict inside a tuple; a selector "
             "returns one shape — a dict, a tuple, or a single field. To name "
             "output fields, return one dict for the whole selection "
-            '(e.g. `lambda t: {"id": t.id, "account_name": t.account.name}`).'
+            f'(e.g. `lambda {row}: {{"id": {row}.id, "<name>": {row}.<column>}}`).'
         )
     if isinstance(item, AggregateExpr):
         raise TypeError(
-            f"aggregate fields are user-named (#294): give {item._dotted()} "
+            f"aggregate fields are user-named: give {item._dotted()} "
             "an output name with the dict selector form "
-            f'(e.g. select(lambda t: {{"total": {item._dotted()}}})).'
+            f'(e.g. select(lambda {row}: {{"total": {item._dotted()}}})).'
         )
     if isinstance(item, ValueExpr):
         item._reject_clause("select")
     if isinstance(item, RelationProxy):
-        relation = item._path[-1]
         raise TypeError(
-            f"select() cannot project the bare relation {relation!r}; "
-            f"select a column on it instead (e.g. t.{relation}.<column>) "
+            f"select() cannot project the bare relation {item._path[-1]!r}; "
+            f"select a column on it instead (e.g. {item._dotted()}.<column>) "
             "or select root columns."
         )
     if isinstance(item, QueryNode):
         raise TypeError(
             "select() selector returned a comparison, not a column "
-            "(e.g. `lambda t: t.id == 1`); projections select columns "
-            "(`lambda t: t.id`) — put predicates in where()."
+            f"(e.g. `lambda {row}: {row}.id == 1`); projections select columns "
+            f"(`lambda {row}: {row}.id`) — put predicates in where()."
         )
     if not isinstance(item, FieldProxy):
         raise TypeError(
             f"select() selector must return {context} "
-            f"(e.g. `lambda t: (t.id, t.amount)`), got {type(item).__name__}"
+            f"(e.g. `lambda {row}: ({row}.id, {row}.<column>)`), got "
+            f"{type(item).__name__}"
         )
     return _ProjectedField(name=item.column, column=item.column, path=item.path)
 
 
-def _collect_tuple_projection(items: tuple[Any, ...]) -> tuple[_ProjectedField, ...]:
+def _collect_tuple_projection(
+    items: tuple[Any, ...], row: str
+) -> tuple[_ProjectedField, ...]:
     """Validate a single-field or tuple selector's items into fields (#293)."""
     return tuple(
-        _projection_item_field(item, context="a column or a tuple of columns")
+        _projection_item_field(item, row, context="a column or a tuple of columns")
         for item in items
     )
 
 
-def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, ...]:
+def _collect_dict_projection(
+    result: dict[Any, Any], row: str
+) -> tuple[_ProjectedField, ...]:
     """Validate a dict selector into aliased fields (#293).
 
     Keys are output field names (GLOSSARY.md: Output alias) and must be
     strings; values are field references (which may traverse) or aggregate
-    expressions (``t.amount.sum()`` — #294, dict-only: aggregate fields are
+    expressions (``post.views.sum()`` — #294, dict-only: aggregate fields are
     user-named). Nesting a tuple, list, or dict as a value is rejected —
-    flat records only (ADR-0009: record results are flat).
+    flat records only (ADR-0009: record results are flat). ``row`` is the
+    lambda's parameter, as error messages spell it.
     """
     fields: list[_ProjectedField] = []
     for key, value in result.items():
@@ -550,14 +561,13 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
                 f"select() dict selector value for {key!r} is a "
                 f"{type(value).__name__}; a projected record is flat — each "
                 "dict value names one field (e.g. "
-                '`lambda t: {"account_name": t.account.name}`).'
+                f'`lambda {row}: {{"<name>": {row}.<relation>.<column>}}`).'
             )
         if isinstance(value, RelationProxy):
-            relation = value._path[-1]
             raise TypeError(
-                f"select() cannot project the bare relation {relation!r} "
+                f"select() cannot project the bare relation {value._path[-1]!r} "
                 f"(dict key {key!r}); select a column on it instead "
-                f"(e.g. {{{key!r}: t.{relation}.<column>}})."
+                f"(e.g. {{{key!r}: {value._dotted()}.<column>}})."
             )
         if isinstance(value, QueryNode):
             raise TypeError(
@@ -827,15 +837,16 @@ class Query(Generic[T]):
         """
         if not selectors:
             return self._clone()
+        row = _row_name(selectors[0], self.model_cls)
         if self._includes:
             raise ValueError(
                 "select() with a projection cannot be combined with "
                 "include(): a query carries exactly one materialization plan "
                 "— projected records or loaded instances, never both, and "
-                "record results are flat (ADR-0009). Reach across the "
-                "relation with traversed projection instead (e.g. "
-                'select(lambda t: {"account_name": t.account.name})), or '
-                "load instances with include() on an unprojected query."
+                "record results are flat. Reach across the relation with "
+                "traversed projection instead (e.g. "
+                f'select(lambda {row}: {{"<name>": {row}.<relation>.<column>}})), '
+                "or load instances with include() on an unprojected query."
             )
         if any(isinstance(selector, str) for selector in selectors):
             if not all(isinstance(selector, str) for selector in selectors):
@@ -843,7 +854,7 @@ class Query(Generic[T]):
                     "select() cannot mix column-name strings and a lambda "
                     "selector in one call; use one form "
                     '(select("id", "amount") or '
-                    "select(lambda t: (t.id, t.amount)))."
+                    f"select(lambda {row}: ({row}.id, {row}.amount)))."
                 )
             names: tuple[str, ...] = selectors  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
             columns = _resolve_projection_strings(names, self.model_cls)
@@ -855,14 +866,15 @@ class Query(Generic[T]):
         if len(selectors) > 1:
             raise TypeError(
                 "select() takes a single lambda selector naming the columns "
-                "(e.g. `select(lambda t: (t.id, t.amount))`), got "
+                f"(e.g. `select(lambda {row}: ({row}.id, {row}.amount))`), got "
                 f"{len(selectors)} arguments"
             )
         selector = selectors[0]
         if not callable(selector):
             raise TypeError(
                 "select() expected a selector callable or column-name strings "
-                f"(e.g. `lambda t: (t.id, t.amount)`), got {type(selector).__name__}"
+                f"(e.g. `lambda {row}: ({row}.id, {row}.amount)`), got "
+                f"{type(selector).__name__}"
             )
         # Strings were dispatched above, so the lone selector is the lambda
         # form; the tuple element type is too wide for the checker to see it.
@@ -917,24 +929,25 @@ class Query(Generic[T]):
         if isinstance(field, str):
             col_name = validate_query_column(self.model_cls, field)
         elif callable(field):
-            selected = field(QueryProxy(self.model_cls))
+            row = _row_name(field, self.model_cls)
+            selected = field(QueryProxy(self.model_cls, root=row))
             # Ordering by a bare relation (no column selected) is meaningless —
             # reject it loudly rather than emitting an order_by the SELECT
             # walker cannot render. Ordering by a related COLUMN (a FieldProxy
             # with a non-empty path) is valid traversal (#271).
             if isinstance(selected, RelationProxy):
-                relation = selected._path[-1]
                 raise TypeError(
-                    f"order_by() selector returned the bare relation {relation!r}, "
-                    "not a column; order by a column on it instead "
-                    f"(e.g. t.{relation}.<column>)."
+                    "order_by() selector returned the bare relation "
+                    f"{selected._path[-1]!r}, not a column; order by a column "
+                    f"on it instead (e.g. {selected._dotted()}.<column>)."
                 )
             if isinstance(selected, ValueExpr):
                 selected._reject_clause("order_by")
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
                     "order_by() selector must return a FieldProxy "
-                    f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+                    f"(e.g. `lambda {row}: {row}.created_at`), got "
+                    f"{type(selected).__name__}"
                 )
             col_name = selected.column
             path = selected.path
@@ -1838,7 +1851,8 @@ class ProjectedQuery(Query[T]):
                 "order_by() expected a column-name string or a lambda "
                 f"selector, got {type(field).__name__}"
             )
-        selected = field(QueryProxy(self.model_cls))
+        row = _row_name(field, self.model_cls)
+        selected = field(QueryProxy(self.model_cls, root=row))
         # Rule 2: the lambda form spells source expressions — aggregates
         # resolve to the projected field carrying the same expression and
         # sort by its output name.
@@ -1855,22 +1869,22 @@ class ProjectedQuery(Query[T]):
             raise ValueError(
                 f"order_by() aggregate {selected._dotted()} matches no "
                 "projected field; project it to sort by it (e.g. "
-                f'select(lambda t: {{..., "key": {selected._dotted()}}}) '
+                f'select(lambda {row}: {{..., "key": {selected._dotted()}}}) '
                 'with order_by("key")).'
             )
         if isinstance(selected, RelationProxy):
-            relation = selected._path[-1]
             raise TypeError(
-                f"order_by() selector returned the bare relation {relation!r}, "
-                "not a column; order by a column on it instead "
-                f"(e.g. t.{relation}.<column>)."
+                "order_by() selector returned the bare relation "
+                f"{selected._path[-1]!r}, not a column; order by a column on it "
+                f"instead (e.g. {selected._dotted()}.<column>)."
             )
         if isinstance(selected, ValueExpr):
             selected._reject_clause("order_by")
         if not isinstance(selected, FieldProxy):
             raise TypeError(
                 "order_by() selector must return a FieldProxy "
-                f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+                f"(e.g. `lambda {row}: {row}.created_at`), got "
+                f"{type(selected).__name__}"
             )
         # Rule 3: on an aggregate projection a source column must be a group
         # key; on a plain projection unselected columns stay sortable.
@@ -2081,14 +2095,14 @@ class ProjectedQuery(Query[T]):
             ValueError: Always. Select the related columns, or call
                 `include()` on a query without `select()`.
         """
+        row = _row_name(selector, self.model_cls)
         raise ValueError(
             "include() cannot be combined with a projection: a query carries "
             "exactly one materialization plan — projected records or "
-            "loaded instances, never both, and record results are flat "
-            "(ADR-0009). Reach across the relation with traversed projection "
-            'instead (e.g. select(lambda t: {"account_name": '
-            "t.account.name})), or load instances with include() on an "
-            "unprojected query."
+            "loaded instances, never both, and record results are flat. "
+            "Reach across the relation with traversed projection instead "
+            f'(e.g. select(lambda {row}: {{"<name>": {row}.<relation>.<column>}})), '
+            "or load instances with include() on an unprojected query."
         )
 
     # `self: Never` makes mutating a projected query a STATIC error at the

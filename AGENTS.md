@@ -706,6 +706,11 @@ Rules:
   "desc")`); anything else raises `TypeError`. The lambda is the documented
   form, and the only one that orders by a related column
   (`order_by(lambda transaction: transaction.account.label)`).
+- **An error raised from a lambda uses the lambda's own parameter name**
+  (`sale.amount is a column reference ...` for `lambda sale: ...`), and the
+  model's name in snake case where there is no lambda to read. No message
+  raised from `src/ferro/query/` or `src/ferro/checks.py` carries an ADR or
+  issue number. Pinned by `tests/test_lambda_parameter_in_errors.py`.
 - **The lint** `uv run --no-sync python -m tests._docs_checks PATH...` lists
   every lambda passed to a query method whose parameter is one character,
   as `path:line: message`, and exits 1. It reads Python files, Python fences
