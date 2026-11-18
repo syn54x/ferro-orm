@@ -542,7 +542,7 @@ CAPTAIN_CREW_KEY = (
 
 @backend_matrix
 def test_b1_new_models_that_reference_each_other_get_the_later_key_last(
-    project, pkg, db
+    project, pkg, db, capsys
 ):
     """Postgres refuses a ``REFERENCES`` to a table that does not exist yet
     and the drop of a table another table's key references: the key to the
@@ -587,6 +587,14 @@ def test_b1_new_models_that_reference_each_other_get_the_later_key_last(
             "SELECT conname FROM pg_constraint WHERE contype = 'f' "
             f"AND connamespace = '{db.schema}'::regnamespace ORDER BY conname"
         ) == [("fk_captain_crew_id_crew",), ("fk_crew_captain_id_captain",)]
+    # A key added to a table the same step creates is part of creating it:
+    # the previous release never writes that table, so the step is expand,
+    # as a step creating one table with its key inline is.
+    capsys.readouterr()
+    assert run("migrate", "status", "--steps", "--url", db.url) == 0
+    out = capsys.readouterr().out
+    (step,) = [line for line in out.splitlines() if "01_schema" in line]
+    assert step.split() == [f"01_schema.up.{db.backend}.sql", "applied", "expand"], out
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert not {"captain", "crew"} & db.tables()
     assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
