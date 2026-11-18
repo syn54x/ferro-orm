@@ -4860,6 +4860,13 @@ async def test_a_failed_create_rolls_back_the_tables_that_reference_each_other(
         ("glob", "name GLOB 'a*'", False),
         ("match", "x = match", True),
         ("regexp", "regexp IS NOT NULL", True),
+        ("like", "[name] LIKE 'a%'", False),
+        ("like", "`name` LIKE 'a%'", False),
+        ("like", "[like] LIKE 'a%'", True),
+        ("like", "`like` LIKE 'a%'", True),
+        ("end", "CASE WHEN x > 0 THEN 1. ELSE 0. END = 1", False),
+        ("end", "CASE WHEN x > 0 THEN 1e5 ELSE .5 END > 0", False),
+        ("end", "CASE WHEN x > 0 THEN 1.5e-3 ELSE 0x1F END > 0", False),
     ],
 )
 async def test_destructive_reads_a_bare_keyword_named_column_in_a_hand_written_check_on_sqlite(

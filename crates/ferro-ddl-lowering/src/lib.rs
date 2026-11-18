@@ -3065,6 +3065,15 @@ fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
 /// The tokens of a check's SQL, each with whether it is a double-quoted
 /// identifier: the one lexer of a check body.
 fn lex_check_sql(input: &str) -> Vec<(CheckToken, bool)> {
+    lex_check_spanned(input)
+        .into_iter()
+        .map(|(token, quoted, _, _)| (token, quoted))
+        .collect()
+}
+
+/// [`lex_check_sql`]'s tokens, each with its `start..end` in characters, so a
+/// reader can tell two tokens that touch (`1e-3`) from two that do not.
+fn lex_check_spanned(input: &str) -> Vec<(CheckToken, bool, usize, usize)> {
     let chars: Vec<char> = input.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -3074,9 +3083,10 @@ fn lex_check_sql(input: &str) -> Vec<(CheckToken, bool)> {
             i += 1;
             continue;
         }
+        let start = i;
         if ch == '\'' {
             let (lit, next) = take_quoted(&chars, i, '\'');
-            tokens.push((CheckToken::String(lit), false));
+            tokens.push((CheckToken::String(lit), false, start, next));
             i = next;
             continue;
         }
@@ -3084,32 +3094,98 @@ fn lex_check_sql(input: &str) -> Vec<(CheckToken, bool)> {
             let (ident, next) = take_quoted(&chars, i, '"');
             let inner = ident[1..ident.len() - 1].replace("\"\"", "\"");
             if is_simple_ident(&inner) {
-                tokens.push((CheckToken::Word(inner), true));
+                tokens.push((CheckToken::Word(inner), true, start, next));
             } else {
-                tokens.push((CheckToken::Word(ident), true));
+                tokens.push((CheckToken::Word(ident), true, start, next));
             }
             i = next;
             continue;
         }
         if ch == ':' && i + 1 < chars.len() && chars[i + 1] == ':' {
-            tokens.push((CheckToken::Punct(':'), false));
-            tokens.push((CheckToken::Punct(':'), false));
+            tokens.push((CheckToken::Punct(':'), false, i, i + 1));
+            tokens.push((CheckToken::Punct(':'), false, i + 1, i + 2));
             i += 2;
             continue;
         }
         if is_ident_start(ch) {
-            let start = i;
             i += 1;
             while i < chars.len() && is_ident_continue(chars[i]) {
                 i += 1;
             }
-            tokens.push((CheckToken::Word(chars[start..i].iter().collect()), false));
+            tokens.push((
+                CheckToken::Word(chars[start..i].iter().collect()),
+                false,
+                start,
+                i,
+            ));
             continue;
         }
-        tokens.push((CheckToken::Punct(ch), false));
+        tokens.push((CheckToken::Punct(ch), false, i, i + 1));
         i += 1;
     }
     tokens
+}
+
+/// What [`check_definition_reads_column`] reads a check as: a numeric
+/// literal in one piece (`1.`, `.5`, `1.5e-3`, `0x1F`) rather than the
+/// digits, dots and word the lexer splits it into.
+enum CheckUnit {
+    Number,
+    Token(CheckToken, bool),
+}
+
+fn check_units(definition: &str) -> Vec<CheckUnit> {
+    let toks = lex_check_spanned(definition);
+    let digit = |t: &CheckToken| matches!(t, CheckToken::Punct(c) if c.is_ascii_digit());
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let (token, quoted, _, mut end) = toks[i].clone();
+        let starts_number = digit(&token)
+            || (token == CheckToken::Punct('.')
+                && toks
+                    .get(i + 1)
+                    .is_some_and(|(t, _, s, _)| digit(t) && *s == end));
+        if !starts_number {
+            units.push(CheckUnit::Token(token, quoted));
+            i += 1;
+            continue;
+        }
+        // Take every token that touches the last: digits, dots, a hex or
+        // exponent word, and the sign right after an exponent's `e`.
+        let (mut hex, mut after_e, mut only_zero) = (false, false, token == CheckToken::Punct('0'));
+        i += 1;
+        while let Some((t, q, s, e)) = toks.get(i) {
+            if *s != end || *q {
+                break;
+            }
+            let mut next_after_e = false;
+            match t {
+                CheckToken::Punct(c) if c.is_ascii_digit() || *c == '.' => only_zero = false,
+                CheckToken::Punct('+' | '-') if after_e => {}
+                CheckToken::Word(w) => {
+                    let lower = w.to_ascii_lowercase();
+                    if only_zero && lower.starts_with('x') {
+                        hex = true;
+                    } else if !hex
+                        && lower.starts_with('e')
+                        && lower[1..].chars().all(|c| c.is_ascii_digit())
+                    {
+                        next_after_e = lower == "e";
+                    } else {
+                        break;
+                    }
+                    only_zero = false;
+                }
+                _ => break,
+            }
+            after_e = next_after_e;
+            end = *e;
+            i += 1;
+        }
+        units.push(CheckUnit::Number);
+    }
+    units
 }
 
 /// The words of a check's SQL that are not a bare column reference: a column
@@ -3129,24 +3205,46 @@ const CHECK_KEYWORDS: &[&str] = &[
 const POSITIONAL_KEYWORDS: &[&str] = &["end", "glob", "like", "match", "regexp"];
 
 /// Whether the check whose stored SQL is `definition` (`CHECK (…)`, as the
-/// catalog holds it) references `column`: a double-quoted identifier that is
-/// its name, or a bare one that is no keyword ([`CHECK_KEYWORDS`]). A
-/// positional keyword is the keyword when the token before it closes an
-/// operand: a string, a number, `)`, a quoted name, a bare word that is no
-/// keyword, `null`, `true`, `false`, `isnull`, `notnull`, an `end` that is
-/// itself the keyword, or a `not` whose own previous token closes an operand.
-/// A name followed by `(` is a call and a string literal's contents are text,
-/// so neither is a reference. Names compare without case, as SQLite resolves
-/// them. A word the read cannot place (a number's exponent, a `[bracketed]`
-/// name) counts as a reference, so its column is kept.
+/// catalog holds it) references `column`: a quoted identifier (`"…"`, `[…]`
+/// or backticks) that is its name, or a bare one that is no keyword
+/// ([`CHECK_KEYWORDS`]). A positional keyword is the keyword when the token
+/// before it closes an operand. What closes one is what SQLite ends an
+/// operand with: a string; a whole numeric literal (`1`, `1.`, `.5`, `1e5`,
+/// `1.5e-3`, `0x1F`); `)`; a quoted name's closing `"`, `]` or backtick; a
+/// bare word that is no keyword; `null`, `true`, `false`, `isnull`,
+/// `notnull`; an `end` (the keyword closes the `CASE`, a column is an
+/// operand); a positional word read as a column; or a `not` whose own
+/// previous token closes an operand. A name followed by `(` is a call and a
+/// string literal's contents are text, so neither is a reference. Names
+/// compare without case, as SQLite resolves them. A word the read cannot
+/// place counts as a reference, so its column is kept. A `/* */` or `--`
+/// comment is not lexed: its words are read as SQL.
 pub fn check_definition_reads_column(definition: &str, column: &str) -> bool {
-    let tokens = lex_check_sql(definition);
-    // Whether the token before the current one closes an operand.
+    let units = check_units(definition);
+    // Whether the unit before the current one closes an operand, and whether
+    // a `[` or backtick name is open.
     let mut closes_before = false;
-    for (at, (token, quoted)) in tokens.iter().enumerate() {
-        let closes = match token {
+    let mut in_name = false;
+    for (at, unit) in units.iter().enumerate() {
+        let CheckUnit::Token(token, quoted) = unit else {
+            closes_before = true;
+            continue;
+        };
+        closes_before = match token {
             CheckToken::String(_) => true,
-            CheckToken::Punct(ch) => *ch == ')' || ch.is_ascii_digit(),
+            CheckToken::Punct('[') => {
+                in_name = true;
+                false
+            }
+            CheckToken::Punct(']') => {
+                in_name = false;
+                true
+            }
+            CheckToken::Punct('`') => {
+                in_name = !in_name;
+                !in_name
+            }
+            CheckToken::Punct(ch) => *ch == ')',
             CheckToken::Word(word) => {
                 // A quoted name that is no simple identifier keeps its quotes.
                 let name = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
@@ -3154,8 +3252,11 @@ pub fn check_definition_reads_column(definition: &str, column: &str) -> bool {
                     _ => word.clone(),
                 };
                 let lower = name.to_ascii_lowercase();
-                let called = matches!(tokens.get(at + 1), Some((CheckToken::Punct('('), _)));
-                let listed = !quoted && CHECK_KEYWORDS.contains(&lower.as_str());
+                let called = matches!(
+                    units.get(at + 1),
+                    Some(CheckUnit::Token(CheckToken::Punct('('), _))
+                );
+                let listed = !quoted && !in_name && CHECK_KEYWORDS.contains(&lower.as_str());
                 let positional = POSITIONAL_KEYWORDS.contains(&lower.as_str());
                 let keyword = listed && (closes_before || !positional);
                 if name.eq_ignore_ascii_case(column) && !called && !keyword {
@@ -3173,7 +3274,6 @@ pub fn check_definition_reads_column(definition: &str, column: &str) -> bool {
                 }
             }
         };
-        closes_before = closes;
     }
     false
 }
