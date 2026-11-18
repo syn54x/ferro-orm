@@ -1387,15 +1387,16 @@ fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<
     if dialect != Dialect::Postgres {
         return ops;
     }
-    let held = &facts.row_security;
-    if held.enabled {
+    let security = &facts.row_security;
+    if security.enabled {
         ops.push(flag_op(table, RowSecurityFlag::Enable));
     }
-    if held.forced {
+    if security.forced {
         ops.push(flag_op(table, RowSecurityFlag::Force));
     }
     ops.extend(
-        held.policies
+        security
+            .policies
             .iter()
             .map(|policy| MigrationOp::AddRowPolicy {
                 table: table.to_string(),
