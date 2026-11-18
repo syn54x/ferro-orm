@@ -365,6 +365,50 @@ def test_b1_a_policy_may_read_a_table_the_same_migration_creates(project, pkg, d
     assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
 
 
+def schema_steps(capsys, db) -> list[list[str]]:
+    """Each ``01_schema`` line of ``ferro migrate status --steps``, split."""
+    capsys.readouterr()
+    assert run("migrate", "status", "--steps", "--url", db.url) == 0
+    out = capsys.readouterr().out
+    return [line.split() for line in out.splitlines() if "01_schema" in line]
+
+
+@backend_matrix
+def test_a_step_that_only_creates_a_table_with_row_security_is_expand(
+    project, pkg, db, capsys
+):
+    """The row security placed after the last ``CREATE TABLE`` is part of
+    creating the table: the previous release never writes it (#1001)."""
+    write_config(project, pkg)
+    write_models(project, pkg, models())
+    new("create")
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert schema_steps(capsys, db) == [
+        [f"01_schema.up.{db.backend}.sql", "applied", "expand"]
+    ]
+
+
+MEMBERSHIP_ONLY = READS_ANOTHER_TABLE[READS_ANOTHER_TABLE.index("class Membership") :]
+
+
+@backend_matrix
+def test_a_new_table_whose_policy_reads_an_existing_table_is_expand(
+    project, pkg, db, capsys
+):
+    """A policy refuses rows of its own table only: the previous release
+    writes ``membership`` and never ``document``, so ``0002`` is expand and
+    an insert into ``membership`` still succeeds beside it (#1001)."""
+    write_config(project, pkg)
+    write_models(project, pkg, MEMBERSHIP_ONLY)
+    new("membership")
+    write_models(project, pkg, READS_ANOTHER_TABLE)
+    new("document")
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute('INSERT INTO "membership" ("user_id") VALUES (7)')
+    assert db.rows('SELECT "user_id" FROM "membership"') == [(7,)]
+    assert schema_steps(capsys, db)[1][-2:] == ["applied", "expand"]
+
+
 # -- E2: a policy body changed ---------------------------------------------------------
 
 
