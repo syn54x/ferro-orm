@@ -25,13 +25,51 @@ jobs:
             runner: ubuntu-latest
             target: x86_64
             manylinux: auto
-          - name: macos
-            runner: macos-latest
-            target: aarch64
-            manylinux: ''
           - name: windows
             runner: windows-latest
             target: x64
+            manylinux: ''
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1.48.0
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: 'true'
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links dist ferro-orm
+
+      - name: Import check
+        shell: bash
+        run: |
+          python -c "import ferro; print('Ferro imported successfully')"
+
+  # GitHub at times has no macOS arm64 runner for a push to main and cancels
+  # the job after 900 s (#1003). A release and a manual run still run it.
+  packaging-smoke-macos:
+    if: github.event_name != 'push'
+    name: Packaging smoke check (macos)
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos
+            runner: macos-latest
+            target: aarch64
             manylinux: ''
     steps:
       - name: Checkout repository
