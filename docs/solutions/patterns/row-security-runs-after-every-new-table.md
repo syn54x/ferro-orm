@@ -128,9 +128,12 @@ The ops placed after the last `CREATE TABLE` are part of creating their table.
 A step's class (ADR-0054) asks whether a write of the previous release can
 fail beside the step, and the previous release never writes a table the step
 creates. So `op_class` classes any op on such a table `expand`, by one test
-over the op's table (`existing_table`), and a policy that reads a table that
-already exists changes nothing: a policy refuses rows of its own table only.
-The same ops on a table that already exists are `contract`.
+over the op's table (`created_table`, in `generate/staging.rs`), and a policy
+that reads a table that already exists changes nothing: a policy refuses rows
+of its own table only. The same ops on a table that already exists are
+`contract`. A renamed table is not a new one (`created_table` asks
+`table_rename_hint`): it already exists under its old name, holding rows the
+previous release writes.
 
 ## How to recognize
 

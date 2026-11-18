@@ -239,7 +239,8 @@ fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     // Any op on a table the same step creates is part of creating it (on
     // Postgres, a key deferred past the last `CREATE TABLE`, #304, and the
     // table's row security and policies, #753): the previous release never
-    // writes that table.
+    // writes that table. A renamed table is not created: it holds the rows
+    // the previous release writes under its old name.
     if created_table(&planned.op, sides.before, sides.target) {
         return StepClass::Expand;
     }

@@ -30,6 +30,7 @@ use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
     column_riders, find_foreign_key, fk_constraint_name, render_add_fk_sql, standalone_indexes,
 };
+use crate::plan::table_rename_hint;
 use crate::render::render_ops;
 use crate::{Dialect, MigrationOp, Side, declared_index, plan_down};
 use ferro_ddl_lowering::{
@@ -334,8 +335,9 @@ pub(crate) fn existing_table<'a>(
 }
 
 /// Whether `op` is on a table the step creates: not one that already exists
-/// ([`existing_table`]), but declared by `after` and not renamed from a
-/// table of `before` (a renamed table already exists under its old name).
+/// ([`existing_table`]), declared by `after`, and not the new name of a
+/// table the step renames ([`table_rename_hint`] against `before`), since a
+/// renamed table already exists under its old name and holds its rows.
 pub(crate) fn created_table(
     op: &MigrationOp,
     before: &IrEnvelope<SchemaIrPayload>,
@@ -346,10 +348,7 @@ pub(crate) fn created_table(
             .table()
             .and_then(|table| find_model(after, table))
             .is_some_and(|model| {
-                model
-                    .renamed_from
-                    .as_deref()
-                    .is_none_or(|old| find_model(before, old).is_none())
+                table_rename_hint(model, |table| find_model(before, table).is_some()).is_none()
             })
 }
 
