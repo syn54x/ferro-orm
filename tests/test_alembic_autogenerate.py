@@ -255,3 +255,64 @@ def test_index_name_matches_rust_runtime_convention_for_ferro_field():
         f"Alembic must emit idx_settings_key to match Rust runtime DDL; got "
         f"{indexes[0].name!r}"
     )
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_revision_creates_and_drops_tables_that_reference_each_other(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Postgres refuses a ``REFERENCES`` to a table that does not exist yet
+    and the drop of a table another table's key references: the upgrade
+    creates ``captain`` without its key to ``crew`` and adds it after both
+    tables, and the downgrade drops that key before either table (#304)."""
+    from ferro import Field, connect
+    from ferro.raw import fetch_all
+    from ferro.session import engines
+    from tests._alembic_harness import (
+        autogen_upgrade_and_downgrade_code,
+        run_generated_code,
+    )
+
+    class Captain(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        crew_id: int | None = Field(default=None, foreign_key="Crew")
+
+    class Crew(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        captain_id: int | None = Field(default=None, foreign_key=Captain)
+
+    await connect(db_url)  # register the models; never create the tables
+
+    upgrade_code, downgrade_code = autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    assert upgrade_code.count("op.create_table(") == 2, upgrade_code
+    assert upgrade_code.count("ForeignKeyConstraint(") == 1, upgrade_code
+    create_key = "op.create_foreign_key('fk_captain_crew_id_crew', 'captain', 'crew'"
+    assert upgrade_code.rindex("op.create_table(") < upgrade_code.index(create_key)
+    drop_key = "op.drop_constraint('fk_captain_crew_id_crew', 'captain'"
+    assert downgrade_code.index(drop_key) < downgrade_code.index("op.drop_table(")
+
+    async def tables_and_keys() -> tuple[list[str], list[str]]:
+        async with engines.session():
+            tables = await fetch_all(
+                "SELECT relname FROM pg_class WHERE relname IN ('captain', 'crew') "
+                "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace "
+                "ORDER BY relname"
+            )
+            keys = await fetch_all(
+                "SELECT conname FROM pg_constraint WHERE contype = 'f' "
+                "AND connamespace = current_schema()::regnamespace ORDER BY conname"
+            )
+        return [r["relname"] for r in tables], [r["conname"] for r in keys]
+
+    run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert await tables_and_keys() == (
+        ["captain", "crew"],
+        ["fk_captain_crew_id_crew", "fk_crew_captain_id_captain"],
+    )
+
+    run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert await tables_and_keys() == ([], [])

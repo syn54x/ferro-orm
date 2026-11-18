@@ -259,13 +259,22 @@ def _not_creating_types(column: sa.Column, dialect: str) -> sa.Column:
     return copied
 
 
-def _create_table(target: _Target, table: str) -> list[ops.MigrateOperation]:
+def _create_table(
+    target: _Target, table: str, deferred: set[str]
+) -> list[ops.MigrateOperation]:
+    """``op.create_table`` for ``table`` and ``op.create_index`` for each of
+    its indexes, leaving out the foreign key of each column in ``deferred``:
+    the planner adds those after its last ``AddTable``."""
     source = target.table(table)
     columns = [_not_creating_types(column, target.dialect) for column in source.columns]
     constraints = [
         constraint._copy()
         for constraint in source.constraints
         if not isinstance(constraint, sa.PrimaryKeyConstraint)
+        and not (
+            isinstance(constraint, sa.ForeignKeyConstraint)
+            and set(constraint.column_keys) <= deferred
+        )
     ]
     copy = sa.Table(
         table,
@@ -331,18 +340,24 @@ def _foreign_key(written: dict[str, Any]) -> list[ops.MigrateOperation]:
     ]
 
 
-def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
+def _twin(
+    written: dict[str, Any], target: _Target, deferred: set[tuple[str, str]]
+) -> list[ops.MigrateOperation]:
     """Alembic's own op(s) for one revision op the core writes as its twin,
     built from the side the revision leads to; a statement of the pass's
     beyond the one the twin stands for (an index riding an added column)
-    runs as written."""
+    runs as written. ``deferred`` is each ``(table, column)`` whose foreign
+    key the planner adds as its own op."""
     op = written["op"]
     kind = op["kind"]
     statements: list[str] = written["statements"]
     if kind == "AddTable":
-        # A new table's row security is the planner's own ops, after its
-        # last ``AddTable``.
-        return _create_table(target, op["table"])
+        # A new table's deferred keys and its row security are the planner's
+        # own ops, after its last ``AddTable``.
+        table = op["table"]
+        return _create_table(
+            target, table, {column for owner, column in deferred if owner == table}
+        )
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
     # A serial key's sequence follows a rename on Postgres: the pass's
@@ -462,12 +477,19 @@ def translate(
     out: list[ops.MigrateOperation] = [
         FerroWarningOp(report["text"]) for report in reports or []
     ]
+    # A key the planner adds as its own op is left out of its table's
+    # ``op.create_table``: the planner decided which (#304).
+    deferred = {
+        (item["op"]["table"], item["op"]["column"])
+        for item in written
+        if item["op"]["kind"] == "AddForeignKey"
+    }
     for item in written:
         if item["irreversible"] is not None:
             out.append(FerroIrreversibleOp(item["irreversible"]))
             continue
         alembic_ops = (
-            _twin(item, resolved)
+            _twin(item, resolved, deferred)
             if item["twin"]
             else _executed(item, item["statements"])
         )

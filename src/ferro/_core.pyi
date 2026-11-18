@@ -209,9 +209,13 @@ def _plan_from_ir(
     acts, ``blocks`` whether it stands in for a statement its op does not
     render (the op is left out, so a reviewed file refuses it). With ``render`` each op also carries its ``statements`` and
     ``reports`` for ``dialect`` — the byte-identical statements the
-    reconciliation pass executes (I-1). A new table's row security is the
-    plan's own ops (``EnableRowSecurity``, ``ForceRowSecurity``,
-    ``AddRowPolicy``), after its last ``AddTable``.
+    reconciliation pass executes (I-1). After its last ``AddTable`` the plan
+    holds, as its own ops, each deferred key (``AddForeignKey``: on Postgres
+    a new table's key to a new table created later, left out of its
+    ``CREATE TABLE``) and then each new table's row security
+    (``EnableRowSecurity``, ``ForceRowSecurity``, ``AddRowPolicy``). Ahead of
+    its first ``DropTable`` it holds the ``DropForeignKey`` of each deferred
+    key of the tables it drops.
     """
     ...
 

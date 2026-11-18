@@ -99,8 +99,9 @@ transaction depends on whether a plan follows:
 - **`auto_migrate=True` alone, or `create_tables()`.** No plan follows, so
   the create pass asks the planner for one, from no tables to the tables it
   creates (`planned_create_unit` in `src/schema.rs`), and runs its ops in
-  order: its own emission for each `AddTable`, the plan's rendering for
-  everything else.
+  order, each as the plan renders it (since #304 the `AddTable`s too: only
+  the plan knows which foreign key a `CREATE TABLE` leaves out, see
+  `deferred-foreign-keys.md`).
 - **`migrate_updates`.** The create pass creates none of those tables and
   hands them over (`CreatePass::left_to_plan`). The reconciliation pass runs
   the plan's ops for them as one unit (`new_tables_unit` in
