@@ -35,6 +35,8 @@ def test_only_macos_jobs_are_skipped_on_push():
         if on_macos:
             assert job.get("if") == "github.event_name != 'push'"
             assert len(_platforms(job)) == 1
+            # A skipped job's name is not expanded, so a template would show raw.
+            assert "${{" not in job["name"]
         else:
             assert "if" not in job
 

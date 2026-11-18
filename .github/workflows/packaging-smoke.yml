@@ -61,7 +61,7 @@ jobs:
   # the job after 900 s (#1003). A release and a manual run still run it.
   packaging-smoke-macos:
     if: github.event_name != 'push'
-    name: Packaging smoke check (${{ matrix.platform.name }})
+    name: Packaging smoke check (macos)
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
