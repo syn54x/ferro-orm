@@ -39,18 +39,19 @@ from .exceptions import (
     UniqueViolationError,
 )
 from .fields import UPGRADING_URL, Field, Forward, ManyToMany, Reverse
-from .models import Model, evict_instance, transaction
+from .models import Model, ModelConnection, evict_instance, transaction
 from .pass_report import (
     ExecutedStatement,
     PassReport,
     Report,
+    Subject,
     _carrying_report,
     _run_pass,
 )
 from .query import REDACTED, Relation, RenderedSql, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
-from .session import Session, current_session, engines
+from .session import EngineManager, Session, current_session, engines
 from .settings import (
     DatabaseSettings,
     FerroSettings,
@@ -653,6 +654,9 @@ __all__ = [
     "PassReport",
     "ExecutedStatement",
     "Report",
+    "Subject",
+    "ModelConnection",
+    "EngineManager",
     "reset_engine",
     "set_default_connection",
     "clear_registry",

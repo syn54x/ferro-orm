@@ -319,19 +319,9 @@ def test_ci_docs_job_runs_the_lint() -> None:
     assert "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
 
 
-RETURNED_TYPES = (
-    "ferro.models.ModelConnection",
-    "ferro.session.EngineManager",
-    "ferro.session.EngineManager.session",
-    "ferro.migrations.runner.RunReport",
-    "ferro.migrations.report.StatusReport",
-    "ferro.migrations.generate.CheckReport",
-    "ferro.pass_report.Subject",
-)
-"""Objects no ``__all__`` exports that a public call returns or is called on:
-``Model.using()``, ``engines.session()``, ``up()``, ``status()``,
-``check()`` and ``Report.subject``. They are documented under the module that
-defines them."""
+RETURNED_TYPES = ("ferro.EngineManager.session",)
+"""Paths no ``__all__`` lists that the reference must still document:
+``engines.session()``, a method of an exported class."""
 
 _DOC_HEADING_ID = re.compile(r'id="([\w.]+)" class="doc doc-heading"')
 

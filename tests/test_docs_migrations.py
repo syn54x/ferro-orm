@@ -311,13 +311,40 @@ def test_a_quoted_refusal_is_the_text_ferro_prints(
 # -- the API page --------------------------------------------------------------------
 
 
+RETURNED_TYPES = [
+    ("ferro.migrations", name, module)
+    for module, names in {
+        "runner": (
+            "RunReport InheritedMigration AppliedStep StepFailure RunEvent "
+            "StepEvent RunNote InheritedEvent"
+        ),
+        "report": "StatusReport MigrationStatus",
+        "generate": "CheckReport Problem",
+    }.items()
+    for name in names.split()
+] + [
+    ("ferro", "ModelConnection", "models"),
+    ("ferro", "EngineManager", "session"),
+    ("ferro", "Subject", "pass_report"),
+]
+
+
+@pytest.mark.parametrize(("package", "name", "module"), RETURNED_TYPES)
+def test_returned_types_are_public_names(package: str, name: str, module: str) -> None:
+    public = importlib.import_module(package)
+    defining = importlib.import_module(
+        f"{package}.{module}" if package != "ferro" else f"ferro.{module}"
+    )
+    assert name in public.__all__
+    assert getattr(public, name) is getattr(defining, name)
+
+
 def test_the_api_page_documents_every_public_name_of_ferro_migrations() -> None:
     targets = re.findall(
         r"^::: (ferro\.migrations\.[\w.]+)", API_PAGE.read_text(), re.M
     )
-    # Only `ferro.migrations.<name>`: the testing harness and the reports
-    # documented under their defining module (`ferro.migrations.runner.RunReport`)
-    # are not in `ferro.migrations.__all__`.
+    # Only `ferro.migrations.<name>`: the testing harness is not in
+    # `ferro.migrations.__all__`.
     documented = sorted(
         target.rsplit(".", 1)[1] for target in targets if target.count(".") == 2
     )

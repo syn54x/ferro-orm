@@ -22,7 +22,7 @@ description: "API reference for connect(), sessions and the model registry."
 
 ::: ferro.engines
 
-::: ferro.session.EngineManager
+::: ferro.EngineManager
 
 ::: ferro.Session
 
@@ -60,7 +60,7 @@ Each `ExecutedStatement` names its table (`subject`) and its `role`; each warnin
 
 ::: ferro.Report
 
-::: ferro.pass_report.Subject
+::: ferro.Subject
 
 ## Project settings
 
