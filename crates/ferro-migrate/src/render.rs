@@ -565,12 +565,12 @@ pub(crate) fn render_from(
                     table, name, columns, *unique, dialect, indexes,
                 ));
             }
-            // DROP INDEX is schema-scoped (not table-qualified) on both
-            // dialects, so only the index name is needed.
             // The index of a column SQLite leaves in place stays with it.
             MigrationOp::DropIndex { .. }
                 if dialect == Dialect::Sqlite
                     && crate::plan::rides_sqlite_kept_column(op, old_side, new_side) => {}
+            // DROP INDEX is schema-scoped (not table-qualified) on both
+            // dialects, so only the index name is needed.
             MigrationOp::DropIndex { table: _, name } => {
                 out.statements.push(render_drop_index_sql(name, indexes));
             }
