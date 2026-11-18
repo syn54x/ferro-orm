@@ -3053,6 +3053,15 @@ enum CheckToken {
 }
 
 fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
+    lex_check_sql(input)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// The tokens of a check's SQL, each with whether it is a double-quoted
+/// identifier: the one lexer of a check body.
+fn lex_check_sql(input: &str) -> Vec<(CheckToken, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -3064,7 +3073,7 @@ fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
         }
         if ch == '\'' {
             let (lit, next) = take_quoted(&chars, i, '\'');
-            tokens.push(CheckToken::String(lit));
+            tokens.push((CheckToken::String(lit), false));
             i = next;
             continue;
         }
@@ -3072,16 +3081,16 @@ fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
             let (ident, next) = take_quoted(&chars, i, '"');
             let inner = ident[1..ident.len() - 1].replace("\"\"", "\"");
             if is_simple_ident(&inner) {
-                tokens.push(CheckToken::Word(inner));
+                tokens.push((CheckToken::Word(inner), true));
             } else {
-                tokens.push(CheckToken::Word(ident));
+                tokens.push((CheckToken::Word(ident), true));
             }
             i = next;
             continue;
         }
         if ch == ':' && i + 1 < chars.len() && chars[i + 1] == ':' {
-            tokens.push(CheckToken::Punct(':'));
-            tokens.push(CheckToken::Punct(':'));
+            tokens.push((CheckToken::Punct(':'), false));
+            tokens.push((CheckToken::Punct(':'), false));
             i += 2;
             continue;
         }
@@ -3091,13 +3100,45 @@ fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
             while i < chars.len() && is_ident_continue(chars[i]) {
                 i += 1;
             }
-            tokens.push(CheckToken::Word(chars[start..i].iter().collect()));
+            tokens.push((CheckToken::Word(chars[start..i].iter().collect()), false));
             continue;
         }
-        tokens.push(CheckToken::Punct(ch));
+        tokens.push((CheckToken::Punct(ch), false));
         i += 1;
     }
     tokens
+}
+
+/// The words of a check's SQL that are never a bare column reference: a
+/// column a keyword names is written quoted.
+const CHECK_KEYWORDS: &[&str] = &[
+    "all", "and", "any", "as", "between", "case", "cast", "check", "collate", "distinct", "else",
+    "end", "escape", "exists", "false", "from", "glob", "in", "is", "isnull", "like", "match",
+    "not", "notnull", "null", "or", "regexp", "then", "true", "valid", "when",
+];
+
+/// Whether the check whose stored SQL is `definition` (`CHECK (…)`, as the
+/// catalog holds it) references `column`: a double-quoted identifier that is
+/// its name, or a bare one that is no keyword ([`CHECK_KEYWORDS`]). A name
+/// followed by `(` is a call and a string literal's contents are text, so
+/// neither is a reference. Names compare without case, as SQLite resolves
+/// them. A word the read cannot place (a number's exponent, a `[bracketed]`
+/// name) counts as a reference, so its column is kept.
+pub fn check_definition_reads_column(definition: &str, column: &str) -> bool {
+    let tokens = lex_check_sql(definition);
+    tokens.iter().enumerate().any(|(at, (token, quoted))| {
+        let CheckToken::Word(word) = token else {
+            return false;
+        };
+        // A quoted name that is no simple identifier keeps its quotes.
+        let name = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+            Some(inner) if *quoted => inner.replace("\"\"", "\""),
+            _ => word.clone(),
+        };
+        let called = matches!(tokens.get(at + 1), Some((CheckToken::Punct('('), _)));
+        let keyword = !quoted && CHECK_KEYWORDS.contains(&name.to_ascii_lowercase().as_str());
+        name.eq_ignore_ascii_case(column) && !called && !keyword
+    })
 }
 
 fn take_quoted(chars: &[char], start: usize, quote: char) -> (String, usize) {
@@ -4175,6 +4216,8 @@ pub enum InPlaceChange {
     DropGeneratedExpression,
     /// Add a generated column, or turn a plain column into one.
     AddGeneratedColumn,
+    /// Drop a column the table's foreign key or a table check names.
+    DropColumn,
 }
 
 /// [`ReportKind::ForeignDefault`]: `table.column` has the server default

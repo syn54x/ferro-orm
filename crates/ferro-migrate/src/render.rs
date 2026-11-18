@@ -6,7 +6,7 @@ use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
-use crate::plan::{Body, Side, index_models, planned_before, relabels_rows};
+use crate::plan::{Body, DropBlocker, Side, index_models, planned_before, relabels_rows};
 use crate::{Dialect, EmissionError, MigrationOp, Report, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
@@ -435,11 +435,40 @@ pub(crate) fn render_from(
                         message: refusal.to_string(),
                     });
                 }
-                out.statements.push(format!(
-                    "ALTER TABLE {} DROP COLUMN {}",
-                    quote_ident(table),
-                    quote_ident(column)
-                ));
+                // SQLite drops no column its table's foreign key or a table
+                // check names: the verdict's rebuild, which the pass never
+                // runs (ADR-0014).
+                let blocker = (dialect == Dialect::Sqlite)
+                    .then(|| crate::plan::sqlite_drop_blocker(old_side, table, column))
+                    .flatten();
+                match blocker {
+                    Some(blocker) => {
+                        let names = match blocker {
+                            DropBlocker::ForeignKey(name) => {
+                                format!("foreign key '{name}' names it")
+                            }
+                            DropBlocker::Check(name) => {
+                                format!("CHECK constraint '{name}' reads it")
+                            }
+                        };
+                        out.reports.push(sqlite_in_place_report(
+                            InPlaceChange::DropColumn,
+                            Subject::column(table, column),
+                            format!(
+                                "Column '{table}.{column}' is no longer declared, but {names}, \
+                                 and SQLite cannot drop such a column in place (it requires a \
+                                 full table rebuild). The column stays with its values; \
+                                 generate a reviewed migration with `ferro migrate new` to \
+                                 drop it."
+                            ),
+                        ));
+                    }
+                    None => out.statements.push(format!(
+                        "ALTER TABLE {} DROP COLUMN {}",
+                        quote_ident(table),
+                        quote_ident(column)
+                    )),
+                }
             }
             MigrationOp::AlterColumnType { table, column } => {
                 // A change in the way of what a withheld type change holds.
@@ -536,6 +565,10 @@ pub(crate) fn render_from(
                     table, name, columns, *unique, dialect, indexes,
                 ));
             }
+            // The index of a column SQLite leaves in place stays with it.
+            MigrationOp::DropIndex { .. }
+                if dialect == Dialect::Sqlite
+                    && crate::plan::rides_sqlite_kept_column(op, old_side, new_side) => {}
             // DROP INDEX is schema-scoped (not table-qualified) on both
             // dialects, so only the index name is needed.
             MigrationOp::DropIndex { table: _, name } => {

@@ -540,7 +540,8 @@ async fn execute_table_ops(
     let statements: usize = ops.iter().map(|op| op.statements.len()).sum();
     let drops = ops
         .iter()
-        .filter(|op| matches!(op.op, MigrationOp::DropColumn { .. }))
+        // A drop SQLite leaves in place renders no statement.
+        .filter(|op| matches!(op.op, MigrationOp::DropColumn { .. }) && !op.statements.is_empty())
         .count();
     if statements == 0 {
         return Ok((0, 0));

@@ -2767,7 +2767,7 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         execution: replace_refusal(op, before, target, dialect)
             .or_else(|| held_refusal(op, before, target, dialect))
             .map_or_else(
-                || execution(op, was, now, goes_with, target, dialect),
+                || execution(op, before, was, now, goes_with, target, dialect),
                 Execution::Refused,
             ),
         demands_values: !generated_add && demands_values(op, was, now),
@@ -3000,6 +3000,7 @@ fn rides_removed_label(
 /// cannot do ([`sqlite_rebuilds`]) is a rebuild.
 fn execution(
     op: &MigrationOp,
+    before: &Side,
     was: Option<&SchemaModel>,
     now: Option<&SchemaModel>,
     goes_with: Option<Rider>,
@@ -3026,7 +3027,7 @@ fn execution(
     }
     // SQLite's `ADD COLUMN` takes no stored generated column.
     if dialect == Dialect::Sqlite
-        && (sqlite_rebuilds(op, was, now, goes_with) || adds_generated(op, target))
+        && (sqlite_rebuilds(op, before, now, goes_with) || adds_generated(op, target))
     {
         return Execution::Rebuild;
     }
@@ -3052,7 +3053,7 @@ fn execution(
 /// | add an optional column | native |
 /// | add a required column (SQLite's `ADD COLUMN … NOT NULL` keeps its `DEFAULT` for good, and no `SET NOT NULL` reaches it) | rebuild |
 /// | drop a plain column | native |
-/// | drop a foreign-key column | rebuild |
+/// | drop a foreign-key column, or one a table check reads | rebuild |
 /// | change a column's type or nullability | rebuild |
 /// | add a generated column (decided by the caller, from the target's side), make one plain, or change its expression | rebuild |
 /// | drop a column to add it back generated | rebuild |
@@ -3066,16 +3067,14 @@ fn execution(
 /// `REFERENCES` column `ADD COLUMN` wrote; once any rebuild has written the
 /// table (as `FOREIGN KEY (…)`, `CREATE TABLE`'s shape) SQLite refuses to
 /// drop it in place, and nothing can know which shape it finds, so the drop
-/// is always a rebuild.
+/// is always a rebuild. A column a table-level `CHECK` reads never comes off
+/// in place ([`sqlite_drop_blocker`]).
 fn sqlite_rebuilds(
     op: &MigrationOp,
-    was: Option<&SchemaModel>,
+    before: &Side,
     now: Option<&SchemaModel>,
     goes_with: Option<Rider>,
 ) -> bool {
-    let has_foreign_key = |model: Option<&SchemaModel>, column: &str| {
-        model.is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == column))
-    };
     match op {
         MigrationOp::AddTable { .. }
         | MigrationOp::DropTable { .. }
@@ -3113,8 +3112,9 @@ fn sqlite_rebuilds(
         }
         // A column the target still holds is dropped to be added back
         // generated, which only the rebuild does.
-        MigrationOp::DropColumn { column, .. } => {
-            has_foreign_key(was, column) || find_column(now, column).is_some()
+        MigrationOp::DropColumn { table, column } => {
+            sqlite_drop_blocker(before, table, column).is_some()
+                || find_column(now, column).is_some()
         }
         // SQLite has no `ALTER COLUMN … DROP DEFAULT`.
         MigrationOp::AlterColumnType { .. }
@@ -3130,6 +3130,66 @@ fn sqlite_rebuilds(
         | MigrationOp::RebuildForeignKey { .. } => true,
         MigrationOp::DropCheck { .. } => goes_with != Some(Rider::DroppedColumn),
     }
+}
+
+/// What keeps SQLite from dropping a column in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DropBlocker {
+    /// The table's foreign key of this name, on the column.
+    ForeignKey(String),
+    /// The check of this name, which reads the column and is not its own.
+    Check(String),
+}
+
+/// What on `before` keeps SQLite from dropping `column` of `table` in place:
+/// the table's foreign key on it, or the first check that reads it and is
+/// not the column's own inline one, which rides the drop. A declared side
+/// answers from each table check's predicate; a live side reads each stored
+/// definition as SQL tokens
+/// ([`ferro_ddl_lowering::check_definition_reads_column`]), a hand-written
+/// check's too.
+/// The verdict reads it ([`sqlite_rebuilds`]) and the renderer reports it.
+pub(crate) fn sqlite_drop_blocker(before: &Side, table: &str, column: &str) -> Option<DropBlocker> {
+    let was = before.model(table)?;
+    if let Some(fk) = was.foreign_keys.iter().find(|fk| fk.column == column) {
+        return Some(DropBlocker::ForeignKey(emit::fk_constraint_name(table, fk)));
+    }
+    match &before.0 {
+        SideKind::Declared(_) => checks_reading(was, &[column.to_string()])
+            .into_iter()
+            .next(),
+        SideKind::Live { .. } => before
+            .table_facts(was)
+            .checks
+            .iter()
+            .find(|check| {
+                check.column.as_deref() != Some(column)
+                    && ferro_ddl_lowering::check_definition_reads_column(&check.definition, column)
+            })
+            .map(|check| check.name.clone()),
+    }
+    .map(DropBlocker::Check)
+}
+
+/// Whether `op` drops an index that rides only drops of columns SQLite
+/// leaves in place ([`sqlite_drop_blocker`]): the index stays with them.
+pub(crate) fn rides_sqlite_kept_column(op: &MigrationOp, before: &Side, target: &Side) -> bool {
+    let MigrationOp::DropIndex { table, name } = op else {
+        return false;
+    };
+    let (Some(was), Some(now)) = (before.model(table), target.model(table)) else {
+        return false;
+    };
+    let dropped: Vec<String> = emit::standalone_indexes(was)
+        .into_iter()
+        .filter(|(index, _, _)| index == name)
+        .flat_map(|(_, columns, _)| columns)
+        .filter(|column| find_column(Some(now), column).is_none())
+        .collect();
+    !dropped.is_empty()
+        && dropped
+            .iter()
+            .all(|column| sqlite_drop_blocker(before, table, column).is_some())
 }
 
 // -- a down (ADR-0050) --------------------------------------------------------------------
