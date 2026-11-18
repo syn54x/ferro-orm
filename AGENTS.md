@@ -70,6 +70,7 @@ For a single model, every emitter must agree on:
    emitted (every emitter renders `SchemaForeignKey.name`; single-sourced in
    `ferro_ddl_lowering::fk_name`). See
    `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.
+   On Postgres a key of a new table to a new table created later in the plan is deferred: left out of its CREATE TABLE and added after the last CREATE TABLE as the planner's AddForeignKey, and dropped before the first DROP TABLE of a plan that drops both tables, so tables may reference each other; the create order decides which key, for every emitter (#304).
 7. **Primary key constraint names** — when explicitly named.
 8. **Check constraint names** — `ck_<table>_<col>` for the single-column
    `db_check=True` constraint; `ck_<table>_<suffix>` for table checks declared

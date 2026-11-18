@@ -208,7 +208,17 @@ CASES: tuple[Case, ...] = (
         enums.models(),
     ),
     Case("B1-new-model-with-a-unique", AUTHOR, AUTHOR + columns.TAG),
+    Case(
+        "B1-new-models-that-reference-each-other",
+        AUTHOR,
+        AUTHOR + columns.EACH_OTHER,
+    ),
     Case("B2-drop-a-model", LIBRARY, _POST_DROPPED),
+    Case(
+        "B2-drop-models-that-reference-each-other",
+        AUTHOR + columns.EACH_OTHER,
+        AUTHOR,
+    ),
     Case(
         "B3-rename-a-model",
         renames.b3("writer", "postgres"),

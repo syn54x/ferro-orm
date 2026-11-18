@@ -3056,6 +3056,179 @@ fn a_dropped_tables_ferro_policies_are_dropped_before_the_first_drop_table() {
     );
 }
 
+/// `table` with a nullable foreign-key column `<to>_id` to each of `to`.
+fn referencing(table: &str, to: &[&str]) -> SchemaModel {
+    let mut columns = vec![pk_col("id", "int")];
+    columns.extend(
+        to.iter()
+            .map(|target| col(&format!("{target}_id"), "int", true)),
+    );
+    SchemaModel {
+        foreign_keys: to
+            .iter()
+            .map(|target| SchemaForeignKey {
+                renamed_from: None,
+                column: format!("{target}_id"),
+                to_table: target.to_string(),
+                to_column: "id".to_string(),
+                on_delete: Some("CASCADE".to_string()),
+                name: None,
+            })
+            .collect(),
+        ..schema_model(table, columns)
+    }
+}
+
+/// `captain` and `crew`, whose foreign keys point at each other (#304).
+fn captain_and_crew() -> IrEnvelope<SchemaIrPayload> {
+    envelope(vec![
+        referencing("captain", &["crew"]),
+        referencing("crew", &["captain"]),
+    ])
+}
+
+fn foreign_key_ops(plan: &Plan) -> Vec<&MigrationOp> {
+    plan.ops()
+        .filter(|op| {
+            matches!(
+                op,
+                MigrationOp::AddForeignKey { .. } | MigrationOp::DropForeignKey { .. }
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn tables_that_reference_each_other_get_the_key_to_the_later_one_after_the_last_create_table() {
+    let up = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(captain_and_crew()),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        statements_of(&up),
+        [
+            "CREATE TABLE IF NOT EXISTS \"captain\" ( \"id\" serial PRIMARY KEY NOT NULL, \
+             \"crew_id\" integer )",
+            "CREATE TABLE IF NOT EXISTS \"crew\" ( \"id\" serial PRIMARY KEY NOT NULL, \
+             \"captain_id\" integer, CONSTRAINT \"fk_crew_captain_id_captain\" FOREIGN KEY \
+             (\"captain_id\") REFERENCES \"captain\" (\"id\") ON DELETE CASCADE )",
+            "ALTER TABLE \"captain\" ADD CONSTRAINT \"fk_captain_crew_id_crew\" FOREIGN KEY \
+             (\"crew_id\") REFERENCES \"crew\" (\"id\") ON DELETE CASCADE",
+        ]
+    );
+    // The table is new and holds no row: the key is added validated, in any
+    // mode, and no row can fail it.
+    let key = up
+        .operations
+        .iter()
+        .find(|planned| matches!(planned.op, MigrationOp::AddForeignKey { .. }))
+        .expect("the deferred key");
+    assert_eq!(key.verdict.fails_on_rows, crate::RowRisk::None);
+    let all: Vec<usize> = (0..up.operations.len()).collect();
+    let staged: Vec<String> = up
+        .render_in(
+            ferro_ddl_lowering::ConstraintMode::NotValid,
+            ferro_ddl_lowering::IndexMode::Plain,
+            &all,
+        )
+        .expect("renders")
+        .into_iter()
+        .flat_map(|op| op.statements)
+        .collect();
+    assert_eq!(staged, statements_of(&up));
+
+    // SQLite takes the forward reference and cannot add a constraint to a
+    // table that exists: both keys stay inside their `CREATE TABLE`.
+    let sqlite = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(captain_and_crew()),
+        Dialect::Sqlite,
+        updates_only(),
+    );
+    assert!(foreign_key_ops(&sqlite).is_empty());
+    let statements = statements_of(&sqlite);
+    assert_eq!(statements.len(), 2);
+    assert!(statements[0].contains("CONSTRAINT \"fk_captain_crew_id_crew\" FOREIGN KEY"));
+    assert!(statements[1].contains("CONSTRAINT \"fk_crew_captain_id_captain\" FOREIGN KEY"));
+}
+
+#[test]
+fn dropped_tables_that_reference_each_other_lose_the_deferred_key_before_the_first_drop_table() {
+    let down = plan_from_ir(
+        &Side::declared(captain_and_crew()),
+        &Side::declared(empty_envelope()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        statements_of(&down),
+        [
+            "ALTER TABLE \"captain\" DROP CONSTRAINT \"fk_captain_crew_id_crew\"",
+            "DROP TABLE \"crew\"",
+            "DROP TABLE \"captain\"",
+        ]
+    );
+    let sqlite = plan_from_ir(
+        &Side::declared(captain_and_crew()),
+        &Side::declared(empty_envelope()),
+        Dialect::Sqlite,
+        destructive(),
+    );
+    assert!(foreign_key_ops(&sqlite).is_empty());
+    assert_eq!(
+        statements_of(&sqlite),
+        ["DROP TABLE \"crew\"", "DROP TABLE \"captain\""]
+    );
+}
+
+#[test]
+fn a_cycle_of_three_defers_one_key_and_a_table_referencing_it_keeps_its_key_inline() {
+    let models = envelope(vec![
+        referencing("a", &["b"]),
+        referencing("b", &["c"]),
+        referencing("c", &["a"]),
+        referencing("d", &["a"]),
+    ]);
+    let up = plan_from_ir(
+        &Side::declared(empty_envelope()),
+        &Side::declared(models),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        foreign_key_ops(&up),
+        [&MigrationOp::AddForeignKey {
+            table: "a".to_string(),
+            column: "b_id".to_string(),
+        }]
+    );
+    let statements = statements_of(&up);
+    let created: Vec<&str> = statements
+        .iter()
+        .filter_map(|sql| sql.strip_prefix("CREATE TABLE IF NOT EXISTS \""))
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(created, ["a", "c", "d", "b"]);
+    let d = statements
+        .iter()
+        .find(|sql| sql.starts_with("CREATE TABLE IF NOT EXISTS \"d\""))
+        .expect("d is created");
+    assert!(d.contains("CONSTRAINT \"fk_d_a_id_a\" FOREIGN KEY"), "{d}");
+    // A self-reference and a key to a table that already exists stay inline.
+    let grown = plan_from_ir(
+        &Side::declared(envelope(vec![referencing("a", &[])])),
+        &Side::declared(envelope(vec![
+            referencing("a", &[]),
+            referencing("e", &["e", "a"]),
+        ])),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert!(foreign_key_ops(&grown).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Validity flags (#515; ADR-0043, ADR-0044): a live constraint or index can
 // exist and still not be trusted. A declared FK or check that exists live

@@ -24,17 +24,17 @@
 //! | an op that drops data, demands values of existing rows or can fail on them | contract |
 //! | a rename of a column, a table, an enum type or a label | contract |
 //! | a type change | contract |
-//! | a constraint added `NOT VALID`, or validated (the validate, add-constraint and contract steps) | contract |
+//! | a constraint added to a table that already exists (`NOT VALID` on Postgres), or validated (the validate, add-constraint and contract steps) | contract |
 //! | a unique index built or redefined | contract |
 //! | a row-security change that can refuse a write (a policy, `ENABLE` / `FORCE`) | contract |
-//! | an added table or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
+//! | an added table (with a foreign key added to it by the same step, after its `CREATE TABLE`) or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
 //! | a data step, a guard step | expand |
 //! | a SQLite rebuild carrying only expand ops | expand |
 //! | a step whose rendering on the dialect runs nothing (`not-applicable`) | expand |
 
 use crate::directory::{Headers, Migration, MigrationsDir, Step, StepDialect, StepKind};
 use crate::generate::backfill::Demand;
-use crate::generate::staging::stages_not_valid;
+use crate::generate::staging::{existing_table, stages_not_valid};
 use crate::generate::{GenerateError, GenerateOptions, GeneratedStep, generate_with};
 use crate::run_plan::RunRefusal;
 use crate::snapshot::sha384;
@@ -236,6 +236,14 @@ fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     }
     if verdict.drops_data || verdict.demands_values || verdict.fails_on_rows != RowRisk::None {
         return StepClass::Contract;
+    }
+    // A key added to a table the same step creates is part of creating it
+    // (on Postgres, a key deferred past the last `CREATE TABLE`, #304): the
+    // previous release never writes that table.
+    if matches!(planned.op, MigrationOp::AddForeignKey { .. })
+        && existing_table(&planned.op, sides.before, sides.target).is_none()
+    {
+        return StepClass::Expand;
     }
     kind_class(&planned.op, sides.target)
 }
@@ -842,6 +850,46 @@ mod tests {
         }
     }
 
+    /// `table (id, <to>_id)` with a foreign key to `to`.
+    fn referencing(name: &str, to: &str) -> SchemaModel {
+        let column = format!("{to}_id");
+        let mut model = model(name, vec![pk(), nullable(&column, "integer")]);
+        model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
+            column,
+            to_table: to.into(),
+            to_column: "id".into(),
+            on_delete: Some("CASCADE".into()),
+            name: None,
+        });
+        model
+    }
+
+    #[test]
+    fn new_tables_that_reference_each_other_are_expand() {
+        // On Postgres the key to the table created later is its own op
+        // after the last `CREATE TABLE` (#304). It is part of creating the
+        // table: the previous release never writes it.
+        let pair = vec![
+            referencing("Captain", "crew"),
+            referencing("Crew", "captain"),
+        ];
+        let with_pair: Vec<SchemaModel> = [vec![team()], pair].concat();
+        for dialect in BOTH {
+            assert_eq!(
+                classes(vec![team()], with_pair.clone(), dialect),
+                named(&[("01_schema", Expand)]),
+                "{dialect:?}"
+            );
+            // Dropping them drops their rows, deferred key or not.
+            assert_eq!(
+                classes(with_pair.clone(), vec![team()], dialect),
+                named(&[("01_schema", Contract)]),
+                "{dialect:?}"
+            );
+        }
+    }
+
     #[test]
     fn dropping_data_is_contract() {
         let with_bio = author(vec![nullable("bio", "string")]);
@@ -1139,12 +1187,13 @@ mod tests {
     fn every_op_kind_has_its_class_under_a_quiet_verdict() {
         // Each op kind with a verdict that drops nothing, demands nothing
         // and cannot fail on rows, alone in a schema step: what the kind
-        // alone decides.
+        // alone decides, on a table that already exists (a key added to a
+        // table the step creates is part of creating it).
         let t = || "author".to_string();
-        let empty = ir(vec![]);
+        let existing = ir(vec![author(vec![])]);
         let sides = Sides {
-            before: &empty,
-            target: &empty,
+            before: &existing,
+            target: &existing,
         };
         let quiet = |op: MigrationOp| PlannedOp {
             op,

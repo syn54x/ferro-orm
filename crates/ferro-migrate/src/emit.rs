@@ -197,6 +197,21 @@ pub fn render_create_table_as(
     dialect: Dialect,
     table_name_override: Option<&str>,
 ) -> Result<CreateTableEmission, EmissionError> {
+    render_create_table_deferring(model, dialect, table_name_override, &[])
+}
+
+/// [`render_create_table_as`], leaving out the foreign key of each column in
+/// `deferred`: the plan adds those after its last `CREATE TABLE`
+/// ([`deferred_foreign_keys`]). Nothing else about the emission changes.
+///
+/// # Errors
+/// As [`render_create_table`].
+pub(crate) fn render_create_table_deferring(
+    model: &SchemaModel,
+    dialect: Dialect,
+    table_name_override: Option<&str>,
+    deferred: &[&str],
+) -> Result<CreateTableEmission, EmissionError> {
     let ld = dialect;
     let table_lower = model.table_name.as_str();
     let mut table_stmt = Table::create()
@@ -273,7 +288,11 @@ pub fn render_create_table_as(
 
     // Inline, NAMED foreign keys. The runtime defaults a missing `on_delete`
     // to CASCADE (`fk_action_from_str(None) == Cascade`), preserved here.
-    for fk in &model.foreign_keys {
+    for fk in model
+        .foreign_keys
+        .iter()
+        .filter(|fk| !deferred.contains(&fk.column.as_str()))
+    {
         let action = fk_action_from_str(fk.on_delete.as_deref());
         table_stmt.foreign_key(
             ForeignKey::create()
@@ -451,9 +470,9 @@ fn post_create_artifacts(
 ///
 /// Delegates to [`crate::order_by_dependencies`] for the dependency
 /// semantics: a self-referential FK and a FK to a table outside this add set
-/// do not constrain ordering, and genuine cross-table cycles fall through in
-/// input order (SQLite tolerates the forward references; Postgres rejects
-/// them — #302 follow-up).
+/// do not constrain ordering, and of tables that reference each other the
+/// first in input order comes first, its key to a later table a forward
+/// reference ([`deferred_foreign_keys`]).
 pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a SchemaModel> {
     crate::order_by_dependencies(
         models.to_vec(),
@@ -466,6 +485,52 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
                 .collect()
         },
     )
+}
+
+/// The deferred keys of new tables created in the order `ordered`
+/// ([`order_models_for_create`]): each foreign key whose target is another
+/// of them that comes later. Postgres refuses a `REFERENCES` to a table that
+/// does not exist yet, so the key is left out of its `CREATE TABLE` and
+/// added after the last one; dropping the tables, it goes before the first
+/// `DROP TABLE`, which Postgres refuses while the key stands (#304).
+///
+/// ```text
+/// class Captain(Model):                    CREATE TABLE "captain" ( "crew_id" integer, … )
+///     crew_id: int | None = Field(         CREATE TABLE "crew" ( …, CONSTRAINT
+///         default=None, foreign_key="Crew")    "fk_crew_captain_id_captain" … )
+/// class Crew(Model):                       ALTER TABLE "captain" ADD CONSTRAINT
+///     captain_id: int | None = Field(          "fk_captain_crew_id_crew" …
+///         default=None, foreign_key=Captain)
+/// ```
+///
+/// In table order, then column order. A self-reference is never deferred,
+/// nor a key to a table outside `ordered`. Empty on SQLite, which accepts
+/// the forward reference and cannot add a constraint to a table that exists.
+/// This is the one decision of which key is deferred: the planner plans from
+/// it and every emitter reads the plan (AGENTS.md § I-1).
+pub(crate) fn deferred_foreign_keys<'a>(
+    ordered: &[&'a SchemaModel],
+    dialect: Dialect,
+) -> Vec<(&'a SchemaModel, &'a ferro_schema_ir::SchemaForeignKey)> {
+    if dialect != Dialect::Postgres {
+        return Vec::new();
+    }
+    let mut deferred = Vec::new();
+    for (index, model) in ordered.iter().enumerate() {
+        let later = |table: &str| {
+            ordered[index + 1..]
+                .iter()
+                .any(|other| other.table_name == table)
+        };
+        let mut keys: Vec<&ferro_schema_ir::SchemaForeignKey> = model
+            .foreign_keys
+            .iter()
+            .filter(|fk| later(&fk.to_table))
+            .collect();
+        keys.sort_by_key(|fk| model.columns.iter().position(|col| col.name == fk.column));
+        deferred.extend(keys.into_iter().map(|fk| (*model, fk)));
+    }
+    deferred
 }
 
 /// What an `ADD COLUMN` of one column also creates: the column's riders.

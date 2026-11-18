@@ -33,6 +33,7 @@ import pytest
 import ferro
 from ferro import _core
 from tests.test_migrate_down import (  # noqa: F401 - fixtures
+    empty_snapshot,
     keys,
     migration_dir,
     plan_against,
@@ -518,6 +519,85 @@ def test_f1_several_models_edited_at_once_share_one_step_parents_first(
         'ALTER TABLE "post" DROP COLUMN "subtitle"',
     ]
     round_trip(project, db)
+
+
+# -- B1: new models that reference each other (#304) ------------------------------------
+
+EACH_OTHER = """
+class Captain(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    crew_id: Annotated[int | None, FerroField(foreign_key="Crew")] = None
+
+
+class Crew(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    captain_id: Annotated[int | None, FerroField(foreign_key=Captain)] = None
+"""
+
+CAPTAIN_CREW_KEY = (
+    'ALTER TABLE "captain" ADD CONSTRAINT "fk_captain_crew_id_crew" '
+    'FOREIGN KEY ("crew_id") REFERENCES "crew" ("id") ON DELETE CASCADE'
+)
+
+
+@backend_matrix
+def test_b1_new_models_that_reference_each_other_get_the_later_key_last(
+    project, pkg, db, capsys
+):
+    """Postgres refuses a ``REFERENCES`` to a table that does not exist yet
+    and the drop of a table another table's key references: the key to the
+    table created later is added after the last ``CREATE TABLE``, validated
+    (the table is new), and dropped before the first ``DROP TABLE``. SQLite
+    keeps both keys inside their ``CREATE TABLE``."""
+    write_config(project, pkg)
+    write_models(project, pkg, EACH_OTHER)
+    new("create")
+    # One step: nothing is staged NOT VALID, so nothing waits to be validated.
+    files = sorted(path.name for path in migration_dir(project, 1).iterdir())
+    assert [name for name in files if not name.startswith("01_schema.")] == ["ir.json"]
+    up = statements(schema_file(project, 1, "up", "postgres"))
+    assert [s.split(" (")[0] for s in up[:2]] == [
+        'CREATE TABLE IF NOT EXISTS "captain"',
+        'CREATE TABLE IF NOT EXISTS "crew"',
+    ]
+    assert "fk_captain_crew_id_crew" not in up[0]
+    assert 'CONSTRAINT "fk_crew_captain_id_captain" FOREIGN KEY' in up[1]
+    assert up[2:] == [CAPTAIN_CREW_KEY]
+    assert statements(schema_file(project, 1, "down", "postgres")) == [
+        'ALTER TABLE "captain" DROP CONSTRAINT "fk_captain_crew_id_crew"',
+        'DROP TABLE "crew"',
+        'DROP TABLE "captain"',
+    ]
+    sqlite = statements(schema_file(project, 1, "up", "sqlite"))
+    assert [s.split(" (")[0] for s in sqlite] == [
+        'CREATE TABLE IF NOT EXISTS "captain"',
+        'CREATE TABLE IF NOT EXISTS "crew"',
+    ]
+    assert 'CONSTRAINT "fk_captain_crew_id_crew" FOREIGN KEY' in sqlite[0]
+    assert 'CONSTRAINT "fk_crew_captain_id_captain" FOREIGN KEY' in sqlite[1]
+    assert statements(schema_file(project, 1, "down", "sqlite")) == [
+        'DROP TABLE "crew"',
+        'DROP TABLE "captain"',
+    ]
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 1), empty_snapshot(project)) == []
+    if db.backend == "postgres":
+        assert db.rows(
+            "SELECT conname FROM pg_constraint WHERE contype = 'f' "
+            f"AND connamespace = '{db.schema}'::regnamespace ORDER BY conname"
+        ) == [("fk_captain_crew_id_crew",), ("fk_crew_captain_id_captain",)]
+    # A key added to a table the same step creates is part of creating it:
+    # the previous release never writes that table, so the step is expand,
+    # as a step creating one table with its key inline is.
+    capsys.readouterr()
+    assert run("migrate", "status", "--steps", "--url", db.url) == 0
+    out = capsys.readouterr().out
+    (step,) = [line for line in out.splitlines() if "01_schema" in line]
+    assert step.split() == [f"01_schema.up.{db.backend}.sql", "applied", "expand"], out
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert not {"captain", "crew"} & db.tables()
+    assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
 
 
 # -- refusals ------------------------------------------------------------------------------

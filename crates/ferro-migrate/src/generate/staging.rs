@@ -247,8 +247,10 @@ pub struct StagedConstraint {
 /// into `after` renders them on `dialect`, in the order the file adds them:
 /// an added or rebuilt foreign key or check, and an added column's own check
 /// and foreign key. Every Postgres up file stages them on a table that
-/// already exists (a new table's ride its `CREATE TABLE`) and validates them
-/// in a later step (ADR-0043); SQLite has no unvalidated constraint (a
+/// already exists and validates them in a later step (ADR-0043). A new
+/// table's ride its `CREATE TABLE`, and its deferred key is added validated
+/// after the last one (#304): the table holds no row. SQLite has no
+/// unvalidated constraint (a
 /// rebuild validates by copying), so it stages none.
 ///
 /// # Errors
@@ -313,6 +315,23 @@ pub fn staged_constraints(
     Ok(staged)
 }
 
+/// The table `op` changes, as `after` declares it, when the table already
+/// exists: it is on both sides of the step. `None` for an op on a table the
+/// step creates or drops, or on no table. This is the one test of "a table
+/// that already exists": a constraint is staged on one
+/// ([`stages_not_valid`]), and a key added to one refuses writes the
+/// previous release may make ([`crate::run_plan::step_class`]), while a key
+/// added to a table the same step creates is part of creating it (#304).
+pub(crate) fn existing_table<'a>(
+    op: &MigrationOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &'a IrEnvelope<SchemaIrPayload>,
+) -> Option<&'a SchemaModel> {
+    let table = op.table()?;
+    find_model(before, table)?;
+    find_model(after, table)
+}
+
 /// Whether `op`, in an up file turning `before` into `after` on `dialect`,
 /// adds a foreign key or check `NOT VALID` ([`staged_constraints`] stages
 /// exactly the ops this admits): on Postgres, a foreign key or check added
@@ -328,10 +347,7 @@ pub(crate) fn stages_not_valid(
     if dialect != Dialect::Postgres {
         return false;
     }
-    let Some(table) = op.table() else {
-        return false;
-    };
-    let (Some(_), Some(model)) = (find_model(before, table), find_model(after, table)) else {
+    let Some(model) = existing_table(op, before, after) else {
         return false;
     };
     match op {

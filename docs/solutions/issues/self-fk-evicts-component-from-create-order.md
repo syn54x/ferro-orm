@@ -6,7 +6,7 @@ related_files:
   - crates/ferro-migrate/src/order.rs
   - crates/ferro-migrate/src/emit.rs
   - src/schema.rs
-related_issues: [302]
+related_issues: [302, 304]
 captured: 2026-07-15
 ---
 
@@ -43,9 +43,11 @@ Two things let the bug survive review:
    Postgres rejects forward references at CREATE time; only SQLite tolerates
    them. Don't trust ordering-doesn't-matter claims without a Postgres test.
 
-Genuine cross-table cycles (A→B→A) still fall through in input order and fail
-on Postgres — a real fix needs post-create `ALTER TABLE ADD CONSTRAINT`
-deferral (follow-up tracked from #302).
+Tables that reference each other (A→B→A) have no dependency order at all.
+Since #304 the sort emits the first of them in input order and goes on, and on
+Postgres the key that points at a table created later is left out of its
+`CREATE TABLE` and added after the last one. See
+`docs/solutions/patterns/deferred-foreign-keys.md`.
 
 ## How to recognize
 

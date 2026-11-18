@@ -13,10 +13,13 @@ use std::collections::HashSet;
 ///   table its own `CREATE TABLE` statement is creating (#302).
 /// - A dependency on a table **outside** `items` (already live in the DB)
 ///   does not constrain ordering.
-/// - Genuine cross-table cycles cannot be dependency-ordered; the remaining
-///   items are appended in input order. SQLite tolerates the resulting
-///   forward references; Postgres rejects them at CREATE time (#302
-///   follow-up: defer those FKs to post-create `ALTER TABLE ADD CONSTRAINT`).
+/// - Tables that reference each other have no such order. When no remaining
+///   item is ready, the first remaining one, in input order, is emitted and
+///   the ordering goes on: an item that only references the cycle still
+///   follows its target, and a cycle of three leaves one forward reference,
+///   not two. The emitted item names a table created after it; SQLite
+///   accepts that `REFERENCES`, and on Postgres the key is deferred past the
+///   last `CREATE TABLE` (`deferred_foreign_keys`, #304).
 ///
 /// Ordering is deterministic: input order is preserved except where a
 /// dependency forces an item later.
@@ -48,8 +51,9 @@ pub fn order_by_dependencies<T>(
             }
         }
         if !progress {
-            ordered.append(&mut remaining);
-            break;
+            let item = remaining.remove(0);
+            created.insert(table_of(&item));
+            ordered.push(item);
         }
     }
     ordered

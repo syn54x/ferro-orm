@@ -1544,6 +1544,78 @@ def test_the_translator_writes_each_revision_op_the_way_the_core_says():
     assert raised.reason == "labels are append-only"
 
 
+def test_a_created_table_leaves_out_the_keys_the_core_adds_as_their_own_op():
+    """The core plans a deferred key as an ``AddForeignKey`` after the last
+    ``AddTable`` (#304). The translator reads that and writes
+    ``op.create_table`` without the key; it decides nothing: with no such
+    op, the key stays in the table."""
+    from alembic.operations import ops
+
+    from ferro.migrations.translate import translate
+
+    def table(name: str, to: str) -> dict:
+        return {
+            "model_name": f"app.{name.title()}",
+            "table_name": name,
+            "columns": [
+                {"name": "id", "db_type": "int", "primary_key": True},
+                {"name": f"{to}_id", "db_type": "int", "nullable": True},
+            ],
+            "foreign_keys": [
+                {
+                    "column": f"{to}_id",
+                    "to_table": to,
+                    "to_column": "id",
+                    "on_delete": "CASCADE",
+                    "name": f"fk_{name}_{to}_id_{to}",
+                }
+            ],
+        }
+
+    target = {
+        **_CARD_TARGET,
+        "payload": {
+            "dialect_agnostic": True,
+            "models": [table("captain", "crew"), table("crew", "captain")],
+        },
+    }
+    creates = [
+        _written({"kind": "AddTable", "table": "captain"}, twin=True),
+        _written({"kind": "AddTable", "table": "crew"}, twin=True),
+    ]
+    add_key = _written(
+        {"kind": "AddForeignKey", "table": "captain", "column": "crew_id"},
+        twin=True,
+        foreign_key={
+            "name": "fk_captain_crew_id_crew",
+            "column": "crew_id",
+            "to_table": "crew",
+            "to_column": "id",
+            "on_delete": "CASCADE",
+        },
+    )
+
+    def keys(create: ops.CreateTableOp) -> list[str]:
+        return [
+            str(item.name)
+            for item in create.columns
+            if isinstance(item, sa.ForeignKeyConstraint)
+        ]
+
+    captain, crew, key = translate(
+        [*creates, add_key], target=target, dialect="postgres"
+    )
+    assert isinstance(captain, ops.CreateTableOp) and keys(captain) == []
+    assert isinstance(crew, ops.CreateTableOp)
+    assert keys(crew) == ["fk_crew_captain_id_captain"]
+    assert isinstance(key, ops.CreateForeignKeyOp)
+    assert key.constraint_name == "fk_captain_crew_id_crew"
+
+    captain, crew = translate(creates, target=target, dialect="sqlite")
+    assert keys(captain) == ["fk_captain_crew_id_crew"]
+    assert keys(crew) == ["fk_crew_captain_id_captain"]
+
+
 def test_a_foreign_defaults_drop_is_alembics_alter_column_and_its_down_raises():
     """The core writes a ``DropDefault`` as its twin: Alembic's
     ``alter_column(server_default=None)``, the column's type and nullability
