@@ -1434,7 +1434,6 @@ def _written(op: dict, **fields) -> dict:
     return {
         "op": op,
         "statements": [],
-        "row_security_statements": [],
         "twin": False,
         "autocommit": False,
         "foreign_key": None,

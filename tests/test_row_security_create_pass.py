@@ -32,6 +32,7 @@ from ferro import (
     connect,
     create_tables,
     engines,
+    migrate,
     reset_engine,
 )
 from ferro.rowsecurity import COMMANDS
@@ -1076,3 +1077,85 @@ async def test_a_failed_policy_rolls_back_every_new_table_of_the_pass(db_url):
             "AND relnamespace = current_schema()::regnamespace"
         )
         assert rows == []
+
+
+def _define_tables_waiting_on_a_rename(reads: str) -> None:
+    """``author`` was ``writer``; ``document`` and ``membership`` reference
+    it, so the create pass holds both back and the reconciliation pass
+    creates them after the rename. ``document``'s policy reads ``reads``."""
+
+    class Author(Model):
+        __ferro_renamed_from__ = "writer"
+
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        author_id: int = Field(foreign_key=Author)
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="members",
+                using=f'"author_id" IN (SELECT author_id FROM {reads})',
+            ),
+        )
+
+    class Membership(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        author_id: int = Field(foreign_key=Author)
+
+
+async def _create_writer(db_url: str) -> None:
+    class Writer(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_tables_created_after_a_rename_get_their_row_security_last(db_url):
+    await _create_writer(db_url)
+    _define_tables_waiting_on_a_rename("membership")
+    report = await auto_migrate(db_url, updates=True)
+
+    ran = [(subject, sql.split(" (")[0]) for subject, sql in schema_steps(report)]
+    assert ran[-5:] == [
+        ("document", 'CREATE TABLE IF NOT EXISTS "document"'),
+        ("membership", 'CREATE TABLE IF NOT EXISTS "membership"'),
+        ("document", 'ALTER TABLE "document" ENABLE ROW LEVEL SECURITY'),
+        ("document", 'ALTER TABLE "document" FORCE ROW LEVEL SECURITY'),
+        (
+            "document",
+            'CREATE POLICY "rls_document_members" ON "document" FOR ALL USING',
+        ),
+    ]
+    async with engines.session():
+        assert [p["policyname"] for p in await _pg_policies("document")] == [
+            "rls_document_members"
+        ]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_policy_rolls_back_the_tables_created_after_a_rename(db_url):
+    await _create_writer(db_url)
+    _define_tables_waiting_on_a_rename("table_that_does_not_exist")
+    await connect(db_url)
+    with pytest.raises(OperationalError) as excinfo:
+        await migrate(updates=True)
+    assert 'CREATE POLICY "rls_document_members" ON "document"' in str(excinfo.value)
+    # The rename committed on its own; the new tables are one unit and left
+    # nothing.
+    assert all(subject == "author" for subject, _ in schema_steps(excinfo.value.report))
+
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT relname FROM pg_class "
+            "WHERE relname IN ('author', 'writer', 'document', 'membership') "
+            "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace"
+        )
+        assert [row["relname"] for row in rows] == ["author"]
