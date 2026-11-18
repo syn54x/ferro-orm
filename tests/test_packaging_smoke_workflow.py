@@ -45,6 +45,9 @@ def test_every_platform_is_covered_with_the_same_steps():
     assert names == ["linux", "macos", "windows"]
     for job in jobs:
         assert [step["name"] for step in job["steps"]] == STEPS
+    # The macos job repeats the steps, so a drifted body must fail here.
+    first, *rest = (job["steps"] for job in jobs)
+    assert all(steps == first for steps in rest)
 
 
 def test_a_release_calls_the_smoke_with_an_event_that_is_never_push():
