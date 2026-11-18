@@ -47,6 +47,7 @@ Sections run newest first. From version X, read every section for a release newe
 
 | You are on | Moving to | Read |
 | --- | --- | --- |
+| `0.28.x` | The release after `0.28` | [After 0.28](#after-028) |
 | `0.27.x` | `0.28` | [Upgrading to 0.28](#explicit-foreign-keys) |
 | `0.26.x` | `0.28` | [Upgrading to 0.28](#explicit-foreign-keys) and [Upgrading to 0.27](#upgrading-to-027) |
 | `0.15.x` | `0.28` | Every `0.16` to `0.28` section, and the [no-action table](#releases-that-need-no-action) |
@@ -68,6 +69,47 @@ uv run pytest -W error::DeprecationWarning
 The run catches every change a release announced with a `DeprecationWarning`. It does not catch the silent behaviour changes in `0.14` (`create()` and `save()` stop upserting, and `limit()` or `offset()` on a mutation raise), the `NULL` ordering change in `0.21`, or the Postgres timeouts of `0.22`: those emit no warning, so read their sections.
 
 If you are moving from `0.12` or earlier straight past `0.14`, the deprecated APIs are already removed there and fail with `AttributeError` or `RuntimeError`, not a warning, so the run above catches nothing. Run your suite on `0.13` first, or apply the prompts before you upgrade.
+
+## After 0.28: SQLite column lengths {#after-028}
+
+The release after `0.28` stops treating a declared length as schema on SQLite. SQLite does not enforce the length in `varchar(8)`, so a column created as `varchar(8)` and one created as `varchar` hold the same values. `Account.role` is such a column: Ferro creates an enum column as wide as its longest label, here `varchar(6)` for `member`. Three things follow, on SQLite only; PostgreSQL enforces the length and is unchanged.
+
+- **A width is no change.** `ferro migrate new`, `ferro migrate drift` and `ferro.migrate()` plan nothing for two types that differ only in the length of `varchar(n)`. Add a label longer than `member` and `ferro migrate new` writes no schema step for SQLite, where `0.28` rebuilt the table. Redeclare the field `role: str` in a project whose only dialect is SQLite and it writes nothing at all. A renamed label rewrites the rows with an `UPDATE`, and the table is rebuilt only when a `db_check` lists the labels. A table created at an earlier width keeps that width in its `CREATE TABLE` text, and nothing reads it as drift.
+- **A migration `0.28` generated still runs.** A migration that holds such a rebuild applies and reverts as it was written, and `ferro migrate drift` and `ferro migrate check` pass after it. Leave it in place.
+- **A type name Ferro does not write is reported on every pass.** Under `connect(migrate_updates=True)` or `ferro.migrate()`, a SQLite column whose type name differs from the model's now warns each time. `0.28` said nothing when the two names stored values the same way. A table Ferro created has the names Ferro writes, so this reaches a table created by hand. Here `account.prefs`, a `dict` field that Ferro stores as `JSON`, is recreated by hand as `json_text`:
+
+```python {test=run prelude=upgrade}
+await ferro.execute('ALTER TABLE "account" DROP COLUMN "prefs"')
+await ferro.execute(
+    """ALTER TABLE "account" ADD COLUMN "prefs" json_text NOT NULL DEFAULT '{}'"""
+)
+
+report = await ferro.migrate()
+assert report.statements == ()
+for warning in report.warnings:
+    print(warning)
+
+# The fix: a column with the type name the model expects, the values copied
+# across, then the swap.
+await ferro.execute(
+    """ALTER TABLE "account" ADD COLUMN "prefs_json" JSON NOT NULL DEFAULT '{}'"""
+)
+await ferro.execute('UPDATE "account" SET "prefs_json" = "prefs"')
+await ferro.execute('ALTER TABLE "account" DROP COLUMN "prefs"')
+await ferro.execute('ALTER TABLE "account" RENAME COLUMN "prefs_json" TO "prefs"')
+
+report = await ferro.migrate()
+assert report.warnings == ()
+```
+
+The first pass runs no statement and prints the warning; after the swap the second pass is silent:
+
+<!-- prints: above -->
+```text
+Column 'account.prefs' is declared 'text' in the database but the model expects 'JSON'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.
+```
+
+The warning names the type the model expects, `JSON`; the live column reads as `text` because `json_text` is no name Ferro knows. To clear it, give the column that type name, as the four statements above do. SQLite needs the `DEFAULT` to add a required column to a table that has rows, and the column keeps it. `ferro migrate new` does not clear this one: it writes the difference between two versions of your models, and the model did not change. A column with an index, a foreign key or a check cannot be dropped this way; rebuild its table instead, as a [SQLite table rebuild](guide/schema/migrations.md#sqlite-table-rebuilds) does: create the table under a new name with the types the model expects, copy the rows, drop the old table and rename the new one.
 
 ## Upgrading to 0.28 {#explicit-foreign-keys}
 
@@ -387,7 +429,7 @@ A converted codebase declares the schema it had. Check it the way your project m
     assert report.statements == ()
     ```
 
-Two changes plan a statement, and you review and record each as a migration. One is the widening of a key column that gained a `db_type`. The other is a many-to-many join column whose key is stored as anything but a plain `int`, `str`, `UUID`, `float`, `bool` or `bytes`: a join column now takes its key's exact storage, so a key declared `db_type="varchar(36)"` moves the join column `0.27` created as `varchar` to `varchar(36)`. Auto-migrate alters it on Postgres; on SQLite it leaves the column and, where the type family differs, warns and points at `ferro migrate new`. Anything else in the plan, such as a dropped `fk_*` constraint, is a declaration the conversion missed.
+Two changes plan a statement, and you review and record each as a migration. One is the widening of a key column that gained a `db_type`. The other is a many-to-many join column whose key is stored as anything but a plain `int`, `str`, `UUID`, `float`, `bool` or `bytes`: a join column now takes its key's exact storage. Take a key declared `db_type="varchar(36)"`, whose join column `0.27` created as `varchar`. On Postgres the column moves to `varchar(36)`, and auto-migrate alters it. On SQLite the two are the same column, since SQLite does not enforce the length: from [the release after `0.28`](#after-028) nothing is planned for it. A key whose type name differs, such as `bigint` over a join column created `integer`, does plan a change on SQLite: auto-migrate leaves the column, warns and points at `ferro migrate new`. Anything else in the plan, such as a dropped `fk_*` constraint, is a declaration the conversion missed.
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
@@ -525,7 +567,8 @@ Two changes plan a statement, and you review and record each as a migration. One
        returns a report whose statements are (). A correct conversion plans
        two kinds of statement only: the widening of a key column that gained
        a db_type, and the retyping of a many-to-many join column to its key's
-       exact storage (varchar to varchar(36), say). Anything else means a
+       exact storage (varchar to varchar(36), say; on SQLite a length alone
+       plans nothing). Anything else means a
        declaration is wrong: fix it, do not record it.
     ```
 

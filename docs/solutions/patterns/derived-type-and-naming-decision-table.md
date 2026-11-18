@@ -59,7 +59,14 @@ The SQLite declared spellings are **SQLAlchemy's** (FF-B B5): sea-query's
 `date_text`, `time_text`, `real` for decimal) reflected as bare `TEXT`/`REAL`
 under SQLAlchemy and produced phantom `modify_type` diffs in the sentinel.
 SQLite's type affinity makes the storage classes identical either way, so
-existing databases keep working. PK columns
+an existing database still stores and reads the same values. Its type names
+are not the model's, though, and since #614 the reconciliation pass reports
+every such column on every pass (`SQLite cannot change column types in
+place`): a live `json_text` reads as `text` against `JSON`, a live `real`
+as `double` against `NUMERIC`. The pass's own comparison, which read both as
+one storage class and stayed silent, is gone. The warning clears once the
+column carries the name the model expects (the upgrade guide's "After
+0.28" section shows the column swap). PK columns
 also carry an explicit `NOT NULL` — SQLite's PRAGMA otherwise reports an
 `INTEGER PRIMARY KEY` as nullable, which read back as a phantom nullability
 diff; the IR compiler clamps PK `nullable` to `false` accordingly.
