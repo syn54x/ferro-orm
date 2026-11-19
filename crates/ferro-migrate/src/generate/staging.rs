@@ -30,6 +30,7 @@ use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
     column_riders, find_foreign_key, fk_constraint_name, render_add_fk_sql, standalone_indexes,
 };
+use crate::plan::table_rename_hint;
 use crate::render::render_ops;
 use crate::{Dialect, MigrationOp, Side, declared_index, plan_down};
 use ferro_ddl_lowering::{
@@ -319,9 +320,10 @@ pub fn staged_constraints(
 /// exists: it is on both sides of the step. `None` for an op on a table the
 /// step creates or drops, or on no table. This is the one test of "a table
 /// that already exists": a constraint is staged on one
-/// ([`stages_not_valid`]), and a key added to one refuses writes the
-/// previous release may make ([`crate::run_plan::step_class`]), while a key
-/// added to a table the same step creates is part of creating it (#304).
+/// ([`stages_not_valid`]), while any op on a table the same step creates
+/// ([`created_table`]) is part of creating it, whatever its kind (a deferred
+/// key, #304; row security and policies, #753): the previous release never
+/// writes that table, so the op is `expand` ([`crate::run_plan::step_class`]).
 pub(crate) fn existing_table<'a>(
     op: &MigrationOp,
     before: &IrEnvelope<SchemaIrPayload>,
@@ -330,6 +332,24 @@ pub(crate) fn existing_table<'a>(
     let table = op.table()?;
     find_model(before, table)?;
     find_model(after, table)
+}
+
+/// Whether `op` is on a table the step creates: not one that already exists
+/// ([`existing_table`]), declared by `after`, and not the new name of a
+/// table the step renames ([`table_rename_hint`] against `before`), since a
+/// renamed table already exists under its old name and holds its rows.
+pub(crate) fn created_table(
+    op: &MigrationOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+) -> bool {
+    existing_table(op, before, after).is_none()
+        && op
+            .table()
+            .and_then(|table| find_model(after, table))
+            .is_some_and(|model| {
+                table_rename_hint(model, |table| find_model(before, table).is_some()).is_none()
+            })
 }
 
 /// Whether `op`, in an up file turning `before` into `after` on `dialect`,

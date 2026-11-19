@@ -42,11 +42,12 @@ Each step is *expand* or *contract*, decided from what the step does and recorde
 
 | Expand | Contract |
 | :--- | :--- |
-| adding a table, or a nullable column | dropping a table or a column |
+| adding a table, with its foreign keys, row security and policies, or a nullable column | dropping a table or a column |
 | `DROP NOT NULL` | `SET NOT NULL`: a required column's add-constraint and contract steps |
 | a plain index; dropping an index, a check, a foreign key or a unique | a unique index; a type change |
 | adding an enum label | renaming a column, a table, an enum type or a label; removing a label |
 | a data step, a guard step | adding a check or a foreign key (`NOT VALID`) and its validate step |
+| turning row security off (`DISABLE`, `NO FORCE`) | turning row security on (`ENABLE`, `FORCE`), or adding, changing or dropping a policy, on a table that already exists |
 | a hand-written SQL step whose file says `-- ferro: expand` | any other hand-written SQL step |
 
 - A SQLite table rebuild takes the class of what it carries.

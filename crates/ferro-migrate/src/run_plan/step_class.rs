@@ -26,15 +26,15 @@
 //! | a type change | contract |
 //! | a constraint added to a table that already exists (`NOT VALID` on Postgres), or validated (the validate, add-constraint and contract steps) | contract |
 //! | a unique index built or redefined | contract |
-//! | a row-security change that can refuse a write (a policy, `ENABLE` / `FORCE`) | contract |
-//! | an added table (with a foreign key added to it by the same step, after its `CREATE TABLE`) or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
+//! | a row-security change that can refuse a write (a policy, `ENABLE` / `FORCE`) on a table that already exists | contract |
+//! | an added table (with what the same step adds to it after its `CREATE TABLE`: a foreign key, row security, a policy) or nullable column, `DROP NOT NULL`, a plain index, a dropped index, check, foreign key or unique, an added label | expand |
 //! | a data step, a guard step | expand |
 //! | a SQLite rebuild carrying only expand ops | expand |
 //! | a step whose rendering on the dialect runs nothing (`not-applicable`) | expand |
 
 use crate::directory::{Headers, Migration, MigrationsDir, Step, StepDialect, StepKind};
 use crate::generate::backfill::Demand;
-use crate::generate::staging::{existing_table, stages_not_valid};
+use crate::generate::staging::{created_table, stages_not_valid};
 use crate::generate::{GenerateError, GenerateOptions, GeneratedStep, generate_with};
 use crate::run_plan::RunRefusal;
 use crate::snapshot::sha384;
@@ -236,12 +236,12 @@ fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     if verdict.drops_data || verdict.demands_values || verdict.fails_on_rows != RowRisk::None {
         return StepClass::Contract;
     }
-    // A key added to a table the same step creates is part of creating it
-    // (on Postgres, a key deferred past the last `CREATE TABLE`, #304): the
-    // previous release never writes that table.
-    if matches!(planned.op, MigrationOp::AddForeignKey { .. })
-        && existing_table(&planned.op, sides.before, sides.target).is_none()
-    {
+    // Any op on a table the same step creates is part of creating it (on
+    // Postgres, a key deferred past the last `CREATE TABLE`, #304, and the
+    // table's row security and policies, #753): the previous release never
+    // writes that table. A renamed table is not created: it holds the rows
+    // the previous release writes under its old name.
+    if created_table(&planned.op, sides.before, sides.target) {
         return StepClass::Expand;
     }
     kind_class(&planned.op, sides.target)
@@ -843,6 +843,233 @@ mod tests {
                 named(&[("01_schema", Contract)]),
                 "{dialect:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_new_table_with_row_security_is_expand() {
+        // On Postgres `ENABLE`, `FORCE` and `CREATE POLICY` are their own ops
+        // after the last `CREATE TABLE` (#753). They are part of creating
+        // the table: the previous release never writes it.
+        let guarded = SchemaModel {
+            row_security: Some(ferro_schema_ir::SchemaRowSecurity {
+                force: true,
+                policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                    name: "rls_ledger_owner_id".into(),
+                    command: ferro_schema_ir::RowPolicyCommand::All,
+                    restrictive: false,
+                    expr: ferro_schema_ir::RowPolicyExpr::Setting {
+                        column: "owner_id".into(),
+                        setting: "app.owner_id".into(),
+                    },
+                }],
+            }),
+            ..model("Ledger", vec![pk(), column("owner_id", "integer")])
+        };
+        for dialect in BOTH {
+            assert_eq!(
+                classes(vec![team()], vec![team(), guarded.clone()], dialect),
+                named(&[("01_schema", Expand)]),
+                "{dialect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_op_on_a_table_the_step_creates_is_expand() {
+        // Whatever the op's kind, the previous release never writes a table
+        // the step creates; only a verdict that drops data, demands values
+        // or can fail on rows makes it contract.
+        let t = || "author".to_string();
+        let (none, created) = (ir(vec![]), ir(vec![author(vec![])]));
+        let sides = Sides {
+            before: &none,
+            target: &created,
+        };
+        let quiet = |op: MigrationOp| PlannedOp {
+            op,
+            verdict: crate::OpVerdict::default(),
+        };
+        let ops = vec![
+            MigrationOp::AddTable { table: t() },
+            MigrationOp::DropTable { table: t() },
+            MigrationOp::RenameColumn {
+                table: t(),
+                old: "a".into(),
+                new: "b".into(),
+            },
+            MigrationOp::RenameIndex {
+                table: t(),
+                old: "a".into(),
+                new: "b".into(),
+            },
+            MigrationOp::RenameConstraint {
+                table: t(),
+                old: "a".into(),
+                new: "b".into(),
+            },
+            MigrationOp::RenamePolicy {
+                table: t(),
+                old: "a".into(),
+                new: "b".into(),
+            },
+            MigrationOp::AddColumn {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::DropColumn {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::AlterColumnType {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::AlterGeneratedExpression {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::DropGeneratedExpression {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::AlterColumnNullability {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::DropDefault {
+                table: t(),
+                column: "c".into(),
+                was: "''".into(),
+            },
+            MigrationOp::ChangePrimaryKey {
+                table: t(),
+                from: vec![],
+                to: vec![],
+            },
+            MigrationOp::AddIndex {
+                table: t(),
+                name: "i".into(),
+                columns: vec![],
+                unique: true,
+            },
+            MigrationOp::DropIndex {
+                table: t(),
+                name: "i".into(),
+            },
+            MigrationOp::RedefineIndex {
+                table: t(),
+                name: "i".into(),
+            },
+            MigrationOp::AddForeignKey {
+                table: t(),
+                column: "c".into(),
+            },
+            MigrationOp::DropForeignKey {
+                table: t(),
+                column: "c".into(),
+                name: "f".into(),
+            },
+            MigrationOp::AddCheck {
+                table: t(),
+                name: "k".into(),
+            },
+            MigrationOp::RebuildCheck {
+                table: t(),
+                name: "k".into(),
+            },
+            MigrationOp::DropCheck {
+                table: t(),
+                name: "k".into(),
+            },
+            MigrationOp::RebuildForeignKey {
+                table: t(),
+                column: "c".into(),
+                old_name: "f".into(),
+            },
+            MigrationOp::ValidateConstraint {
+                table: t(),
+                name: "k".into(),
+            },
+            MigrationOp::RebuildIndex {
+                table: t(),
+                name: "i".into(),
+                columns: vec![],
+                unique: true,
+            },
+            MigrationOp::AddRowPolicy {
+                table: t(),
+                name: "p".into(),
+            },
+            MigrationOp::RebuildRowPolicy {
+                table: t(),
+                name: "p".into(),
+            },
+            MigrationOp::DropRowPolicy {
+                table: t(),
+                name: "p".into(),
+            },
+            MigrationOp::EnableRowSecurity { table: t() },
+            MigrationOp::ForceRowSecurity { table: t() },
+            MigrationOp::DisableRowSecurity { table: t() },
+            MigrationOp::NoForceRowSecurity { table: t() },
+        ];
+        for op in ops {
+            assert!(op.table().is_some(), "{op:?} names a table");
+            for dialect in BOTH {
+                assert_eq!(
+                    schema_class(&[quiet(op.clone())], sides, dialect),
+                    Expand,
+                    "{op:?} on {dialect:?}"
+                );
+            }
+        }
+        // The verdict stays first: an op that drops data is contract on any
+        // table.
+        let dropping = PlannedOp {
+            op: MigrationOp::AddRowPolicy {
+                table: t(),
+                name: "p".into(),
+            },
+            verdict: crate::OpVerdict {
+                drops_data: true,
+                ..Default::default()
+            },
+        };
+        for dialect in BOTH {
+            assert_eq!(
+                schema_class(std::slice::from_ref(&dropping), sides, dialect),
+                Contract,
+                "{dialect:?}"
+            );
+        }
+        // A renamed table is not created: it exists under its old name, so
+        // its rename and a policy added to it stay contract.
+        let mut writer = author(vec![]);
+        writer.renamed_from = Some("author".into());
+        writer.table_name = "writer".into();
+        let (old, renamed) = (ir(vec![author(vec![])]), ir(vec![writer]));
+        let sides = Sides {
+            before: &old,
+            target: &renamed,
+        };
+        for op in [
+            MigrationOp::RenameTable {
+                old: "author".into(),
+                new: "writer".into(),
+            },
+            MigrationOp::AddRowPolicy {
+                table: "writer".into(),
+                name: "p".into(),
+            },
+        ] {
+            for dialect in BOTH {
+                assert_eq!(
+                    schema_class(&[quiet(op.clone())], sides, dialect),
+                    Contract,
+                    "{op:?} on {dialect:?}"
+                );
+            }
         }
     }
 
