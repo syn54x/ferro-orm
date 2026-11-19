@@ -160,6 +160,10 @@ For a single model, every emitter must agree on:
       `_core._rls_command_matrix`). A foreign policy and an unverifiable raw
       body never become an op on any emitter (ADR-0019). Postgres-only; SQLite
       gets one warning per table and no DDL (ADR-0014).
+      In every plan each policy drop precedes the first table or column
+      change and each policy create follows the last, so a policy may read a
+      column the plan adds, renames or drops on any table; the order is the
+      planner's, for every emitter (#995).
       A new table's flags and policies run after the last CREATE TABLE of the
       plan, and a dropped table's Ferro-owned policies are dropped before the
       first DROP TABLE, so a policy may read any table of the same plan; the

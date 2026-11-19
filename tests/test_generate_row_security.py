@@ -123,6 +123,69 @@ class Membership(Model):
 """
 
 
+def reads_a_column(*, named: bool, document: bool | None) -> str:
+    """``RlsTeam``, with its ``name`` column when ``named``, and (unless
+    ``document`` is ``None``) ``RlsDocument``, under a policy that reads
+    ``rlsteam.name`` when ``document`` is true: the models a policy reads a
+    column of another table through (#995). ``RlsDocument`` sorts first, so
+    its table is visited before the one whose column its policy reads."""
+    policy = """    __ferro_rls__ = RowSecurity(
+        RowPolicy(
+            name="members",
+            using='"owner_id" IN (SELECT id FROM rlsteam WHERE name IS NOT NULL)',
+        )
+    )
+"""
+    body = ""
+    if document is not None:
+        body += f"""
+
+class RlsDocument(Model):
+{policy if document else ""}    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    owner_id: int
+"""
+    body += """
+
+class RlsTeam(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+"""
+    if named:
+        body += "    name: str | None = None\n"
+    return body
+
+
+#: Before and after of the three shapes of #995, by casebook case.
+READS_A_CHANGED_COLUMN = {
+    "E5-new-table-whose-policy-reads-an-added-column": (
+        reads_a_column(named=False, document=None),
+        reads_a_column(named=True, document=True),
+    ),
+    "E6-add-a-policy-that-reads-an-added-column": (
+        reads_a_column(named=False, document=False),
+        reads_a_column(named=True, document=True),
+    ),
+    "E7-drop-a-column-and-the-policy-that-read-it": (
+        reads_a_column(named=True, document=True),
+        reads_a_column(named=False, document=False),
+    ),
+}
+
+ADD_NAME = 'ALTER TABLE "rlsteam" ADD COLUMN "name" varchar'
+DROP_NAME = 'ALTER TABLE "rlsteam" DROP COLUMN "name"'
+MEMBERS = [
+    'ALTER TABLE "rlsdocument" ENABLE ROW LEVEL SECURITY',
+    'ALTER TABLE "rlsdocument" FORCE ROW LEVEL SECURITY',
+    'CREATE POLICY "rls_rlsdocument_members" ON "rlsdocument" FOR ALL '
+    'USING ("owner_id" IN (SELECT id FROM rlsteam WHERE name IS NOT NULL))',
+]
+NO_MEMBERS = [
+    'DROP POLICY "rls_rlsdocument_members" ON "rlsdocument"',
+    DROP_NAME,
+    'ALTER TABLE "rlsdocument" NO FORCE ROW LEVEL SECURITY',
+    'ALTER TABLE "rlsdocument" DISABLE ROW LEVEL SECURITY',
+]
+
+
 def start(project: Path, pkg: str, db, body: str) -> None:
     """``0001`` creates ``body``'s model for both dialects, is applied, and
     the table holds two rows of tenant A and one of tenant B."""
@@ -386,6 +449,49 @@ def test_a_step_that_only_creates_a_table_with_row_security_is_expand(
     assert schema_steps(capsys, db) == [
         [f"01_schema.up.{db.backend}.sql", "applied", "expand"]
     ]
+
+
+@backend_matrix
+@pytest.mark.parametrize("case", sorted(READS_A_CHANGED_COLUMN))
+def test_a_policy_may_read_a_column_the_same_migration_adds_or_drops(
+    project, pkg, db, case
+):
+    """Every policy drop of a migration goes before its first column change
+    and every policy create after its last, both ways: Postgres refuses a
+    policy over a column that does not exist yet, and the drop of a column a
+    policy still reads (#995)."""
+    before, after = READS_A_CHANGED_COLUMN[case]
+    write_config(project, pkg)
+    write_models(project, pkg, before)
+    new("create")
+    write_models(project, pkg, after)
+    new("edit")
+    up = statements(step_file(project, 2, "up", "postgres"))
+    down = statements(step_file(project, 2, "down", "postgres"))
+    drop_table = ['DROP TABLE "rlsdocument"']
+    if case.startswith("E5"):
+        assert up[0].startswith('CREATE TABLE IF NOT EXISTS "rlsdocument" (')
+        assert up[1:] == [ADD_NAME, *MEMBERS]
+        assert down == [NO_MEMBERS[0], DROP_NAME, *drop_table]
+    elif case.startswith("E6"):
+        assert up == [ADD_NAME, *MEMBERS]
+        assert down == NO_MEMBERS
+    else:
+        assert up == NO_MEMBERS
+        assert down == [ADD_NAME, *MEMBERS]
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert run("migrate", "drift", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 2), snapshot(project, 1)) == []
+    if db.backend == "postgres":
+        assert db.rows(
+            "SELECT policyname FROM pg_policies "
+            f"WHERE schemaname = '{db.schema}' AND tablename = 'rlsdocument'"
+        ) == ([] if case.startswith("E7") else [("rls_rlsdocument_members",)])
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert not {"rlsdocument", "rlsteam"} & db.tables()
 
 
 MEMBERSHIP_ONLY = READS_ANOTHER_TABLE[READS_ANOTHER_TABLE.index("class Membership") :]

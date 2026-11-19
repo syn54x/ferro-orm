@@ -636,11 +636,11 @@ def test_the_destructive_row_security_plan_extends_the_updates_only_one():
     """Every drift category present AT ONCE — a missing policy, a drifted one,
     an orphan, and a ``force`` flag not yet applied — so the updates-only plan
     is genuinely non-empty (a fixture where it plans nothing would make the
-    prefix assertion below trivially true). The one planner's destructive
-    plan for the SAME (model, live) pair is the updates-only plan plus a
-    strict tail: the destructive ladder only ever adds the orphan drops and
-    teardown after everything an updates-only run does. Mirrored at the Rust
-    level by
+    assertion below trivially true). The one planner's destructive plan for
+    the SAME (model, live) pair is the updates-only plan plus the orphan
+    drops, among the policy drops ahead of every table change (#995), and
+    the teardown: the destructive ladder only ever adds to what an
+    updates-only run does. Mirrored at the Rust level by
     ``plan_row_security_reconcile_destructive_call_extends_the_non_destructive_one_as_a_strict_prefix``."""
 
     class LedgerRow(Model):
@@ -681,17 +681,24 @@ def test_the_destructive_row_security_plan_extends_the_updates_only_one():
     # Every category actually fired, or this pin is not exercising what it
     # claims to.
     assert ops_of(non_destructive) == [
+        ("DropRowPolicy", POLICY_NAME),
         ("ForceRowSecurity", None),
         ("AddRowPolicy", "rls_ledgerrow_invitee"),
         ("RebuildRowPolicy", POLICY_NAME),
     ]
-    assert ops_of(destructive)[3:] == [("DropRowPolicy", ORPHAN_NAME)]
+    orphan = ("DropRowPolicy", ORPHAN_NAME)
+    assert ops_of(destructive) == [
+        *ops_of(non_destructive)[:1],
+        orphan,
+        *ops_of(non_destructive)[1:],
+    ]
     assert statements_of(non_destructive) != []
 
-    prefix_len = len(statements_of(non_destructive))
-    assert statements_of(destructive)[:prefix_len] == statements_of(non_destructive)
-    tail = statements_of(destructive)[prefix_len:]
-    assert tail == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
+    drop_orphan = f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"'
+    assert statements_of(destructive)[1] == drop_orphan
+    assert [
+        sql for sql in statements_of(destructive) if sql != drop_orphan
+    ] == statements_of(non_destructive)
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +757,91 @@ async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
     _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
     async with engines.session():
         assert (await _pg_flags("ledgerrow"))["relforcerowsecurity"] is True
+
+
+# ---------------------------------------------------------------------------
+# A policy that reads a column the same revision adds or drops (#995)
+# ---------------------------------------------------------------------------
+
+
+def _define_team_and_document(*, named: bool, document: bool | None) -> None:
+    """``team``, with ``name`` when ``named``, and (unless ``document`` is
+    ``None``) ``document``, under a policy that reads ``team.name`` when
+    ``document`` is true."""
+    if named:
+
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str | None = None
+
+    else:
+
+        class Team(Model):  # noqa: F811
+            id: int | None = Field(default=None, primary_key=True)
+
+    if document:
+
+        class Document(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            owner_id: int
+
+            __ferro_rls__: ClassVar = RowSecurity(
+                RowPolicy(
+                    name="members",
+                    using='"owner_id" IN (SELECT id FROM team WHERE name IS NOT NULL)',
+                )
+            )
+
+    elif document is not None:
+
+        class Document(Model):  # noqa: F811
+            id: int | None = Field(default=None, primary_key=True)
+            owner_id: int
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "after", "policies"),
+    [
+        ((False, None), (True, True), ["rls_document_members"]),
+        ((False, False), (True, True), ["rls_document_members"]),
+        ((True, True), (False, False), []),
+    ],
+    ids=["new-table", "added-policy", "dropped-column"],
+)
+async def test_a_revision_orders_a_policy_around_the_column_change_it_reads(
+    db_url, postgres_base_url, db_schema_name, before, after, policies
+):
+    """The revision's ``upgrade()`` and ``downgrade()`` both run: each drops
+    its policies before the first column change and creates them after the
+    last, in the planner's order."""
+    _define_team_and_document(named=before[0], document=before[1])
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    _define_team_and_document(named=after[0], document=after[1])
+    await connect(db_url)  # no auto-migrate: the database stays drifted
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+
+    async def state() -> tuple[list[str], bool]:
+        async with engines.session():
+            named = await fetch_all(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = "
+                "current_schema() AND table_name = 'team' AND column_name = 'name'"
+            )
+            return await _pg_policy_names("document"), bool(named)
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert await state() == (policies, after[0])
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert await state() == (
+        ["rls_document_members"] if before[1] else [],
+        before[0],
+    )
 
 
 # ---------------------------------------------------------------------------
