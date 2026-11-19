@@ -323,3 +323,134 @@ async def test_an_added_label_is_committed_ahead_of_the_one_transaction(db_url):
         ("team", "id"),
         ("team", "kind"),
     ]
+
+
+async def _enum_labels(type_name: str) -> list[str]:
+    """The labels of enum type ``type_name``, in the type's order; none when
+    the schema has no such type."""
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+            "WHERE t.typnamespace = current_schema()::regnamespace "
+            f"AND t.typname = '{type_name}' ORDER BY e.enumsortorder"
+        )
+    return [row["enumlabel"] for row in rows]
+
+
+async def test_a_label_added_beside_a_rename_hint_from_a_label_still_declared(
+    db_url,
+):
+    """The models rename live label ``a`` to ``b`` and still declare ``a``.
+    The planner refuses that hint, so no plan both renames a label and adds
+    one under its old name: the pass, whose label addition commits ahead of
+    its transaction, adds ``b`` and leaves the labels the models declare."""
+
+    class Kind(StrEnum):
+        A = "a"
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    class Kind(StrEnum):  # noqa: F811
+        __ferro_renamed_labels__ = {"b": "a"}
+        B = "b"
+        A = "a"
+
+    class Team(Model):  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+
+    class Document(Model):  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("team", "kind")
+
+    with pytest.warns(UserWarning, match="rename hint refused: enum Kind"):
+        report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report)[0] == (
+        "kind",
+        "ALTER TYPE \"kind\" ADD VALUE IF NOT EXISTS 'b'",
+    )
+    assert await _enum_labels("kind") == ["a", "b"]
+
+
+def _define_role_team_and_document(column: str) -> None:
+    """``team.kind`` under the enum class renamed from ``Kind`` to ``Role``
+    with the added label ``guest``, and ``document`` under a policy that
+    reads ``team.<column>``."""
+
+    class Role(StrEnum):
+        STAFF = "staff"
+        GUEST = "guest"
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Role | None = None
+        name: str | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("team", column)
+
+
+async def _create_kind_team_and_document(db_url: str) -> None:
+    class Kind(StrEnum):
+        STAFF = "staff"
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+
+async def test_a_renamed_enum_class_gains_a_label_in_a_pass_that_adds_a_policy(db_url):
+    await _create_kind_team_and_document(db_url)
+    _define_role_team_and_document("name")
+
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report)[:2] == [
+        ("role", 'ALTER TYPE "kind" RENAME TO "role"'),
+        ("role", "ALTER TYPE \"role\" ADD VALUE IF NOT EXISTS 'guest'"),
+    ]
+    assert await _enum_labels("role") == ["staff", "guest"]
+    assert await _enum_labels("kind") == []
+    assert ("team", "name") in await _columns(db_url, "team")
+
+
+async def test_a_failed_policy_leaves_the_added_label_and_its_types_rename(db_url):
+    """What commits ahead of the one transaction stays: the label, and the
+    rename of the type it was added to. No table change does."""
+    await _create_kind_team_and_document(db_url)
+    _define_role_team_and_document("nope")
+
+    with pytest.raises(OperationalError) as excinfo:
+        await auto_migrate(db_url, updates=True)
+    assert schema_steps(excinfo.value.report) == [
+        ("role", 'ALTER TYPE "kind" RENAME TO "role"'),
+        ("role", "ALTER TYPE \"role\" ADD VALUE IF NOT EXISTS 'guest'"),
+    ]
+    assert await _columns(db_url, "team", "document") == [
+        ("document", "id"),
+        ("document", "owner_id"),
+        ("team", "id"),
+        ("team", "kind"),
+    ]
+    assert await _enum_labels("role") == ["staff", "guest"]
+    assert await _enum_labels("kind") == []
