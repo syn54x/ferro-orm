@@ -132,18 +132,26 @@ committed by then:
   on an existing table failed. It now creates no table when the plan changes
   row security (`CreatePass::left_to_plan`); the plan's `AddTable` ops do.
 - **The renames ahead of a type statement.** The plan's renames come before
-  its `CREATE TYPE`, and a type statement ends a transaction, so a table
-  rename committed alone. The pass now runs the type statements first, each
-  in autocommit, then every table change as one transaction, then the type
-  drops (`unit_order`). No type statement reads a table, so moving them ahead
-  changes nothing they do.
+  its `CREATE TYPE`, and the pass ran every type statement in autocommit,
+  which ended the transaction, so a table rename committed alone. The pass
+  now runs `CREATE TYPE` and `DROP TYPE` inside the transaction, where the
+  plan puts them: Postgres creates a type and uses it in one transaction.
 
-The type statements stay outside the transaction on purpose. Postgres runs
-`ALTER TYPE … ADD VALUE` inside a transaction but refuses any use of the new
-label before it commits, and a pass may add a label and a column default
-that uses it. A failed pass can therefore leave a type created or a label
-added, and `.report` lists it. Both are additive and the next pass finds
-them in place.
+The second fix first moved every type statement ahead of the renames, to
+keep each in autocommit. That broke a pass that renames table `writer` to
+`author` and adds a column of a new enum type named `writer`: a table's row
+type holds the table's name until the rename runs, so the guarded
+`CREATE TYPE` found a type called `writer`, skipped, and the column's
+`ADD COLUMN` failed with `type "writer" does not exist`. A type statement
+keeps its place in the plan.
+
+Only a label added to an enum type commits on its own, ahead of the
+transaction (`commits_ahead`). Postgres runs `ALTER TYPE … ADD VALUE` inside
+a transaction but refuses any use of the new label before it commits, and a
+pass may add a label and a column default that uses it. A failed pass can
+therefore leave a label added, and `.report` lists it. It is additive and
+the next pass finds it in place. The rename of a type that gains a label
+commits ahead with it, since the addition names the type by its new name.
 
 Not covered: in a generated migration with a data step, the policy of a
 dropped table still waits for the contract with its table (rule 2 below),

@@ -23,6 +23,7 @@ from ferro import (
     RowSecurity,
     connect,
     engines,
+    reset_engine,
 )
 from ferro.raw import fetch_all
 from tests._pass_harness import auto_migrate, schema_steps
@@ -161,6 +162,7 @@ async def test_a_policy_that_fails_rolls_back_every_table_change_of_the_pass(db_
 async def _columns(db_url: str, *tables: str) -> list[tuple[str, str]]:
     """Every column of ``tables`` the database holds, as ``(table, column)``."""
     names = ", ".join(f"'{table}'" for table in tables)
+    reset_engine()
     await connect(db_url)
     async with engines.session():
         columns = await fetch_all(
@@ -203,9 +205,9 @@ async def test_a_failed_policy_leaves_no_plain_table_the_pass_would_create(db_ur
 
 
 async def test_a_failed_policy_rolls_back_a_rename_ahead_of_a_new_enum_type(db_url):
-    """The plan's renames come ahead of its ``CREATE TYPE``, which commits on
-    its own: the type statements run first, so the rename is in the one
-    transaction with every other table change."""
+    """The plan's renames come ahead of its ``CREATE TYPE``: the type is
+    created inside the one transaction, so the rename before it rolls back
+    with every other change, and so does the type."""
 
     class Writer(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -232,8 +234,92 @@ async def test_a_failed_policy_rolls_back_a_rename_ahead_of_a_new_enum_type(db_u
     with pytest.raises(OperationalError) as excinfo:
         await auto_migrate(db_url, updates=True)
     assert 'CREATE POLICY "rls_document_members"' in str(excinfo.value)
-    # The type statement committed on its own, ahead of every table change;
-    # no table change did.
-    steps = schema_steps(excinfo.value.report)
-    assert [subject for subject, _ in steps] == ["kind"], steps
+    assert schema_steps(excinfo.value.report) == []
     assert await _columns(db_url, "writer", "author", "document") == [("writer", "id")]
+    assert await _enum_types("kind") == []
+
+
+async def _enum_types(*names: str) -> list[str]:
+    """Which of ``names`` are enum types of the schema."""
+    listed = ", ".join(f"'{name}'" for name in names)
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT typname FROM pg_type WHERE typtype = 'e' "
+            "AND typnamespace = current_schema()::regnamespace "
+            f"AND typname IN ({listed}) ORDER BY 1"
+        )
+    return [row["typname"] for row in rows]
+
+
+async def test_a_new_enum_type_takes_the_name_a_renamed_table_leaves(db_url):
+    """A table's row type holds its name until the rename runs, so the
+    ``CREATE TYPE`` stays after the renames, where the plan puts it."""
+
+    class Writer(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    class Writer(StrEnum):  # noqa: F811
+        STAFF = "staff"
+        GUEST = "guest"
+
+    class Author(Model):
+        __ferro_renamed_from__ = "writer"
+
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Writer | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("author", "kind")
+
+    report = await auto_migrate(db_url, updates=True)
+    subjects = [subject for subject, _ in schema_steps(report)]
+    assert subjects.index("author") < subjects.index("writer")
+    assert ("author", "kind") in await _columns(db_url, "author")
+    assert await _enum_types("writer") == ["writer"]
+
+
+async def test_an_added_label_is_committed_ahead_of_the_one_transaction(db_url):
+    """Postgres lets no statement use a label before it is committed, so a
+    label addition alone runs first, on its own; it stays when the pass then
+    fails."""
+
+    class Kind(StrEnum):
+        STAFF = "staff"
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    class Kind(StrEnum):  # noqa: F811
+        STAFF = "staff"
+        GUEST = "guest"
+
+    class Team(Model):  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+        name: str | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("team", "nope")
+
+    with pytest.raises(OperationalError) as excinfo:
+        await auto_migrate(db_url, updates=True)
+    assert schema_steps(excinfo.value.report) == [
+        ("kind", "ALTER TYPE \"kind\" ADD VALUE IF NOT EXISTS 'guest'")
+    ]
+    assert await _columns(db_url, "team", "document") == [
+        ("team", "id"),
+        ("team", "kind"),
+    ]

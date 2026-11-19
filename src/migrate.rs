@@ -524,9 +524,10 @@ fn type_name_of(op: &MigrationOp) -> &str {
 /// runs statement at a time, with each column drop going through its
 /// index-dependency path, and sets no timeout.
 ///
-/// On Postgres the group may hold the ops of several tables: each statement
-/// is reported, and its failure named, under its own op's table, and `table`
-/// is the first of them.
+/// On Postgres the group may hold the ops of several tables, and a pass
+/// that is one transaction its type statements too: each statement is
+/// reported, and its failure named, under its own op's table or type, and
+/// `table` is the first of them.
 /// What ran (or committed before a failure) goes into `report`. Returns how
 /// many statements ran and how many columns were dropped.
 async fn execute_table_ops(
@@ -565,7 +566,7 @@ async fn execute_table_ops(
     let sqls: Vec<&String> = ops_statements.iter().map(|(_, sql)| *sql).collect();
     let tables: Vec<&str> = ops_statements
         .iter()
-        .map(|(op, _)| op.op.table().unwrap_or(table))
+        .map(|(op, _)| op.op.table().unwrap_or_else(|| type_name_of(&op.op)))
         .collect();
     let result = ddl
         .run(
@@ -597,6 +598,7 @@ async fn execute_table_ops(
                     },
                     _,
                 )) => map_drop_column_error(table, column, error),
+                Some((op, _)) if op.op.table().is_none() => type_statement_error(&op.op, error),
                 Some((op, sql)) => {
                     let table = op.op.table().unwrap_or(table);
                     map_op_statement_error(engine, table, &op.op, declared, sql, error).await
@@ -921,9 +923,9 @@ pub async fn run_pass_for_python(
 /// On Postgres a pass whose plan changes row security is one transaction for
 /// every table change (#995), and that is decided before the pass sends its
 /// first statement ([`plan_changes_row_security`]): the create pass then
-/// creates no table, the plan's type statements run ahead of every table op
-/// ([`unit_order`]) and every table op is one unit ([`table_ops_unit`]).
-/// Which ops change a table is the plan's to say ([`Plan::changes_a_table`]).
+/// creates no table, and every op of the plan is one unit, in plan order,
+/// its type statements included ([`table_ops_unit`]). Only a label added to
+/// an enum type commits ahead of it ([`commits_ahead`]).
 ///
 /// After any DDL executed, the engine pool is refreshed so no connection can
 /// serve a statement prepared against the pre-DDL schema.
@@ -1018,12 +1020,19 @@ async fn run_passes(
     let mut rendered = plan.render().map_err(emission_error)?;
     // A policy the plan creates, drops or rebuilds runs apart from its
     // table's other ops, since it may read a column of any table, and its
-    // table's flags run beside it (#995): the table ops then commit
-    // together or not at all, the type statements ahead of them and the
-    // type drops after (a stable sort: each keeps its place among its own).
+    // table's flags run beside it (#995): the pass's ops then commit
+    // together or not at all, but the labels it adds, which commit first (a
+    // stable sort: every other op keeps its place in the plan).
     let one_transaction = backend == Dialect::Postgres && plan.ops().any(changes_row_security);
+    let labelled: BTreeSet<String> = plan
+        .ops()
+        .filter_map(|op| match op {
+            MigrationOp::AddEnumLabel { type_name, .. } => Some(type_name.clone()),
+            _ => None,
+        })
+        .collect();
     if one_transaction {
-        rendered.sort_by_key(|op| unit_order(&plan, &op.op));
+        rendered.sort_by_key(|op| !commits_ahead(&op.op, &labelled));
     }
 
     if backend == Dialect::Postgres {
@@ -1086,7 +1095,7 @@ async fn run_passes(
             index += 1;
             continue;
         }
-        let in_transaction = one_transaction && plan.changes_a_table(&current.op);
+        let in_transaction = one_transaction && !commits_ahead(&current.op, &labelled);
         let table = current
             .op
             .table()
@@ -1120,7 +1129,11 @@ async fn run_passes(
             index += 1;
             continue;
         };
-        let unit = table_ops_unit(&rendered[index..], &added, one_transaction.then_some(&plan));
+        let unit = table_ops_unit(
+            &rendered[index..],
+            &added,
+            one_transaction.then_some(&labelled),
+        );
         let consumed = unit.len();
         let group: Vec<&RenderedOp> = unit.iter().filter(|op| !created_by_pass(&op.op)).collect();
         let (statements, dropped) =
@@ -1283,19 +1296,19 @@ fn changes_row_security(op: &MigrationOp) -> bool {
     )
 }
 
-/// Where `op` of `plan` runs in a pass that is one transaction: the type statements
-/// first, each in autocommit, since a label must be committed before a table
-/// statement uses it (and none reads a table: a rename leaves a type alone);
-/// then every table change, as one transaction; then the type drops. The
-/// plan's renames come ahead of its `CREATE TYPE`, so in plan order a table
-/// rename would commit on its own, before the transaction began.
-fn unit_order(plan: &Plan, op: &MigrationOp) -> u8 {
-    if plan.changes_a_table(op) {
-        1
-    } else if matches!(op, MigrationOp::DropEnumType { .. }) {
-        2
-    } else {
-        0
+/// Whether `op` commits on its own, ahead of the transaction of a pass that
+/// is one: a label added to an enum type, since Postgres lets no statement
+/// use a label before it is committed (ADR-0011), and the rename of a type
+/// that gains a label (`labelled`, by its new name), which the addition
+/// names the type by. Every other op, a `CREATE TYPE` and a `DROP TYPE`
+/// among them, runs inside the transaction where the plan puts it: Postgres
+/// creates a type and uses it in one transaction, and a new type may take
+/// the name a table rename frees, whose row type holds it until then.
+fn commits_ahead(op: &MigrationOp, labelled: &BTreeSet<String>) -> bool {
+    match op {
+        MigrationOp::AddEnumLabel { .. } => true,
+        MigrationOp::RenameEnumType { new, .. } => labelled.contains(new),
+        _ => false,
     }
 }
 
@@ -1331,15 +1344,15 @@ async fn plan_changes_row_security(
 ///
 /// - `one_transaction` (on Postgres the plan creates, drops or rebuilds a
 ///   row policy, or turns a row-security flag on or off):
-///   every op that changes a table ([`Plan::changes_a_table`], asked of
-///   the plan `one_transaction` holds), which [`unit_order`] has put in one
-///   run. The
+///   every op of the plan but the label additions that commit ahead
+///   ([`commits_ahead`], over the types `one_transaction` holds), in plan
+///   order. The
 ///   planner puts each policy drop ahead of the first table or column change
 ///   and each policy create after the last, so that a policy may read a
 ///   column the pass adds, renames or drops on any table (#995); neither
 ///   it nor a flag can then commit with its own table alone, and the pass's
-///   table changes commit together or not at all. Enum type statements keep
-///   their own autocommit units, before and after.
+///   changes commit together or not at all, a type it creates or drops
+///   among them.
 /// - otherwise, the plan's new tables (`added`) when one of their ops runs
 ///   after the last `AddTable` ([`MigrationOp::follows_the_creates`]: a key
 ///   to a table created later, #304): every op up to the last on a new
@@ -1348,7 +1361,7 @@ async fn plan_changes_row_security(
 fn table_ops_unit<'a>(
     rendered: &'a [RenderedOp],
     added: &BTreeSet<&str>,
-    one_transaction: Option<&Plan>,
+    one_transaction: Option<&BTreeSet<String>>,
 ) -> &'a [RenderedOp] {
     let run = |keep: &dyn Fn(&str) -> bool| {
         rendered
@@ -1356,10 +1369,10 @@ fn table_ops_unit<'a>(
             .take_while(|op| op.op.table().is_some_and(keep))
             .count()
     };
-    if let Some(plan) = one_transaction {
+    if let Some(labelled) = one_transaction {
         let len = rendered
             .iter()
-            .take_while(|op| plan.changes_a_table(&op.op))
+            .take_while(|op| !commits_ahead(&op.op, labelled))
             .count();
         return &rendered[..len];
     }

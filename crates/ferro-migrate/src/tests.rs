@@ -5822,14 +5822,8 @@ mod enum_renames {
         // column there.
         assert_eq!(
             plan(&parent(), &both_renamed, Dialect::Sqlite).op_list(),
-            vec![expected_label.clone()]
+            vec![expected_label]
         );
-        // A native type's label rename changes no table; one that rewrites
-        // the rows of a text column does, by the one decider.
-        let changes =
-            |dialect| plan(&parent(), &both_renamed, dialect).changes_a_table(&expected_label);
-        assert!(!changes(Dialect::Postgres));
-        assert!(changes(Dialect::Sqlite));
     }
 
     #[test]

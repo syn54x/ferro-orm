@@ -807,26 +807,6 @@ impl Plan {
         self.ops().cloned().collect()
     }
 
-    /// Whether `op` changes a table: an op on one, or a label rename that
-    /// rewrites the rows of a column keeping its labels as text
-    /// ([`plan::relabels_rows`], the one decider, which the renderer reads
-    /// for the same op), beside the rename of a native type's label. What
-    /// the reconciliation pass runs inside its transaction when it is one
-    /// (#995).
-    pub fn changes_a_table(&self, op: &MigrationOp) -> bool {
-        match op {
-            MigrationOp::RenameEnumLabel { columns, .. } => {
-                columns.iter().any(|(table, column)| {
-                    self.before
-                        .model(table)
-                        .and_then(|model| model.columns.iter().find(|col| &col.name == column))
-                        .is_some_and(|col| plan::relabels_rows(col, self.dialect))
-                })
-            }
-            other => other.table().is_some(),
-        }
-    }
-
     /// The dialect the plan was decided for.
     pub fn dialect(&self) -> Dialect {
         self.dialect
