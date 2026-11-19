@@ -515,17 +515,18 @@ fn type_name_of(op: &MigrationOp) -> &str {
     }
 }
 
-/// Execute one table's rendered ops. On Postgres the whole group runs in one
-/// transaction (FF-G G3) under the DDL lock timeout (ADR-0044): `SET LOCAL
-/// lock_timeout` first, and a statement that times out waiting for a lock
-/// rolls the group back and runs it again from the top, up to ten attempts.
-/// A mid-plan failure leaves the table exactly as it was, so a failed run is
-/// safely re-runnable. SQLite runs statement at a time, with each column
-/// drop going through its index-dependency path, and sets no timeout.
+/// Execute one unit of rendered table ops ([`table_ops_unit`]). On Postgres
+/// the whole group runs in one transaction (FF-G G3) under the DDL lock
+/// timeout (ADR-0044): `SET LOCAL lock_timeout` first, and a statement that
+/// times out waiting for a lock rolls the group back and runs it again from
+/// the top, up to ten attempts. A mid-plan failure leaves every table of the
+/// group exactly as it was, so a failed run is safely re-runnable. SQLite
+/// runs statement at a time, with each column drop going through its
+/// index-dependency path, and sets no timeout.
 ///
-/// On Postgres the group may hold the ops of several new tables
-/// ([`new_tables_unit`]): each statement is reported, and its failure named,
-/// under its own op's table, and `table` is the first of them.
+/// On Postgres the group may hold the ops of several tables: each statement
+/// is reported, and its failure named, under its own op's table, and `table`
+/// is the first of them.
 /// What ran (or committed before a failure) goes into `report`. Returns how
 /// many statements ran and how many columns were dropped.
 async fn execute_table_ops(
@@ -591,7 +592,7 @@ async fn execute_table_ops(
             Err(match index.and_then(|index| ops_statements.get(index)) {
                 Some((
                     RenderedOp {
-                        op: MigrationOp::DropColumn { column, .. },
+                        op: MigrationOp::DropColumn { table, column },
                         ..
                     },
                     _,
@@ -1054,6 +1055,14 @@ async fn run_passes(
         op.table()
             .is_some_and(|table| added.contains(table) && !adds_after_renames.contains(table))
     };
+    // A policy the plan creates, drops or rebuilds runs apart from its
+    // table's other ops, since it may read a column of any table, and its
+    // table's flags run beside it (#995): the table ops then commit
+    // together or not at all.
+    let one_transaction = backend == Dialect::Postgres
+        && rendered
+            .iter()
+            .any(|op| changes_row_security(&op.op) && !created_by_pass(&op.op));
     while index < rendered.len() {
         let current = &rendered[index];
         // Every op on a table the create pass built is the create pass's,
@@ -1092,22 +1101,9 @@ async fn run_passes(
             index += 1;
             continue;
         };
-        let (group, consumed) = match new_tables_unit(&rendered[index..], &added) {
-            Some(unit) => (
-                unit.iter()
-                    .filter(|op| !created_by_pass(&op.op))
-                    .collect::<Vec<&RenderedOp>>(),
-                unit.len(),
-            ),
-            None => {
-                let group: Vec<&RenderedOp> = rendered[index..]
-                    .iter()
-                    .take_while(|op| op.op.table() == Some(table))
-                    .collect();
-                let consumed = group.len();
-                (group, consumed)
-            }
-        };
+        let unit = table_ops_unit(&rendered[index..], &added, one_transaction);
+        let consumed = unit.len();
+        let group: Vec<&RenderedOp> = unit.iter().filter(|op| !created_by_pass(&op.op)).collect();
         let (statements, dropped) =
             execute_table_ops(&engine, table, &group, &modelset, backend, &ddl, report).await?;
         if statements + dropped > 0 {
@@ -1252,27 +1248,59 @@ async fn stranded_label_warnings(
     Ok(warnings)
 }
 
-/// The ops at the head of `rendered` that create the plan's new tables
-/// (`added`) when they run as one unit: every op up to the last on a new
-/// table, when one of them runs after the last `AddTable`
-/// ([`MigrationOp::follows_the_creates`]). The planner puts a key to a table
-/// created later there (#304), then each new table's flags and policies, so
-/// that a policy may read any of them (#753); the tables then commit with
-/// those or not at all, as the create pass's do. `None` when `rendered` does
-/// not start on a new table or no new table has such an op: each table is
-/// then its own unit.
-fn new_tables_unit<'a>(
+/// Whether `op` is one the planner runs apart from its table's other ops:
+/// a row policy created, dropped or rebuilt, or a row-security flag turned
+/// on or off beside them.
+fn changes_row_security(op: &MigrationOp) -> bool {
+    matches!(
+        op,
+        MigrationOp::AddRowPolicy { .. }
+            | MigrationOp::RebuildRowPolicy { .. }
+            | MigrationOp::DropRowPolicy { .. }
+            | MigrationOp::EnableRowSecurity { .. }
+            | MigrationOp::ForceRowSecurity { .. }
+            | MigrationOp::NoForceRowSecurity { .. }
+            | MigrationOp::DisableRowSecurity { .. }
+    )
+}
+
+/// The ops at the head of `rendered`, which starts on a table op, that run
+/// as one unit (on Postgres one transaction):
+///
+/// - `one_transaction` (on Postgres the plan creates, drops or rebuilds a
+///   row policy, or turns a row-security flag on or off):
+///   every table op up to the next enum type statement. The
+///   planner puts each policy drop ahead of the first table or column change
+///   and each policy create after the last, so that a policy may read a
+///   column the pass adds, renames or drops on any table (#995); neither
+///   it nor a flag can then commit with its own table alone, and the pass's
+///   table changes commit together or not at all. Enum type statements keep
+///   their own autocommit units, before and after.
+/// - otherwise, the plan's new tables (`added`) when one of their ops runs
+///   after the last `AddTable` ([`MigrationOp::follows_the_creates`]: a key
+///   to a table created later, #304): every op up to the last on a new
+///   table, which commit with it or not at all, as the create pass's do.
+/// - otherwise each table is its own unit: the ops on the first op's table.
+fn table_ops_unit<'a>(
     rendered: &'a [RenderedOp],
     added: &BTreeSet<&str>,
-) -> Option<&'a [RenderedOp]> {
-    let len = rendered
-        .iter()
-        .take_while(|op| op.op.table().is_some_and(|table| added.contains(table)))
-        .count();
-    let unit = &rendered[..len];
-    unit.iter()
-        .any(|op| op.op.follows_the_creates())
-        .then_some(unit)
+    one_transaction: bool,
+) -> &'a [RenderedOp] {
+    let run = |keep: &dyn Fn(&str) -> bool| {
+        rendered
+            .iter()
+            .take_while(|op| op.op.table().is_some_and(keep))
+            .count()
+    };
+    if one_transaction {
+        return &rendered[..run(&|_| true)];
+    }
+    let new_tables = &rendered[..run(&|table| added.contains(table))];
+    if new_tables.iter().any(|op| op.op.follows_the_creates()) {
+        return new_tables;
+    }
+    let first = rendered.first().and_then(|op| op.op.table());
+    &rendered[..run(&|table| Some(table) == first)]
 }
 
 /// Manually run the auto-migrate pass against a connected engine.
@@ -1286,7 +1314,9 @@ fn new_tables_unit<'a>(
 /// and waits for the run lock up to its `lock_timeout` (`lock_timeout_s`).
 ///
 /// On Postgres each table's plan runs in one transaction (a mid-plan failure
-/// rolls that table back); SQLite applies statements one at a time. Like
+/// rolls that table back), and a pass that creates, drops or changes a row
+/// policy runs all its table changes in one; SQLite applies statements one at
+/// a time. Like
 /// `connect()`'s flags it runs under the run lock and refuses a database
 /// governed by ferro migrations; `tracking_schemas` are the project's
 /// configured `tracking_schema`s.
