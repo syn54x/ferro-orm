@@ -575,10 +575,17 @@ async fn execute_table_ops(
             Sender::PassEach(&tables),
             &sqls,
             |attempt| {
-                report.warn(pass_attempt_warning(
-                    Subject::table(lock_wait_table(&tables, &attempt.table)),
-                    &attempt,
-                ))
+                // A type statement inside the unit waits under its type.
+                let waited = lock_wait_table(&tables, &attempt.table);
+                let on_type = ops
+                    .iter()
+                    .any(|op| op.op.table().is_none() && type_name_of(&op.op) == waited);
+                let subject = if on_type {
+                    Subject::enum_type(waited)
+                } else {
+                    Subject::table(waited)
+                };
+                report.warn(pass_attempt_warning(subject, &attempt))
             },
             None,
         )
@@ -1342,11 +1349,11 @@ async fn plan_changes_row_security(
 /// The ops at the head of `rendered`, which starts on a table op, that run
 /// as one unit (on Postgres one transaction):
 ///
-/// - `one_transaction` (on Postgres the plan creates, drops or rebuilds a
-///   row policy, or turns a row-security flag on or off):
+/// - `labelled` is given (on Postgres the plan creates, drops or rebuilds a
+///   row policy, or turns a row-security flag on or off; it holds the enum
+///   types the plan adds a label to):
 ///   every op of the plan but the label additions that commit ahead
-///   ([`commits_ahead`], over the types `one_transaction` holds), in plan
-///   order. The
+///   ([`commits_ahead`]), in plan order. The
 ///   planner puts each policy drop ahead of the first table or column change
 ///   and each policy create after the last, so that a policy may read a
 ///   column the pass adds, renames or drops on any table (#995); neither
@@ -1361,7 +1368,7 @@ async fn plan_changes_row_security(
 fn table_ops_unit<'a>(
     rendered: &'a [RenderedOp],
     added: &BTreeSet<&str>,
-    one_transaction: Option<&BTreeSet<String>>,
+    labelled: Option<&BTreeSet<String>>,
 ) -> &'a [RenderedOp] {
     let run = |keep: &dyn Fn(&str) -> bool| {
         rendered
@@ -1369,7 +1376,7 @@ fn table_ops_unit<'a>(
             .take_while(|op| op.op.table().is_some_and(keep))
             .count()
     };
-    if let Some(labelled) = one_transaction {
+    if let Some(labelled) = labelled {
         let len = rendered
             .iter()
             .take_while(|op| !commits_ahead(&op.op, labelled))
