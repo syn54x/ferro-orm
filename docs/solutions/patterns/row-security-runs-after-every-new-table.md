@@ -123,7 +123,7 @@ transaction (`table_ops_unit` in `src/migrate.rs`; ADR-0049, amended
 changes until the last statement commits.
 
 Whether the pass is one transaction is decided before it sends its first
-statement, from the plan (`plan_changes_row_security`). The first version
+statement, from the plan (`plan_changing_row_security`). The first version
 decided it when the table ops began, and two statement families had already
 committed by then:
 

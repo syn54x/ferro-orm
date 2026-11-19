@@ -605,11 +605,12 @@ async fn execute_table_ops(
                     },
                     _,
                 )) => map_drop_column_error(table, column, error),
-                Some((op, _)) if op.op.table().is_none() => type_statement_error(&op.op, error),
-                Some((op, sql)) => {
-                    let table = op.op.table().unwrap_or(table);
-                    map_op_statement_error(engine, table, &op.op, declared, sql, error).await
-                }
+                Some((op, sql)) => match op.op.table() {
+                    Some(table) => {
+                        map_op_statement_error(engine, table, &op.op, declared, sql, error).await
+                    }
+                    None => type_statement_error(&op.op, error),
+                },
                 None => crate::errors::map_db_error(
                     &format!("Auto-migrate failed to apply DDL to table '{table}'"),
                     error,
@@ -929,7 +930,7 @@ pub async fn run_pass_for_python(
 ///
 /// On Postgres a pass whose plan changes row security is one transaction for
 /// every table change (#995), and that is decided before the pass sends its
-/// first statement ([`plan_changes_row_security`]): the create pass then
+/// first statement ([`plan_changing_row_security`]): the create pass then
 /// creates no table, and every op of the plan is one unit, in plan order,
 /// its type statements included ([`table_ops_unit`]). Only a label added to
 /// an enum type commits ahead of it ([`commits_ahead`]).
@@ -962,9 +963,12 @@ async fn run_passes(
     let backend = engine.backend();
     // Decided before anything runs: a table the create pass committed could
     // not be taken back by the plan's one transaction.
-    let plan_creates = opts.updates
-        && backend == Dialect::Postgres
-        && plan_changes_row_security(&engine, &modelset, opts).await?;
+    let planned = if opts.updates && backend == Dialect::Postgres {
+        plan_changing_row_security(&engine, &modelset, opts).await?
+    } else {
+        None
+    };
+    let plan_creates = planned.is_some();
     let created =
         internal_create_tables(engine.clone(), opts.updates, plan_creates, &ddl, report).await?;
     let tables_before_create = &created.existing;
@@ -1005,7 +1009,6 @@ async fn run_passes(
                 && !created.left_to_plan.contains(table)
         })
         .collect();
-    let existing = tables_to_read(&engine, &modelset, &built, &[]).await?;
     // The tables this pass reconciles, by their declared names: the renamed
     // ones under their new name.
     let reconciled: HashSet<&str> = modelset
@@ -1017,20 +1020,29 @@ async fn run_passes(
             tables_before_create.contains(*table) || renames.iter().any(|(_, new)| new == table)
         })
         .collect();
-    let (live, facts) = live_schema_ir(&engine, &modelset, &existing).await?;
-    let plan = plan_from_ir(
-        &live_side(live, facts, &modelset, backend)?,
-        &Side::declared(modelset.clone()),
-        backend,
-        opts.plan_options(),
-    );
+    // The plan made before the create pass is this pass's plan: the create
+    // pass created nothing for it, so the database stands as it was read.
+    let plan = match planned {
+        Some(plan) => plan,
+        None => {
+            let existing = tables_to_read(&engine, &modelset, &built, &[]).await?;
+            let (live, facts) = live_schema_ir(&engine, &modelset, &existing).await?;
+            plan_from_ir(
+                &live_side(live, facts, &modelset, backend)?,
+                &Side::declared(modelset.clone()),
+                backend,
+                opts.plan_options(),
+            )
+        }
+    };
     let mut rendered = plan.render().map_err(emission_error)?;
     // A policy the plan creates, drops or rebuilds runs apart from its
     // table's other ops, since it may read a column of any table, and its
     // table's flags run beside it (#995): the pass's ops then commit
     // together or not at all, but the labels it adds, which commit first (a
     // stable sort: every other op keeps its place in the plan).
-    let one_transaction = backend == Dialect::Postgres && plan.ops().any(changes_row_security);
+    let one_transaction =
+        backend == Dialect::Postgres && plan.ops().any(MigrationOp::changes_row_security);
     let labelled: BTreeSet<String> = plan
         .ops()
         .filter_map(|op| match op {
@@ -1080,7 +1092,7 @@ async fn run_passes(
     let mut ddl_ran = false;
     let mut index = 0;
     // The tables the plan adds: the create pass's own, which have already
-    // been created with their row security, and the ones it held back for a
+    // been created, and the ones it left to this plan or held back for a
     // rename, which are created here, after the renames they wait on.
     let added: BTreeSet<&str> = rendered
         .iter()
@@ -1096,8 +1108,7 @@ async fn run_passes(
     while index < rendered.len() {
         let current = &rendered[index];
         // Every op on a table the create pass built is the create pass's,
-        // which has already run: the add, a deferred key and the table's
-        // row security.
+        // which has already run.
         if created_by_pass(&current.op) {
             index += 1;
             continue;
@@ -1287,22 +1298,6 @@ async fn stranded_label_warnings(
     Ok(warnings)
 }
 
-/// Whether `op` is one the planner runs apart from its table's other ops:
-/// a row policy created, dropped or rebuilt, or a row-security flag turned
-/// on or off beside them.
-fn changes_row_security(op: &MigrationOp) -> bool {
-    matches!(
-        op,
-        MigrationOp::AddRowPolicy { .. }
-            | MigrationOp::RebuildRowPolicy { .. }
-            | MigrationOp::DropRowPolicy { .. }
-            | MigrationOp::EnableRowSecurity { .. }
-            | MigrationOp::ForceRowSecurity { .. }
-            | MigrationOp::NoForceRowSecurity { .. }
-            | MigrationOp::DisableRowSecurity { .. }
-    )
-}
-
 /// Whether `op` commits on its own, ahead of the transaction of a pass that
 /// is one: a label added to an enum type, since Postgres lets no statement
 /// use a label before it is committed (ADR-0011), and the rename of a type
@@ -1319,20 +1314,21 @@ fn commits_ahead(op: &MigrationOp, labelled: &BTreeSet<String>) -> bool {
     }
 }
 
-/// Whether the plan this pass is about to run changes row security, read
+/// The plan this pass is about to run when it changes row security, made
 /// before the create pass sends a statement: the plan from the database as it
-/// stands, every new table an add. Only asked on Postgres under
-/// `migrate_updates`. A pass that creates no table reads nothing here: the
-/// create pass then commits nothing the transaction would have to take back.
-async fn plan_changes_row_security(
+/// stands, every new table an add. `None` when it changes none, and for a
+/// pass that creates no table, which reads nothing here: the create pass then
+/// commits nothing the transaction would have to take back. Only asked on
+/// Postgres under `migrate_updates`.
+async fn plan_changing_row_security(
     engine: &EngineHandle,
     modelset: &IrEnvelope<SchemaIrPayload>,
     opts: MigrateOptions,
-) -> PyResult<bool> {
+) -> PyResult<Option<Plan>> {
     let live = crate::introspect::live_table_names(engine).await?;
     let models = &modelset.payload.models;
     if models.iter().all(|model| live.contains(&model.table_name)) {
-        return Ok(false);
+        return Ok(None);
     }
     let existing = tables_to_read(engine, modelset, &[], &[]).await?;
     let (live, facts) = live_schema_ir(engine, modelset, &existing).await?;
@@ -1343,7 +1339,8 @@ async fn plan_changes_row_security(
         backend,
         opts.plan_options(),
     );
-    Ok(plan.ops().any(changes_row_security))
+    let changes = plan.ops().any(MigrationOp::changes_row_security);
+    Ok(changes.then_some(plan))
 }
 
 /// The ops at the head of `rendered`, which starts on a table op, that run

@@ -161,9 +161,11 @@ For a single model, every emitter must agree on:
       body never become an op on any emitter (ADR-0019). Postgres-only; SQLite
       gets one warning per table and no DDL (ADR-0014).
       In every plan each policy drop precedes the first table or column
-      change and each policy create follows the last, so a policy may read a
-      column the plan adds, renames or drops on any table; the order is the
-      planner's, for every emitter (#995).
+      change after the plan's renames (Postgres carries a policy's body with
+      a rename, and a drop names its policy as the renames leave it) and
+      each policy create follows the last, so a policy may read a column the
+      plan adds, renames or drops on any table; the order is the planner's,
+      for every emitter (#995).
       A new table's flags and policies run after the last CREATE TABLE of the
       plan, and a dropped table's Ferro-owned policies are dropped before the
       first DROP TABLE, so a policy may read any table of the same plan; the
@@ -204,7 +206,9 @@ For a single model, every emitter must agree on:
       both of which Postgres refuses to alter under an expression. A row
       policy or table check that reads the column is carried around the
       pair. A carried artifact is one taken down and put back around
-      another change, its ops marked `OpVerdict.carried` with whether it
+      another change, or a row policy whose own body changed (its drop
+      alone is marked, `changed`, and its `RebuildRowPolicy` is the
+      difference), its ops marked `OpVerdict.carried` with whether it
       comes back as it was: `unchanged` is no difference on any emitter, while
       `changed` (`ck_transaction_nonzero check body differs`) and
       `not_compared` (a live check over a column whose type changes, which

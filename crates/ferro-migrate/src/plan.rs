@@ -1414,16 +1414,17 @@ fn order_row_security(ops: Vec<MigrationOp>) -> Vec<MigrationOp> {
     let (mut drops, mut creates, mut teardown, mut rest) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for op in ops {
+        if !op.changes_row_security() {
+            rest.push(op);
+            continue;
+        }
         match op {
             MigrationOp::DropRowPolicy { .. } => drops.push(op),
-            MigrationOp::EnableRowSecurity { .. }
-            | MigrationOp::ForceRowSecurity { .. }
-            | MigrationOp::AddRowPolicy { .. }
-            | MigrationOp::RebuildRowPolicy { .. } => creates.push(op),
             MigrationOp::NoForceRowSecurity { .. } | MigrationOp::DisableRowSecurity { .. } => {
                 teardown.push(op);
             }
-            _ => rest.push(op),
+            // `ENABLE`, `FORCE`, a policy added or rebuilt.
+            _ => creates.push(op),
         }
     }
     if drops.is_empty() && creates.is_empty() && teardown.is_empty() {

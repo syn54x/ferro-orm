@@ -549,6 +549,23 @@ impl MigrationOp {
         matches!(self, MigrationOp::AddEnumLabel { .. })
     }
 
+    /// Whether the op changes row security: a policy created, rebuilt or
+    /// dropped, or a table's `ENABLE` / `FORCE` flag turned on or off. The
+    /// planner runs these apart from their table's other ops (#995), and a
+    /// reconciliation pass whose plan holds one is one transaction.
+    pub fn changes_row_security(&self) -> bool {
+        matches!(
+            self,
+            MigrationOp::AddRowPolicy { .. }
+                | MigrationOp::RebuildRowPolicy { .. }
+                | MigrationOp::DropRowPolicy { .. }
+                | MigrationOp::EnableRowSecurity { .. }
+                | MigrationOp::ForceRowSecurity { .. }
+                | MigrationOp::NoForceRowSecurity { .. }
+                | MigrationOp::DisableRowSecurity { .. }
+        )
+    }
+
     /// Whether the op, on a table its plan creates, runs after the plan's
     /// last `CREATE TABLE`: a deferred key (#304), or the table's row
     /// security (#753). New tables with such an op are created in one

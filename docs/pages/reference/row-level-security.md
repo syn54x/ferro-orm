@@ -104,7 +104,7 @@ Pass `using=`, `with_check=` or both, with `name=`, when one column compared wit
 
 Write the same `NULLIF(current_setting(key, true), '')` wrapper around a setting you read in SQL, so an unset setting matches no rows instead of raising.
 
-A policy's SQL may read any table the models declare, one created in the same pass or migration included, and any column of one, including a column the same pass or migration adds, renames or drops. Ferro drops policies before the first table or column change and creates them after the last. A migration that `ferro migrate new` splits into expand and contract steps holds that order within each step, not across them: there a policy is created in the first step, and the policy of a dropped table is dropped in the contract step.
+A policy's SQL may read any table the models declare, one created in the same pass or migration included, and any column of one, including a column the same pass or migration adds, renames or drops. Ferro runs its renames first, then drops policies before the first other table or column change and creates them after the last. A migration that `ferro migrate new` splits into expand and contract steps holds that order within each step, not across them: there a policy is created in the first step, and the policy of a dropped table is dropped in the contract step.
 
 ### Policy names
 
