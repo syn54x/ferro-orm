@@ -494,6 +494,33 @@ def test_a_policy_may_read_a_column_the_same_migration_adds_or_drops(
     assert not {"rlsdocument", "rlsteam"} & db.tables()
 
 
+@backend_matrix
+def test_a_policy_drop_stays_ahead_of_a_column_drop_that_waits_for_the_contract(
+    project, pkg, db
+):
+    """Beside a data step the dropped column waits for the contract step;
+    the drop of the policy that read it stays in the schema step, ahead of
+    it, so the migration applies (#995)."""
+    write_config(project, pkg)
+    write_models(project, pkg, reads_a_column(named=True, document=True))
+    new("create")
+    write_models(project, pkg, reads_a_column(named=False, document=False))
+    new("edit", "--data-step", "RlsTeam")
+    [data_step] = migration_dir(project, 2).glob("*.py")
+    data_step.write_text(
+        "from ferro.migrations import atomic, nothing_to_reverse\n\n\n"
+        "@atomic\nasync def up(ctx):\n    pass\n\n\n"
+        '@nothing_to_reverse("nothing was changed")\ndef down(ctx): ...\n'
+    )
+    ups = sorted(migration_dir(project, 2).glob("*.up.postgres.sql"))
+    assert [(f.name, statements(f)) for f in ups] == [
+        ("01_schema.up.postgres.sql", [NO_MEMBERS[0], *NO_MEMBERS[2:]]),
+        ("03_contract.up.postgres.sql", [DROP_NAME]),
+    ]
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert run("migrate", "drift", "--url", db.url) == 0
+
+
 MEMBERSHIP_ONLY = READS_ANOTHER_TABLE[READS_ANOTHER_TABLE.index("class Membership") :]
 
 
