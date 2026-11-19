@@ -153,9 +153,16 @@ therefore leave a label added, and `.report` lists it. It is additive and
 the next pass finds it in place. The rename of a type that gains a label
 commits ahead with it, since the addition names the type by its new name.
 
-Not covered: in a generated migration with a data step, the policy of a
-dropped table still waits for the contract with its table (rule 2 below),
-after the expand's column changes.
+Not covered (#1009): a generated migration that is split into expand and
+contract steps keeps the order within each step only, since an op's step is
+decided by its verdict, not by this order. Two shapes follow:
+
+- The policy of a dropped table waits for the contract with its table (rule
+  2 below). When the schema step changes the type of a column that policy
+  reads, `ferro migrate up` fails on Postgres with `cannot alter type of a
+  column used in a policy definition`.
+- A policy that reads a new required column is created in the expand step,
+  ahead of the contract's `SET NOT NULL`. That migration applies.
 
 ## The two rules for new and dropped tables
 
