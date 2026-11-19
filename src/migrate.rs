@@ -923,6 +923,7 @@ pub async fn run_pass_for_python(
 /// first statement ([`plan_changes_row_security`]): the create pass then
 /// creates no table, the plan's type statements run ahead of every table op
 /// ([`unit_order`]) and every table op is one unit ([`table_ops_unit`]).
+/// Which ops change a table is the plan's to say ([`Plan::changes_a_table`]).
 ///
 /// After any DDL executed, the engine pool is refreshed so no connection can
 /// serve a statement prepared against the pre-DDL schema.
@@ -1022,7 +1023,7 @@ async fn run_passes(
     // type drops after (a stable sort: each keeps its place among its own).
     let one_transaction = backend == Dialect::Postgres && plan.ops().any(changes_row_security);
     if one_transaction {
-        rendered.sort_by_key(unit_order);
+        rendered.sort_by_key(|op| unit_order(&plan, &op.op));
     }
 
     if backend == Dialect::Postgres {
@@ -1085,7 +1086,7 @@ async fn run_passes(
             index += 1;
             continue;
         }
-        let in_transaction = one_transaction && changes_a_table(current);
+        let in_transaction = one_transaction && plan.changes_a_table(&current.op);
         let table = current
             .op
             .table()
@@ -1119,7 +1120,7 @@ async fn run_passes(
             index += 1;
             continue;
         };
-        let unit = table_ops_unit(&rendered[index..], &added, one_transaction);
+        let unit = table_ops_unit(&rendered[index..], &added, one_transaction.then_some(&plan));
         let consumed = unit.len();
         let group: Vec<&RenderedOp> = unit.iter().filter(|op| !created_by_pass(&op.op)).collect();
         let (statements, dropped) =
@@ -1282,28 +1283,16 @@ fn changes_row_security(op: &MigrationOp) -> bool {
     )
 }
 
-/// Whether `op`'s statements change a table: an op on one, or a label
-/// rename that rewrites the rows of a column keeping its labels as text (an
-/// `UPDATE`, beside the `ALTER TYPE … RENAME VALUE` of a native type).
-fn changes_a_table(op: &RenderedOp) -> bool {
-    op.op.table().is_some()
-        || (matches!(op.op, MigrationOp::RenameEnumLabel { .. })
-            && op
-                .statements
-                .iter()
-                .any(|sql| !sql.starts_with("ALTER TYPE ")))
-}
-
-/// Where `op` runs in a pass that is one transaction: the type statements
+/// Where `op` of `plan` runs in a pass that is one transaction: the type statements
 /// first, each in autocommit, since a label must be committed before a table
 /// statement uses it (and none reads a table: a rename leaves a type alone);
 /// then every table change, as one transaction; then the type drops. The
 /// plan's renames come ahead of its `CREATE TYPE`, so in plan order a table
 /// rename would commit on its own, before the transaction began.
-fn unit_order(op: &RenderedOp) -> u8 {
-    if changes_a_table(op) {
+fn unit_order(plan: &Plan, op: &MigrationOp) -> u8 {
+    if plan.changes_a_table(op) {
         1
-    } else if matches!(op.op, MigrationOp::DropEnumType { .. }) {
+    } else if matches!(op, MigrationOp::DropEnumType { .. }) {
         2
     } else {
         0
@@ -1342,8 +1331,9 @@ async fn plan_changes_row_security(
 ///
 /// - `one_transaction` (on Postgres the plan creates, drops or rebuilds a
 ///   row policy, or turns a row-security flag on or off):
-///   every op that changes a table ([`changes_a_table`]), which
-///   [`unit_order`] has put in one run. The
+///   every op that changes a table ([`Plan::changes_a_table`], asked of
+///   the plan `one_transaction` holds), which [`unit_order`] has put in one
+///   run. The
 ///   planner puts each policy drop ahead of the first table or column change
 ///   and each policy create after the last, so that a policy may read a
 ///   column the pass adds, renames or drops on any table (#995); neither
@@ -1358,7 +1348,7 @@ async fn plan_changes_row_security(
 fn table_ops_unit<'a>(
     rendered: &'a [RenderedOp],
     added: &BTreeSet<&str>,
-    one_transaction: bool,
+    one_transaction: Option<&Plan>,
 ) -> &'a [RenderedOp] {
     let run = |keep: &dyn Fn(&str) -> bool| {
         rendered
@@ -1366,8 +1356,11 @@ fn table_ops_unit<'a>(
             .take_while(|op| op.op.table().is_some_and(keep))
             .count()
     };
-    if one_transaction {
-        let len = rendered.iter().take_while(|op| changes_a_table(op)).count();
+    if let Some(plan) = one_transaction {
+        let len = rendered
+            .iter()
+            .take_while(|op| plan.changes_a_table(&op.op))
+            .count();
         return &rendered[..len];
     }
     let new_tables = &rendered[..run(&|table| added.contains(table))];
