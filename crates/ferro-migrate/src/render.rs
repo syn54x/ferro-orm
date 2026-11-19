@@ -837,6 +837,18 @@ pub(crate) fn render_from(
                 // live one as the catalog printed it. The rebuild's create
                 // alone: its `DROP POLICY` is the plan's own op, ahead of
                 // every table change (#995).
+                let dropped = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::DropRowPolicy { table: t, name: n }
+                        if t == table && n == name)
+                });
+                if !dropped {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Row-policy rebuild for '{name}' on table '{table}' is rendered \
+                             without the drop of the policy it replaces"
+                        ),
+                    });
+                }
                 let model = new_side.declaration(find_model(&new_models, table)?);
                 let create = row_policy_rebuild_statements(&model, name)
                     .map_err(|message| EmissionError { message })?

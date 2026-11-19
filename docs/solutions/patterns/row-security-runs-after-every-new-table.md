@@ -119,9 +119,31 @@ same way, with its own `carried` mark.
 In the reconciliation pass a policy can then no longer commit with its own
 table, so on Postgres a plan with a row-security op runs every table op as one
 transaction (`table_ops_unit` in `src/migrate.rs`; ADR-0049, amended
-2026-11-18). Enum type statements keep their autocommit units before and
-after. The cost is that the pass holds its locks on every table it changes
-until the last statement commits.
+2026-11-18). The cost is that the pass holds its locks on every table it
+changes until the last statement commits.
+
+Whether the pass is one transaction is decided before it sends its first
+statement, from the plan (`plan_changes_row_security`). The first version
+decided it when the table ops began, and two statement families had already
+committed by then:
+
+- **The create pass.** It built every new table that had no row security or
+  deferred key of its own, so a plain new `team` stayed behind when a policy
+  on an existing table failed. It now creates no table when the plan changes
+  row security (`CreatePass::left_to_plan`); the plan's `AddTable` ops do.
+- **The renames ahead of a type statement.** The plan's renames come before
+  its `CREATE TYPE`, and a type statement ends a transaction, so a table
+  rename committed alone. The pass now runs the type statements first, each
+  in autocommit, then every table change as one transaction, then the type
+  drops (`unit_order`). No type statement reads a table, so moving them ahead
+  changes nothing they do.
+
+The type statements stay outside the transaction on purpose. Postgres runs
+`ALTER TYPE … ADD VALUE` inside a transaction but refuses any use of the new
+label before it commits, and a pass may add a label and a column default
+that uses it. A failed pass can therefore leave a type created or a label
+added, and `.report` lists it. Both are additive and the next pass finds
+them in place.
 
 Not covered: in a generated migration with a data step, the policy of a
 dropped table still waits for the contract with its table (rule 2 below),

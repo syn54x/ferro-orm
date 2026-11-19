@@ -10,6 +10,7 @@ every policy create after the last. The pass then runs its table changes as
 one transaction: a policy that fails leaves none of them.
 """
 
+from enum import StrEnum
 from typing import ClassVar
 
 import pytest
@@ -154,13 +155,85 @@ async def test_a_policy_that_fails_rolls_back_every_table_change_of_the_pass(db_
     assert 'CREATE POLICY "rls_document_members"' in message
     assert schema_steps(excinfo.value.report) == []
 
+    assert await _columns(db_url, "team", "document") == [("team", "id")]
+
+
+async def _columns(db_url: str, *tables: str) -> list[tuple[str, str]]:
+    """Every column of ``tables`` the database holds, as ``(table, column)``."""
+    names = ", ".join(f"'{table}'" for table in tables)
     await connect(db_url)
     async with engines.session():
         columns = await fetch_all(
             "SELECT table_name, column_name FROM information_schema.columns "
             "WHERE table_schema = current_schema() "
-            "AND table_name IN ('team', 'document') ORDER BY 1, 2"
+            f"AND table_name IN ({names}) ORDER BY 1, 2"
         )
-    assert [(row["table_name"], row["column_name"]) for row in columns] == [
-        ("team", "id")
+    return [(row["table_name"], row["column_name"]) for row in columns]
+
+
+async def test_a_failed_policy_leaves_no_plain_table_the_pass_would_create(db_url):
+    """No new table declares row security, so the create pass would build
+    ``team`` itself: it leaves it to the plan, whose one transaction then
+    takes it back."""
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Document(Model):  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("team", "nope")
+
+    with pytest.raises(OperationalError) as excinfo:
+        await auto_migrate(db_url, updates=True)
+    assert 'CREATE POLICY "rls_document_members"' in str(excinfo.value)
+    assert schema_steps(excinfo.value.report) == []
+    assert await _columns(db_url, "team", "document") == [
+        ("document", "id"),
+        ("document", "owner_id"),
     ]
+
+
+async def test_a_failed_policy_rolls_back_a_rename_ahead_of_a_new_enum_type(db_url):
+    """The plan's renames come ahead of its ``CREATE TYPE``, which commits on
+    its own: the type statements run first, so the rename is in the one
+    transaction with every other table change."""
+
+    class Writer(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await auto_migrate(db_url)
+    _rewind_registry()
+
+    class Kind(StrEnum):
+        STAFF = "staff"
+        GUEST = "guest"
+
+    class Author(Model):
+        __ferro_renamed_from__ = "writer"
+
+        id: int | None = Field(default=None, primary_key=True)
+        kind: Kind | None = None
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner_id: int
+
+        __ferro_rls__: ClassVar = _members("author", "nope")
+
+    with pytest.raises(OperationalError) as excinfo:
+        await auto_migrate(db_url, updates=True)
+    assert 'CREATE POLICY "rls_document_members"' in str(excinfo.value)
+    # The type statement committed on its own, ahead of every table change;
+    # no table change did.
+    steps = schema_steps(excinfo.value.report)
+    assert [subject for subject, _ in steps] == ["kind"], steps
+    assert await _columns(db_url, "writer", "author", "document") == [("writer", "id")]

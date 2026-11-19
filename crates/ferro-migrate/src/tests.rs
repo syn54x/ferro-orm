@@ -6004,6 +6004,28 @@ fn ledgerrow_ops(plan: &Plan) -> Vec<MigrationOp> {
 }
 
 #[test]
+fn a_rebuild_rendered_without_its_drop_is_refused() {
+    // A rebuild renders the `CREATE POLICY` alone: over a policy that still
+    // exists Postgres would refuse it, so the renderer does first.
+    let rebuild = Plan::unplaced(vec![MigrationOp::RebuildRowPolicy {
+        table: "ledgerrow".into(),
+        name: "rls_ledgerrow_raw".into(),
+    }]);
+    let failed = render_plan(
+        &rebuild,
+        &raw_policy_model("ann"),
+        &raw_policy_model("bob"),
+        Dialect::Postgres,
+    )
+    .expect_err("refused");
+    assert_eq!(
+        failed.message,
+        "Row-policy rebuild for 'rls_ledgerrow_raw' on table 'ledgerrow' is rendered without \
+         the drop of the policy it replaces"
+    );
+}
+
+#[test]
 fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw_body() {
     let (bare, none) = bare_row_security_pair();
     let plan = plan_from_ir(
