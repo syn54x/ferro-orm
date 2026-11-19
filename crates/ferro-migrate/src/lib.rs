@@ -448,15 +448,21 @@ pub enum MigrationOp {
         name: String,
     },
     /// A live ferro-owned policy whose definition drifted from its
-    /// declaration (ADR-0019) — `DROP POLICY` + `CREATE POLICY`.
+    /// declaration (ADR-0019): the `CREATE POLICY` of the new definition,
+    /// after the plan's last table or column change. Its `DROP POLICY` is
+    /// the [`MigrationOp::DropRowPolicy`] the planner puts ahead of the
+    /// first, so the old body may read a column the plan drops and the new
+    /// one a column it adds (#995).
     RebuildRowPolicy {
         /// Owning table.
         table: String,
         /// Policy name.
         name: String,
     },
-    /// A live ferro-owned policy the model no longer declares — `DROP
-    /// POLICY`. Destructive only.
+    /// `DROP POLICY`: a live ferro-owned policy the model no longer
+    /// declares (destructive only), or the first half of a policy the plan
+    /// carries around a column change or changes
+    /// ([`MigrationOp::RebuildRowPolicy`]).
     DropRowPolicy {
         /// Owning table.
         table: String,

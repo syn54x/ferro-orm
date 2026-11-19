@@ -834,19 +834,24 @@ pub(crate) fn render_from(
             MigrationOp::RebuildRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
                 // The policy as the target holds it: a declaration's, or a
-                // live one as the catalog printed it.
+                // live one as the catalog printed it. The rebuild's create
+                // alone: its `DROP POLICY` is the plan's own op, ahead of
+                // every table change (#995).
                 let model = new_side.declaration(find_model(&new_models, table)?);
-                let statements = row_policy_rebuild_statements(&model, name)
+                let create = row_policy_rebuild_statements(&model, name)
                     .map_err(|message| EmissionError { message })?
+                    .and_then(|mut statements| statements.pop())
                     .ok_or_else(|| undeclared_policy(op, table, name))?;
-                out.statements.extend(statements);
+                out.statements.push(create);
             }
             MigrationOp::DropRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
-                // A declared policy is dropped only to be added back by the
-                // same ops, around the replace of a column it reads.
+                // A declared policy is dropped only to be created again by
+                // the same ops: carried around the replace of a column it
+                // reads, or changed.
                 let added_back = ops.iter().any(|other| {
                     matches!(other, MigrationOp::AddRowPolicy { table: t, name: n }
+                        | MigrationOp::RebuildRowPolicy { table: t, name: n }
                         if t == table && n == name)
                 });
                 let still_declared = new_side.policy(table, name).is_some() && !added_back;
