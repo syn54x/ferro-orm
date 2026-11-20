@@ -609,7 +609,8 @@ def test_unmanaged_tables_is_reserved_and_refused_naming_the_issue(
         FerroSettings()
 
     assert "`unmanaged_tables`" in str(exc.value)
-    assert "#486" in str(exc.value)
+    assert "issues/486" in str(exc.value)
+    assert "#486" not in str(exc.value)
 
 
 def test_malformed_toml_is_refused_naming_the_file(project: Path):

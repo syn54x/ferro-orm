@@ -14,6 +14,7 @@ is still there or the next release already dropped it. The column stays in the
 schema snapshot, nullable, with its index (ADR-0053).
 """
 
+import re
 from enum import StrEnum
 from typing import Annotated
 
@@ -187,6 +188,32 @@ def test_a_query_lambda_naming_a_retired_column_raises_naming_it():
         Author.where(lambda author: author.bio == "x")
     with pytest.raises(AttributeError, match=RETIRED):
         Author.select().order_by(lambda author: author.bio)
+
+
+def test_retired_field_messages_cite_no_number():
+    class Customer(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        nickname: str | None = Field(default=None, retired=True)
+
+    def construct():
+        Customer(nickname="Al")
+
+    def read():
+        Customer(id=1).nickname
+
+    def query():
+        Customer.where(lambda customer: customer.nickname == "Al")
+
+    for call, error in (
+        (construct, TypeError),
+        (read, AttributeError),
+        (query, AttributeError),
+    ):
+        with pytest.raises(error) as caught:
+            call()
+        message = str(caught.value)
+        assert RETIRED in message
+        assert not re.search(r"ADR-\d+|#\d+", message), message
 
 
 @pytest.mark.asyncio
