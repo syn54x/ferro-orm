@@ -88,18 +88,18 @@ What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existin
 | Add the column's index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
 | Add composite index (`__ferro_composite_indexes__`) to existing columns | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
 | Add table check (`__ferro_checks__`) on CREATE TABLE | ✅ inline CHECK | ✅ inline CHECK |
-| Add table check to existing table | ⚠️ `UserWarning`, no DDL; [migrations](../guide/schema/migrations.md#sqlite-table-rebuilds) generate the table rebuild | ✅ `ADD CONSTRAINT` |
-| Rebuild table check on body drift | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
-| Add column `db_check=True` on existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
+| Add table check to existing table | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ADD CONSTRAINT` |
+| Rebuild table check on body drift | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
+| Add column `db_check=True` on existing column | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ADD CONSTRAINT` |
 | Leftover ferro check (`ck_*` live, removed from model) under `migrate_updates` | ⚠️ `UserWarning`, constraint stays | ⚠️ `UserWarning`, constraint stays |
-| Drop orphaned ferro check (`ck_*`) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ with `migrate_destructive=True` |
+| Drop orphaned ferro check (`ck_*`) | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ with `migrate_destructive=True` |
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
-| Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
-| Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team_id: int = Field(foreign_key=Team)` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
-| Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
-| Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
-| Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](../guide/schema/data-steps.md) writes the backfill first |
+| Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ADD CONSTRAINT` |
+| Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team_id: int = Field(foreign_key=Team)` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
+| Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
+| Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
+| Change nullability | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](../guide/schema/data-steps.md) writes the backfill first |
 | A server default no model declares (a *foreign default*, see [destructive drops](../guide/schema/auto-migrate.md#destructive-drops-with-migrate_destructive)) | ⚠️ `UserWarning`, default stays; only a hand rebuild drops it (an expression, or any default on a nullable column; a literal on a `NOT NULL` column is ferro's own) | ⚠️ `UserWarning` under `migrate_updates`; ✅ with `migrate_destructive=True`: `DROP DEFAULT` |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Redefine an index that keeps its name (a long name cut to 63 characters, two column groups that join to one name, or a live `idx_*` / `uq_*` index written another way) | ✅ `DROP INDEX` + `CREATE INDEX` under `migrate_updates`. A unique one over duplicate values fails the connect, counting them | ✅ same, in the table's transaction |
@@ -110,10 +110,10 @@ What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existin
 | Rename a table | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both strategies, and nothing is created. [Migrations](../guide/schema/renames-and-retirements.md#rename-hints) are the reviewed path | ✅ same |
 | Drop a column | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Drop a table | ❌ never here; [migrations](../guide/schema/migrations.md#reading-a-migration) generate it, marked destructive | ❌ same |
-| Add a [generated column](../guide/models-and-fields.md#generated-columns) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD COLUMN … GENERATED ALWAYS AS (…) STORED`; no backfill, the database computes every row |
-| Change a generated column's expression | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … SET EXPRESSION AS (…)`, which recomputes every row |
-| Make a generated column plain (the model drops `generated=`) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … DROP EXPRESSION`; the stored values stay |
-| Make a plain column generated | ⚠️ `UserWarning` (`PlainColumnKept`, or with `migrate_destructive=True` the rebuild warning), no DDL; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP COLUMN` + `ADD COLUMN … GENERATED`; without it a `PlainColumnKept` warning and the column stays |
+| Add a [generated column](../guide/models-and-fields.md#generated-columns) | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ADD COLUMN … GENERATED ALWAYS AS (…) STORED`; no backfill, the database computes every row |
+| Change a generated column's expression | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ALTER COLUMN … SET EXPRESSION AS (…)`, which recomputes every row |
+| Make a generated column plain (the model drops `generated=`) | ⚠️ `UserWarning`, no DDL; the warning names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) | ✅ `ALTER COLUMN … DROP EXPRESSION`; the stored values stay |
+| Make a plain column generated | ⚠️ `UserWarning` (`PlainColumnKept`, or with `migrate_destructive=True` the rebuild warning, which names [the two fixes](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild)), no DDL | ✅ with `migrate_destructive=True`: `DROP COLUMN` + `ADD COLUMN … GENERATED`; without it a `PlainColumnKept` warning and the column stays |
 | Change a primary key | ❌ never; no strategy generates it. Migrations refuse it with [the recipe](../guide/schema/migrations.md#changing-a-primary-key) | ❌ same |
 
 ## `PassReport` contents
@@ -145,7 +145,7 @@ A `Report`'s `kind` names the warning, so code can match on it rather than on th
 | `ForeignDefault` | A live server default no model declares; it stays until `migrate_destructive` or a hand rebuild drops it. |
 | `PlainColumnKept` | A live plain column the model declares generated; replacing it drops its values, so it stays until `migrate_destructive` or a migration replaces it. |
 | `RefusedConversion` | A storage conversion that could reinterpret or destroy stored values; it is not executed. |
-| `SqliteInPlace` | A change SQLite cannot make to an existing table in place: it needs the table rebuild only a migration writes. |
+| `SqliteInPlace` | A change SQLite cannot make to an existing table in place: it needs a table rebuild. The text ends "To make this change, rebuild the table by hand (…); or, if the models can be put back to what the database holds, adopt migrations there (`ferro migrate new`, then `ferro migrate baseline`) and generate this change as the next migration." [Auto-migrate](../guide/schema/auto-migrate.md#sqlite-changes-that-need-a-table-rebuild) shows both fixes. |
 | `PrimaryKeyKept` | The declared primary key differs from the live one; no strategy changes a primary key in place. |
 | `EnumTypeMove` | A column moves to or from a native Postgres enum type, which no statement converts in place. |
 | `RowSecuritySkipped` | Row security a table declares that the database does not apply: SQLite has none, or the create pass met the table already there. |

@@ -86,14 +86,14 @@ Rules worth knowing:
 
 ### SQLite changes that need a table rebuild
 
-SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and the strategy that can, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
+SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and how to make the change, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
 
 <!-- prints: auto_migrate_errors.py:sqlite-check -->
 ```text
-ferro auto-migrate: Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
+ferro auto-migrate: Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced. To make this change, rebuild the table by hand (create it under a new name as the models declare it, copy the rows, drop the old table, rename the new one); or, if the models can be put back to what the database holds, adopt migrations there (`ferro migrate new`, then `ferro migrate baseline`) and generate this change as the next migration.
 ```
 
-The connect goes on, and the column stays unchecked. [Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. A *foreign default* (a server default on a column that no model declares, [below](#destructive-drops-with-migrate_destructive)) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every strategy: SQLite gets one warning per table and no DDL.
+The connect goes on, and the column stays unchecked. Every such warning ends with the same two fixes. The first is the rebuild by hand. The second adopts [migrations](migrations.md) at the schema the database holds: put the models back to what the table holds, run `ferro migrate new` and then `ferro migrate baseline`, then make the change again and generate it with `ferro migrate new`, which writes the rebuild as a [reviewed step](migrations.md#sqlite-table-rebuilds). `ferro migrate new` alone does not clear the warning: the pass runs only on a database with no migration records, and on one of those `ferro migrate new` writes the models as they are now, so `ferro migrate baseline` refuses the very difference the warning reported. A *foreign default* (a server default on a column that no model declares, [below](#destructive-drops-with-migrate_destructive)) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every strategy: SQLite gets one warning per table and no DDL.
 
 ## Evolving enums: label addition
 
@@ -158,7 +158,7 @@ Ada's `bio` is gone with its column; `nickname` was added in the same connect. D
 
 - Explicit indexes covering a dropped column are dropped first, since they would be orphaned anyway.
 - Columns that are **primary keys**, enforced by a `UNIQUE` table constraint, or referenced by other tables' **foreign keys** abort with an error naming the constraint and pointing at `ferro migrate new`, which writes the drop as a reviewed [migration](migrations.md).
-- On SQLite, a column that the table's own **foreign key** or a **table check** names stays, with its values and its index, because SQLite drops such a column only by [rebuilding the table](#sqlite-changes-that-need-a-table-rebuild). The connect goes on and warns once per column, naming `ferro migrate new`. Postgres drops the column.
+- On SQLite, a column that the table's own **foreign key** or a **table check** names stays, with its values and its index, because SQLite drops such a column only by [rebuilding the table](#sqlite-changes-that-need-a-table-rebuild). The connect goes on and warns once per column, naming [the two fixes](#sqlite-changes-that-need-a-table-rebuild). Postgres drops the column.
 
 It also drops a **foreign default**: a server default on a column that Ferro did not leave there. Ferro persists no server default of its own, so a default someone set by hand (`ALTER TABLE "author" ALTER COLUMN "slug" SET DEFAULT ''`) is removed, and the `PassReport` lists the statement:
 
