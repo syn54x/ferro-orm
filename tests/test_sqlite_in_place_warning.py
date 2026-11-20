@@ -132,6 +132,77 @@ def test_a_hand_written_type_name_is_printed_as_the_database_holds_it(project, p
 
 
 @sqlite_only
+@pytest.mark.parametrize(
+    ("live", "field", "differs"),
+    [
+        pytest.param(
+            "char(5)",
+            "code: int",
+            "Column 'r997note.code' has type 'char(5)' but the model expects 'integer'",
+            id="char(5) reads as text",
+        ),
+        pytest.param(
+            "boolean",
+            "code: str",
+            "Column 'r997note.code' has type 'boolean' but the model expects 'varchar'",
+            id="boolean reads as int",
+        ),
+        pytest.param(
+            "",
+            "code: int",
+            "Column 'r997note.code' has no declared type but the model expects "
+            "'integer'",
+            id="no type name",
+        ),
+    ],
+)
+def test_a_live_type_name_its_token_does_not_spell_is_printed_as_held(
+    project, pkg, db, live, field, differs
+):
+    db.execute(
+        'CREATE TABLE "r997note" ("id" integer PRIMARY KEY AUTOINCREMENT, '
+        f'"code" {live} NOT NULL)'
+    )
+    declare(project, pkg, NOTE.format(field=field))
+
+    assert in_place_texts(migrate(db)) == [
+        f"{differs}, and SQLite cannot change a column's type in place. "
+        + SQLITE_IN_PLACE_FIX
+    ]
+
+
+@sqlite_only
+def test_a_bounded_column_ferro_created_is_no_change_on_the_next_pass(project, pkg, db):
+    """`varchar(8)`, a `max_length` and a UUID's `CHAR(32)` read back as no
+    change: no warning, and no drift once migrations adopt it."""
+    models = """
+    import uuid
+
+    class R997Bound(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        key: uuid.UUID
+        tag: Annotated[str, FerroField(db_type="varchar(8)")]
+        short: str = Field(max_length=8)
+    """
+    declare(project, pkg, models)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+
+    report = migrate(db)
+
+    assert schema_sql(report) == []
+    assert report.warnings == ()
+    write_config(project, pkg, '["sqlite"]')
+    for argv in (
+        ("migrate", "new", "adopt"),
+        ("migrate", "baseline", "--url", db.url),
+        ("migrate", "drift", "--url", db.url),
+    ):
+        code, output = cli(*argv)
+        assert code == 0, (argv, output)
+
+
+@sqlite_only
 def test_the_expected_type_is_the_one_the_create_pass_writes(project, pkg, db):
     declare(project, pkg, STATUS)
     created = schema_sql(migrate(db))

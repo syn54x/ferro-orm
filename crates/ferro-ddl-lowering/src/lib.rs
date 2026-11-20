@@ -3971,11 +3971,30 @@ pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     }
 }
 
-/// Whether `type_name`, a SQLite column's declared type, is one
-/// [`sqlite_declared_type`] writes, in any case and with or without a length
-/// (`INTEGER`, `VARCHAR(8)`). Any other name (`json_text`, `real`) was
-/// written by hand, and the live read keeps it as a fact.
-pub fn sqlite_writes_type_name(type_name: &str) -> bool {
+/// The column type the create pass writes for `col` on SQLite: the one
+/// storage decision ([`resolve_column_storage`]) in SQLite's spelling
+/// ([`sqlite_declared_type`]), an enum's `varchar(<longest label>)` included.
+///
+/// # Errors
+/// A column whose storage does not resolve.
+pub fn sqlite_column_type(col: &SchemaColumn) -> Result<String, String> {
+    match resolve_column_storage(col, Dialect::Sqlite)? {
+        ResolvedStorage::Scalar(canonical) => Ok(sqlite_declared_type(canonical)),
+        ResolvedStorage::PgEnum { .. } => Err(format!(
+            "column '{}' resolves to a native enum type on SQLite; this is a ferro bug, \
+             please file an issue",
+            col.name
+        )),
+    }
+}
+
+/// Whether a live SQLite column declared `type_name` holds the name the
+/// create pass writes for `col`, the IR the live read gives it
+/// ([`sqlite_column_type`]): the same name in any case, with or without a
+/// length, which SQLite does not enforce (`INTEGER`, `VARCHAR(8)`). Any other
+/// name (`json_text`, `char(5)`, `boolean`, none at all) reads back as a
+/// token that does not spell it, and the live read keeps it as a fact.
+pub fn sqlite_holds_written_type(type_name: &str, col: &SchemaColumn) -> bool {
     let base = |name: &str| {
         name.split('(')
             .next()
@@ -3983,29 +4002,7 @@ pub fn sqlite_writes_type_name(type_name: &str) -> bool {
             .trim()
             .to_ascii_lowercase()
     };
-    let name = base(type_name);
-    [
-        CanonicalType::Integer,
-        CanonicalType::SmallInt,
-        CanonicalType::BigInt,
-        CanonicalType::Double,
-        CanonicalType::Decimal,
-        CanonicalType::Boolean,
-        CanonicalType::Json,
-        CanonicalType::Jsonb,
-        CanonicalType::Text,
-        CanonicalType::Varchar(None),
-        CanonicalType::Char(1),
-        CanonicalType::Uuid,
-        CanonicalType::DateTime,
-        CanonicalType::Timestamp,
-        CanonicalType::TimestampTz,
-        CanonicalType::Date,
-        CanonicalType::Time,
-        CanonicalType::Blob,
-    ]
-    .into_iter()
-    .any(|canonical| base(&sqlite_declared_type(canonical)) == name)
+    sqlite_column_type(col).is_ok_and(|written| base(&written) == base(type_name))
 }
 
 /// Quote a SQL identifier for Postgres/SQLite DDL.

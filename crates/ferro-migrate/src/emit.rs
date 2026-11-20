@@ -8,10 +8,11 @@ use ferro_ddl_lowering::{
     quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
     render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
     render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
-    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_generated_guard,
+    row_security_statements, single_index_name, single_unique_index_name, sqlite_generated_guard,
 };
-use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
+use ferro_ddl_lowering::{
+    InPlaceChange, Report, Subject, sqlite_column_type, sqlite_in_place_report,
+};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
     Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, QueryBuilder,
@@ -946,8 +947,9 @@ pub(crate) fn withheld_alter_report(
 
 /// `table.column`'s type change from `old_col` to `new_col` on `dialect`.
 /// `old_type_name` is the type name a live database holds for the column
-/// when it is one ferro never writes (`json_text`); SQLite's report prints
-/// it, and otherwise the type the create pass writes for `old_col`.
+/// when its token does not spell it (`json_text`, `char(5)`, or `""` for no
+/// type); SQLite's report prints it, and otherwise the type the create pass
+/// writes for `old_col`.
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
@@ -996,21 +998,17 @@ pub(crate) fn emit_alter_column_type(
             // The type the create pass writes for a column: the one storage
             // decision (I-1 item 3), an enum's `varchar(<longest label>)`
             // included.
-            let written = |col: &SchemaColumn| match resolve_column_storage(col, ld) {
-                Ok(ResolvedStorage::Scalar(canonical)) => Ok(sqlite_declared_type(canonical)),
-                Ok(ResolvedStorage::PgEnum { .. }) => Err(EmissionError {
-                    message: format!(
-                        "Cannot alter type for '{table}.{column}': a native enum type on SQLite; \
-                         this is a ferro bug, please file an issue"
-                    ),
-                }),
-                Err(message) => Err(EmissionError {
+            let written = |col: &SchemaColumn| {
+                sqlite_column_type(col).map_err(|message| EmissionError {
                     message: format!("Cannot alter type for '{table}.{column}': {message}"),
-                }),
+                })
             };
-            let was = match old_type_name {
-                Some(name) => name.to_string(),
-                None => written(old_col)?,
+            // A live name its token does not spell is printed as held; a
+            // column declared with no type says so rather than print `''`.
+            let has = match old_type_name {
+                Some("") => "has no declared type".to_string(),
+                Some(name) => format!("has type '{name}'"),
+                None => format!("has type '{}'", written(old_col)?),
             };
             // Whether the type changed is the planner's one decision
             // (`schema_columns_storage_drift`): every change it plans is
@@ -1019,8 +1017,8 @@ pub(crate) fn emit_alter_column_type(
                 InPlaceChange::AlterColumnType,
                 Subject::column(table, column),
                 format!(
-                    "Column '{table}.{column}' has type '{was}' but the model expects '{}', and \
-                     SQLite cannot change a column's type in place.",
+                    "Column '{table}.{column}' {has} but the model expects '{}', and SQLite \
+                     cannot change a column's type in place.",
                     written(new_col)?,
                 ),
             ));

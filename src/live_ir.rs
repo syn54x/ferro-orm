@@ -16,7 +16,7 @@ use crate::introspect::{
     live_table_row_security, postgres_table_hidden_by_privilege, printed_pairs,
 };
 use ferro_ddl_lowering::{
-    Dialect, LiveRowSecurity, information_schema_to_db_type_token, sqlite_writes_type_name,
+    Dialect, LiveRowSecurity, information_schema_to_db_type_token, sqlite_holds_written_type,
 };
 use ferro_migrate::plan::live_table_hints;
 use ferro_migrate::plan::{
@@ -232,12 +232,16 @@ fn table_facts(table: &LiveTable, dialect: Dialect) -> LiveTableFacts {
             })
             .collect(),
         // SQLite keeps the name a column was declared with, which its token
-        // cannot say; Postgres runs every type change and reports none.
+        // may not spell (SQLite has no enum types, so no labels to pass);
+        // Postgres runs every type change and reports none.
         foreign_type_names: match dialect {
             Dialect::Sqlite => table
                 .columns
                 .iter()
-                .filter(|col| !sqlite_writes_type_name(&col.declared_type))
+                .filter(|col| {
+                    let read = live_column(col, &BTreeMap::new(), Dialect::Sqlite);
+                    !sqlite_holds_written_type(&col.declared_type, &read)
+                })
                 .map(|col| (col.name.clone(), col.declared_type.clone()))
                 .collect(),
             Dialect::Postgres => BTreeMap::new(),
@@ -801,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sqlite_type_name_ferro_never_writes_is_a_live_fact() {
+    fn a_sqlite_type_name_its_token_does_not_spell_is_a_live_fact() {
         let table = LiveTable {
             name: "note".to_string(),
             columns: vec![
@@ -810,6 +814,10 @@ mod tests {
                 column("at", "DATETIME", false, false),
                 column("prefs", "json_text", false, false),
                 column("score", "real", false, false),
+                column("code", "char(5)", false, false),
+                column("flag", "boolean", false, false),
+                column("bare", "", false, false),
+                column("key", "CHAR(32)", false, false),
             ],
             ..LiveTable::default()
         };
@@ -818,6 +826,9 @@ mod tests {
         assert_eq!(
             facts.tables["note"].foreign_type_names,
             BTreeMap::from([
+                ("bare".to_string(), String::new()),
+                ("code".to_string(), "char(5)".to_string()),
+                ("flag".to_string(), "boolean".to_string()),
                 ("prefs".to_string(), "json_text".to_string()),
                 ("score".to_string(), "real".to_string()),
             ])

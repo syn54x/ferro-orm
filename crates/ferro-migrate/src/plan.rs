@@ -127,9 +127,10 @@ pub struct LiveTableFacts {
     /// Every live generated column.
     #[serde(default)]
     pub generated: Vec<LiveGeneratedFact>,
-    /// SQLite: the type name the database holds for each column whose name
-    /// ferro never writes (`json_text`, `real`), by column
-    /// ([`ferro_ddl_lowering::sqlite_writes_type_name`]). A table ferro
+    /// SQLite: the type name the database holds for each column whose live
+    /// token the create pass does not write back as that name (`json_text`,
+    /// `real`, `char(5)`, `""`), by column
+    /// ([`ferro_ddl_lowering::sqlite_holds_written_type`]). A table ferro
     /// created holds none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub foreign_type_names: BTreeMap<String, String>,
