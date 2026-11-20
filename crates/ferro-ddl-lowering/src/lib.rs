@@ -1600,8 +1600,7 @@ pub fn render_check_addition(
                 format!(
                     "Check constraint '{}' on column '{}.{}' is declared but missing from the \
                      live table, and SQLite cannot add a constraint to an existing column (it \
-                     requires a full table rebuild). The invariant is not database-enforced; \
-                     generate a reviewed migration with `ferro migrate new` to apply it.",
+                     requires a full table rebuild). The invariant is not database-enforced.",
                     check.name, table, check.column
                 ),
             )),
@@ -1652,8 +1651,7 @@ fn render_add_table_check(
                 format!(
                     "Table check '{}' is declared on '{}' but missing from the live table, and \
                      SQLite cannot add a table constraint to an existing table (it requires a \
-                     full table rebuild). The invariant is not database-enforced; generate a \
-                     reviewed migration with `ferro migrate new` to apply it.",
+                     full table rebuild). The invariant is not database-enforced.",
                     check.name, table
                 ),
             )),
@@ -1815,9 +1813,7 @@ pub fn render_check_rebuild(
                 format!(
                     "CHECK constraint '{name}' on table '{table}' has a declared body that \
                      differs from the live constraint, and SQLite cannot alter constraints in \
-                     place (it requires a full table rebuild). The live body remains; \
-                     generate a reviewed migration with `ferro migrate new` to apply the \
-                     declared predicate."
+                     place (it requires a full table rebuild). The live body remains."
                 ),
             )),
         },
@@ -1911,8 +1907,7 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
                 format!(
                     "CHECK constraint '{name}' on table '{table}' is no longer declared, \
                      and SQLite cannot drop a table constraint in place (it requires a \
-                     full table rebuild). The live constraint remains; generate a \
-                     reviewed migration with `ferro migrate new` to drop it."
+                     full table rebuild). The live constraint remains."
                 ),
             )),
         },
@@ -3976,6 +3971,43 @@ pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     }
 }
 
+/// Whether `type_name`, a SQLite column's declared type, is one
+/// [`sqlite_declared_type`] writes, in any case and with or without a length
+/// (`INTEGER`, `VARCHAR(8)`). Any other name (`json_text`, `real`) was
+/// written by hand, and the live read keeps it as a fact.
+pub fn sqlite_writes_type_name(type_name: &str) -> bool {
+    let base = |name: &str| {
+        name.split('(')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+    };
+    let name = base(type_name);
+    [
+        CanonicalType::Integer,
+        CanonicalType::SmallInt,
+        CanonicalType::BigInt,
+        CanonicalType::Double,
+        CanonicalType::Decimal,
+        CanonicalType::Boolean,
+        CanonicalType::Json,
+        CanonicalType::Jsonb,
+        CanonicalType::Text,
+        CanonicalType::Varchar(None),
+        CanonicalType::Char(1),
+        CanonicalType::Uuid,
+        CanonicalType::DateTime,
+        CanonicalType::Timestamp,
+        CanonicalType::TimestampTz,
+        CanonicalType::Date,
+        CanonicalType::Time,
+        CanonicalType::Blob,
+    ]
+    .into_iter()
+    .any(|canonical| base(&sqlite_declared_type(canonical)) == name)
+}
+
 /// Quote a SQL identifier for Postgres/SQLite DDL.
 pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
@@ -4390,9 +4422,33 @@ pub fn sqlite_drop_default_report(table: &str, column: &str, was: &str) -> Repor
     )
 }
 
-/// [`ReportKind::SqliteInPlace`] on `subject`, with the sentence saying so.
-pub fn sqlite_in_place_report(what: InPlaceChange, subject: Subject, text: String) -> Report {
-    Report::new(ReportKind::SqliteInPlace { what }, subject, text)
+/// The fix every [`ReportKind::SqliteInPlace`] warning but the drop-default
+/// one ends with. The pass refuses a database with migration records, so its
+/// reader's database is untracked, where `ferro migrate new` alone writes the
+/// models as they are now and `ferro migrate baseline` then refuses the very
+/// difference: the fix is a rebuild by hand, or adopting migrations at what
+/// the database holds first.
+fn sqlite_in_place_fix() -> &'static str {
+    "To make this change, rebuild the table by hand (create it under a new name as the \
+     models declare it, copy the rows, drop the old table, rename the new one); or, if the \
+     models can be put back to what the database holds, adopt migrations there (`ferro \
+     migrate new`, then `ferro migrate baseline`) and generate this change as the next \
+     migration."
+}
+
+/// [`ReportKind::SqliteInPlace`] on `subject`: `what_differs` (the sentence
+/// saying what differs and that SQLite cannot change it in place), then
+/// [`sqlite_in_place_fix`].
+pub fn sqlite_in_place_report(
+    what: InPlaceChange,
+    subject: Subject,
+    what_differs: String,
+) -> Report {
+    Report::new(
+        ReportKind::SqliteInPlace { what },
+        subject,
+        format!("{what_differs} {}", sqlite_in_place_fix()),
+    )
 }
 
 /// [`ReportKind::ForeignFkDrift`]: the foreign key on `table.column` drifts
@@ -5016,7 +5072,7 @@ mod tests {
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
         );
-        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(warning.ends_with(sqlite_in_place_fix()), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
     }
 
@@ -5044,7 +5100,7 @@ mod tests {
             .expect("SQLite must never skip silently")
             .text;
         assert!(warning.contains("ck_transfer_kind"), "{warning}");
-        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(warning.ends_with(sqlite_in_place_fix()), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
     }
 
@@ -5435,7 +5491,7 @@ mod tests {
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
         );
-        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(warning.ends_with(sqlite_in_place_fix()), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
     }
 
@@ -5537,7 +5593,7 @@ mod tests {
             .expect("SQLite must never skip silently")
             .text;
         assert!(warning.contains("ck_transfer_orphan"), "{warning}");
-        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(warning.ends_with(sqlite_in_place_fix()), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
     }
 
@@ -8951,6 +9007,11 @@ mod tests {
 
     #[test]
     fn a_sqlite_in_place_report_blocks_and_names_the_change() {
+        const FIX: &str = "To make this change, rebuild the table by hand (create it under a \
+             new name as the models declare it, copy the rows, drop the old table, rename the \
+             new one); or, if the models can be put back to what the database holds, adopt \
+             migrations there (`ferro migrate new`, then `ferro migrate baseline`) and generate \
+             this change as the next migration.";
         let model = transfer_model_with_checks(
             vec![transfer_at_most_one_outflow_check()],
             vec![account_role_column_check()],
@@ -8973,11 +9034,12 @@ mod tests {
                 },
                 Subject::table("transfer"),
                 false,
-                "Table check 'ck_transfer_at_most_one_outflow' is declared on 'transfer' but \
-                 missing from the live table, and SQLite cannot add a table constraint to an \
-                 existing table (it requires a full table rebuild). The invariant is not \
-                 database-enforced; generate a reviewed migration with `ferro migrate new` to \
-                 apply it.",
+                &format!(
+                    "Table check 'ck_transfer_at_most_one_outflow' is declared on 'transfer' \
+                     but missing from the live table, and SQLite cannot add a table constraint \
+                     to an existing table (it requires a full table rebuild). The invariant is \
+                     not database-enforced. {FIX}"
+                ),
             )
         );
         assert!(add.blocks());
@@ -8999,10 +9061,11 @@ mod tests {
         );
         assert_eq!(
             rebuild.text,
-            "CHECK constraint 'ck_transfer_kind' on table 'transfer' has a declared body that \
-             differs from the live constraint, and SQLite cannot alter constraints in place (it \
-             requires a full table rebuild). The live body remains; generate a reviewed \
-             migration with `ferro migrate new` to apply the declared predicate."
+            format!(
+                "CHECK constraint 'ck_transfer_kind' on table 'transfer' has a declared body \
+                 that differs from the live constraint, and SQLite cannot alter constraints in \
+                 place (it requires a full table rebuild). The live body remains. {FIX}"
+            )
         );
         let drop = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite)
             .warning
@@ -9015,10 +9078,11 @@ mod tests {
                 },
                 Subject::table("transfer"),
                 false,
-                "CHECK constraint 'ck_transfer_orphan' on table 'transfer' is no longer \
-                 declared, and SQLite cannot drop a table constraint in place (it requires a \
-                 full table rebuild). The live constraint remains; generate a reviewed \
-                 migration with `ferro migrate new` to drop it.",
+                &format!(
+                    "CHECK constraint 'ck_transfer_orphan' on table 'transfer' is no longer \
+                     declared, and SQLite cannot drop a table constraint in place (it requires \
+                     a full table rebuild). The live constraint remains. {FIX}"
+                ),
             )
         );
     }

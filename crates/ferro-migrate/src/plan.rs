@@ -127,6 +127,12 @@ pub struct LiveTableFacts {
     /// Every live generated column.
     #[serde(default)]
     pub generated: Vec<LiveGeneratedFact>,
+    /// SQLite: the type name the database holds for each column whose name
+    /// ferro never writes (`json_text`, `real`), by column
+    /// ([`ferro_ddl_lowering::sqlite_writes_type_name`]). A table ferro
+    /// created holds none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub foreign_type_names: BTreeMap<String, String>,
 }
 
 /// The facts a live database holds beside its IR, keyed by table: every live
@@ -297,6 +303,20 @@ impl Side {
                 .tables
                 .get(&model.table_name)
                 .map_or_else(|| Cow::Owned(LiveTableFacts::default()), Cow::Borrowed),
+        }
+    }
+
+    /// The type name a live table holds for `column` when ferro never writes
+    /// it ([`LiveTableFacts::foreign_type_names`]); `None` on a declared side.
+    pub(crate) fn foreign_type_name(&self, table: &str, column: &str) -> Option<&str> {
+        match &self.0 {
+            SideKind::Declared(_) => None,
+            SideKind::Live { facts, .. } => facts
+                .tables
+                .get(table)?
+                .foreign_type_names
+                .get(column)
+                .map(String::as_str),
         }
     }
 
@@ -804,6 +824,7 @@ fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
         indexes: Vec::new(),
         row_security: declared_row_security(old_model),
         generated: Vec::new(),
+        foreign_type_names: BTreeMap::new(),
     }
 }
 
@@ -1201,15 +1222,20 @@ fn renamed_facts(
                 check.definition = format!("CHECK ({now})");
             }
         }
-        for generated in &mut live.generated {
-            if let Some(new) = ops.iter().find_map(|op| match op {
-                MigrationOp::RenameColumn { table: t, old, new }
-                    if t == table && *old == generated.column =>
-                {
+        let renamed_column = |column: &str| {
+            ops.iter().find_map(|op| match op {
+                MigrationOp::RenameColumn { table: t, old, new } if t == table && old == column => {
                     Some(new.clone())
                 }
                 _ => None,
-            }) {
+            })
+        };
+        live.foreign_type_names = std::mem::take(&mut live.foreign_type_names)
+            .into_iter()
+            .map(|(column, name)| (renamed_column(&column).unwrap_or(column), name))
+            .collect();
+        for generated in &mut live.generated {
+            if let Some(new) = renamed_column(&generated.column) {
                 generated.column = new;
             }
             // SQLite rewrites a stored expression's column names on a rename,

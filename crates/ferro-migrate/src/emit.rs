@@ -773,9 +773,7 @@ pub(crate) fn emit_add_column(
                     "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: \
                      SQLite's ADD COLUMN accepts a REFERENCES clause only for a column whose \
                      default is NULL, and this column is NOT NULL with a backfill default. \
-                     Referential integrity for this column is not database-enforced; generate \
-                     a reviewed migration with `ferro migrate new` to rebuild the table with \
-                     the constraint.",
+                     Referential integrity for this column is not database-enforced.",
                     table, column
                 ),
             )),
@@ -946,11 +944,16 @@ pub(crate) fn withheld_alter_report(
     }
 }
 
+/// `table.column`'s type change from `old_col` to `new_col` on `dialect`.
+/// `old_type_name` is the type name a live database holds for the column
+/// when it is one ferro never writes (`json_text`); SQLite's report prints
+/// it, and otherwise the type the create pass writes for `old_col`.
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
     old_col: &SchemaColumn,
     new_col: &SchemaColumn,
+    old_type_name: Option<&str>,
     dialect: Dialect,
 ) -> Result<EmissionResult, EmissionError> {
     let mut result = EmissionResult::default();
@@ -990,10 +993,25 @@ pub(crate) fn emit_alter_column_type(
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
-            let new_canonical =
-                canonical_from_schema_column(new_col, ld).map_err(|message| EmissionError {
-                    message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
-                })?;
+            // The type the create pass writes for a column: the one storage
+            // decision (I-1 item 3), an enum's `varchar(<longest label>)`
+            // included.
+            let written = |col: &SchemaColumn| match resolve_column_storage(col, ld) {
+                Ok(ResolvedStorage::Scalar(canonical)) => Ok(sqlite_declared_type(canonical)),
+                Ok(ResolvedStorage::PgEnum { .. }) => Err(EmissionError {
+                    message: format!(
+                        "Cannot alter type for '{table}.{column}': a native enum type on SQLite; \
+                         this is a ferro bug, please file an issue"
+                    ),
+                }),
+                Err(message) => Err(EmissionError {
+                    message: format!("Cannot alter type for '{table}.{column}': {message}"),
+                }),
+            };
+            let was = match old_type_name {
+                Some(name) => name.to_string(),
+                None => written(old_col)?,
+            };
             // Whether the type changed is the planner's one decision
             // (`schema_columns_storage_drift`): every change it plans is
             // reported, with no second comparison here (I-1 item 3).
@@ -1001,13 +1019,9 @@ pub(crate) fn emit_alter_column_type(
                 InPlaceChange::AlterColumnType,
                 Subject::column(table, column),
                 format!(
-                    "Column '{}.{}' is declared '{}' in the database but the model expects \
-                     '{}'. SQLite cannot change column types in place; generate a \
-                     reviewed migration with `ferro migrate new` to migrate this column.",
-                    table,
-                    column,
-                    old_col.db_type.as_deref().unwrap_or(""),
-                    sqlite_declared_type(new_canonical),
+                    "Column '{table}.{column}' has type '{was}' but the model expects '{}', and \
+                     SQLite cannot change a column's type in place.",
+                    written(new_col)?,
                 ),
             ));
         }
@@ -1050,8 +1064,7 @@ pub(crate) fn emit_alter_column_nullability(
                     Subject::column(table, column),
                     format!(
                         "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
-                         cannot change column nullability in place; generate a reviewed \
-                         migration with `ferro migrate new` to migrate this column.",
+                         cannot change column nullability in place.",
                         table,
                         column,
                         if old_col.nullable {
