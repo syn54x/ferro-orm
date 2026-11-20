@@ -54,6 +54,29 @@ use std::time::Duration;
 /// The configuration key the timeout is read from, named by every message.
 pub const SETTING: &str = "ddl_lock_timeout";
 
+/// The longest timeout any setting accepts, in seconds: one year, equal to
+/// `ferro.settings.MAX_LOCK_TIMEOUT_S`. Past it a `Duration` or a deadline
+/// `Instant::now() + timeout` can overflow and panic.
+pub const MAX_LOCK_TIMEOUT_S: f64 = 60.0 * 60.0 * 24.0 * 365.0;
+
+/// The `Duration` for `seconds` of the timeout `setting`, as Python passes
+/// it. Every timeout that crosses from Python converts here.
+///
+/// # Errors
+/// `ValueError` naming `setting`, the one-year bound
+/// ([`MAX_LOCK_TIMEOUT_S`]) and `seconds`, for a negative, non-finite or
+/// longer number.
+pub fn timeout_from_seconds(setting: &str, seconds: f64) -> PyResult<Duration> {
+    // `contains` is false for NaN, so this refuses it too.
+    if !(0.0..=MAX_LOCK_TIMEOUT_S).contains(&seconds) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{setting} must be a non-negative number of seconds, at most one year \
+             ({MAX_LOCK_TIMEOUT_S:.0} seconds); got {seconds:?}"
+        )));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
 /// How many times a unit is tried before it fails.
 pub const MAX_ATTEMPTS: u8 = 10;
 
@@ -631,14 +654,10 @@ impl DdlExecutor {
     /// (`0` disables).
     ///
     /// # Errors
-    /// `ValueError` for a negative or non-finite number.
+    /// `ValueError` for a negative or non-finite number, or one longer than
+    /// one year ([`MAX_LOCK_TIMEOUT_S`]).
     pub fn from_seconds(seconds: f64) -> PyResult<Self> {
-        if !(seconds.is_finite() && seconds >= 0.0) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "{SETTING} must be a non-negative number of seconds; got {seconds}"
-            )));
-        }
-        Ok(Self::new(Some(Duration::from_secs_f64(seconds))))
+        Ok(Self::new(Some(timeout_from_seconds(SETTING, seconds)?)))
     }
 
     /// The timeout to set on `dialect`: none on SQLite.
@@ -951,6 +970,26 @@ mod tests {
         );
         assert!(DdlExecutor::from_seconds(-1.0).is_err());
         assert!(DdlExecutor::from_seconds(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn a_ddl_lock_timeout_holds_the_one_year_bound() {
+        assert_eq!(
+            DdlExecutor::from_seconds(MAX_LOCK_TIMEOUT_S)
+                .map(|d| d.timeout)
+                .ok(),
+            Some(Some(Duration::from_secs(31_536_000)))
+        );
+
+        for over in [MAX_LOCK_TIMEOUT_S + 1.0, 1e20, f64::INFINITY] {
+            let refused = DdlExecutor::from_seconds(over).expect_err("over the bound is refused");
+            Python::attach(|py| {
+                assert!(refused.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                let message = refused.value(py).to_string();
+                assert!(message.contains(SETTING), "{message}");
+                assert!(message.contains("31536000 seconds"), "{message}");
+            });
+        }
     }
 
     #[test]
