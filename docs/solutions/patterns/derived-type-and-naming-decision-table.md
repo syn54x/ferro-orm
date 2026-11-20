@@ -66,7 +66,7 @@ place`): a live `json_text` reads as `text` against `JSON`, a live `real`
 as `double` against `NUMERIC`. The warning prints the name the table holds
 (`has type 'json_text' but the model expects 'JSON'`), from the live
 `foreign_type_names` fact, and the expected type from
-`resolve_column_storage` (#997). The pass's own comparison, which read both as
+`sqlite_column_type`, the one storage decision in SQLite's spelling (#997). The pass's own comparison, which read both as
 one storage class and stayed silent, is gone. The warning clears once the
 column carries the name the model expects (the upgrade guide's "After
 0.28" section shows the column swap). PK columns
