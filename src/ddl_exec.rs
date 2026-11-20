@@ -54,27 +54,62 @@ use std::time::Duration;
 /// The configuration key the timeout is read from, named by every message.
 pub const SETTING: &str = "ddl_lock_timeout";
 
-/// The longest timeout any setting accepts, in seconds: one year, equal to
-/// `ferro.settings.MAX_LOCK_TIMEOUT_S`. Past it a `Duration` or a deadline
+/// The longest a timeout from Python may be, for one kind of wait.
+pub struct TimeoutBound {
+    /// The bound itself.
+    pub longest: Duration,
+    /// The bound in seconds as Python writes it: the nearest `f64`, equal
+    /// to its `ferro.settings` twin.
+    pub seconds: f64,
+    /// The bound as a refusal names it.
+    pub described: &'static str,
+}
+
+/// The run lock's wait (`lock_timeout`): one year, equal to
+/// `ferro.settings.MAX_LOCK_TIMEOUT_S`. Past it a deadline
 /// `Instant::now() + timeout` can overflow and panic.
-pub const MAX_LOCK_TIMEOUT_S: f64 = 60.0 * 60.0 * 24.0 * 365.0;
+pub const RUN_LOCK_BOUND: TimeoutBound = TimeoutBound {
+    longest: Duration::from_secs(31_536_000),
+    seconds: 31_536_000.0,
+    described: "one year (31536000 seconds)",
+};
+
+/// The DDL lock timeout (`ddl_lock_timeout`): `i32::MAX` milliseconds, the
+/// longest `lock_timeout` Postgres can be set to, equal to
+/// `ferro.settings.MAX_DDL_LOCK_TIMEOUT_S`.
+pub const DDL_LOCK_BOUND: TimeoutBound = TimeoutBound {
+    longest: Duration::from_millis(i32::MAX as u64),
+    // Correctly rounded, as Python's `2147483647 / 1000` is.
+    seconds: i32::MAX as f64 / 1000.0,
+    described: "2147483647 ms (about 24.8 days), the longest lock_timeout Postgres accepts",
+};
 
 /// The `Duration` for `seconds` of the timeout `setting`, as Python passes
 /// it. Every timeout that crosses from Python converts here.
 ///
 /// # Errors
-/// `ValueError` naming `setting`, the one-year bound
-/// ([`MAX_LOCK_TIMEOUT_S`]) and `seconds`, for a negative, non-finite or
-/// longer number.
-pub fn timeout_from_seconds(setting: &str, seconds: f64) -> PyResult<Duration> {
-    // `contains` is false for NaN, so this refuses it too.
-    if !(0.0..=MAX_LOCK_TIMEOUT_S).contains(&seconds) {
+/// `ValueError` naming `setting` and `seconds` for a negative number or NaN,
+/// and naming `bound` too for a number past it (infinity included).
+pub fn timeout_from_seconds(
+    setting: &str,
+    seconds: f64,
+    bound: &TimeoutBound,
+) -> PyResult<Duration> {
+    if seconds.is_nan() || seconds < 0.0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{setting} must be a non-negative number of seconds, at most one year \
-             ({MAX_LOCK_TIMEOUT_S:.0} seconds); got {seconds:?}"
+            "{setting} must be a non-negative number of seconds; got {seconds:?}"
         )));
     }
-    Ok(Duration::from_secs_f64(seconds))
+    // Infinity lands here too: it is past every bound.
+    if seconds > bound.seconds {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{setting} must be at most {}; got {seconds:?} seconds",
+            bound.described
+        )));
+    }
+    // `bound.seconds` may sit a fraction of a nanosecond past `longest`;
+    // exactly the bound is `longest`, never a millisecond more once rounded.
+    Ok(Duration::from_secs_f64(seconds).min(bound.longest))
 }
 
 /// How many times a unit is tried before it fails.
@@ -655,9 +690,14 @@ impl DdlExecutor {
     ///
     /// # Errors
     /// `ValueError` for a negative or non-finite number, or one longer than
-    /// one year ([`MAX_LOCK_TIMEOUT_S`]).
+    /// 2147483647 ms, the longest `lock_timeout` Postgres accepts
+    /// ([`DDL_LOCK_BOUND`]).
     pub fn from_seconds(seconds: f64) -> PyResult<Self> {
-        Ok(Self::new(Some(timeout_from_seconds(SETTING, seconds)?)))
+        Ok(Self::new(Some(timeout_from_seconds(
+            SETTING,
+            seconds,
+            &DDL_LOCK_BOUND,
+        )?)))
     }
 
     /// The timeout to set on `dialect`: none on SQLite.
@@ -973,21 +1013,24 @@ mod tests {
     }
 
     #[test]
-    fn a_ddl_lock_timeout_holds_the_one_year_bound() {
+    fn a_ddl_lock_timeout_holds_the_longest_postgres_lock_timeout() {
+        let longest = DdlExecutor::from_seconds(DDL_LOCK_BOUND.seconds)
+            .ok()
+            .and_then(|d| d.timeout);
+        assert_eq!(longest, Some(Duration::from_millis(2_147_483_647)));
+        // Rounded up to whole milliseconds, exactly the bound stays the bound.
         assert_eq!(
-            DdlExecutor::from_seconds(MAX_LOCK_TIMEOUT_S)
-                .map(|d| d.timeout)
-                .ok(),
-            Some(Some(Duration::from_secs(31_536_000)))
+            longest.map(set_local_sql).as_deref(),
+            Some("SET LOCAL lock_timeout = '2147483647ms'")
         );
 
-        for over in [MAX_LOCK_TIMEOUT_S + 1.0, 1e20, f64::INFINITY] {
+        for over in [DDL_LOCK_BOUND.seconds + 0.001, 1e20, f64::INFINITY] {
             let refused = DdlExecutor::from_seconds(over).expect_err("over the bound is refused");
             Python::attach(|py| {
                 assert!(refused.is_instance_of::<pyo3::exceptions::PyValueError>(py));
                 let message = refused.value(py).to_string();
                 assert!(message.contains(SETTING), "{message}");
-                assert!(message.contains("31536000 seconds"), "{message}");
+                assert!(message.contains("2147483647 ms"), "{message}");
             });
         }
     }

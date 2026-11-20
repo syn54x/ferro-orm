@@ -334,9 +334,10 @@ async fn connect_engine_handle(
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails, and
-/// a `ValueError`, before connecting, for a `ddl_lock_timeout_s` or
-/// `lock_timeout_s` that is negative, non-finite or longer than one year
-/// (31536000 seconds).
+/// a `ValueError`, before connecting, for a negative or non-finite
+/// `ddl_lock_timeout_s` or `lock_timeout_s`, a
+/// `ddl_lock_timeout_s` longer than 2147483647 ms (about 24.8 days),
+/// or a `lock_timeout_s` longer than one year (31536000 seconds).
 /// Also returns a `PyErr` (`ValueError`) if a connection with this name (or a
 /// default connection, when `name` is omitted) is already registered — call
 /// `reset_engine()` first or pass a distinct `name` to register an additional

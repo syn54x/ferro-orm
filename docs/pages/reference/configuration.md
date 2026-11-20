@@ -79,7 +79,7 @@ With one database, its name is `default` and its directory `migrations/`.
 
 ### `ddl_lock_timeout`
 
-How long a DDL statement Ferro runs on Postgres, in a migration step or in an auto-migrate pass, waits for its table lock before giving up: `"500ms"`, `"5s"`, `"1m"`, or `"0"` to wait without a limit (and without retries). The longest accepted value is one year (`"525600m"`); a longer one is refused when the settings are read. A statement that gives up is retried with its step from the first statement, up to ten attempts, before the step fails naming `ddl_lock_timeout`. It does not apply to data steps, and it is not the wait for the run lock (`lock_timeout`).
+How long a DDL statement Ferro runs on Postgres, in a migration step or in an auto-migrate pass, waits for its table lock before giving up: `"500ms"`, `"5s"`, `"1m"`, or `"0"` to wait without a limit (and without retries). The longest accepted value is `"2147483647ms"` (about 24.8 days), the longest `lock_timeout` Postgres accepts; a longer one is refused when the settings are read. A statement that gives up is retried with its step from the first statement, up to ten attempts, before the step fails naming `ddl_lock_timeout`. It does not apply to data steps, and it is not the wait for the run lock (`lock_timeout`).
 
 `connect()` with an auto-migrate flag names no database, so when several databases are configured they must all set the same `ddl_lock_timeout`; different values are refused, naming each one.
 

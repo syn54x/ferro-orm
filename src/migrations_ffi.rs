@@ -620,9 +620,9 @@ fn order_keys_arg(
 ///
 /// # Errors
 /// `ValueError` for a negative or non-finite number, or one longer than one
-/// year ([`crate::ddl_exec::MAX_LOCK_TIMEOUT_S`]).
+/// year ([`crate::ddl_exec::RUN_LOCK_BOUND`]).
 fn lock_timeout(timeout_s: f64) -> PyResult<std::time::Duration> {
-    crate::ddl_exec::timeout_from_seconds("timeout_s", timeout_s)
+    crate::ddl_exec::timeout_from_seconds("timeout_s", timeout_s, &crate::ddl_exec::RUN_LOCK_BOUND)
 }
 
 /// Open the tracking tables of connection `using` (in `tracking_schema`
@@ -633,8 +633,9 @@ fn lock_timeout(timeout_s: f64) -> PyResult<std::time::Duration> {
 /// (`0` sets none and never retries).
 ///
 /// # Errors
-/// `ValueError` for a negative or non-finite timeout, or one longer than one
-/// year (31536000 seconds); a database error.
+/// `ValueError` for a negative or non-finite timeout, or one longer than
+/// 2147483647 ms (about 24.8 days), the longest `lock_timeout` Postgres
+/// accepts; a database error.
 #[pyfunction]
 #[pyo3(name = "_open_tracked")]
 #[pyo3(signature = (using, tracking_schema, directory, ddl_lock_timeout_s=5.0))]
@@ -1754,17 +1755,17 @@ impl RerecordPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ddl_exec::MAX_LOCK_TIMEOUT_S;
+    use crate::ddl_exec::RUN_LOCK_BOUND;
 
     #[test]
     fn a_locked_wait_holds_the_one_year_bound() {
         assert_eq!(
-            lock_timeout(MAX_LOCK_TIMEOUT_S).ok(),
+            lock_timeout(RUN_LOCK_BOUND.seconds).ok(),
             Some(std::time::Duration::from_secs(31_536_000))
         );
         assert_eq!(lock_timeout(0.0).ok(), Some(std::time::Duration::ZERO));
 
-        for over in [MAX_LOCK_TIMEOUT_S + 1.0, 1e19] {
+        for over in [RUN_LOCK_BOUND.seconds + 0.001, 1e19] {
             let refused = lock_timeout(over).expect_err("over the bound is refused");
             Python::attach(|py| {
                 assert!(refused.is_instance_of::<PyValueError>(py));

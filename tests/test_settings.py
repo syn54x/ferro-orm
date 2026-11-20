@@ -862,21 +862,31 @@ def test_without_a_config_an_auto_migrate_pass_takes_the_defaults(project: Path)
     }
 
 
-def test_parse_ddl_lock_timeout_refuses_a_duration_over_one_year():
-    from ferro.settings import MAX_LOCK_TIMEOUT_S, parse_ddl_lock_timeout
+def test_parse_ddl_lock_timeout_accepts_its_bound():
+    from ferro.settings import MAX_DDL_LOCK_TIMEOUT_S, parse_ddl_lock_timeout
 
-    assert parse_ddl_lock_timeout("525600m").total_seconds() == MAX_LOCK_TIMEOUT_S
-    with pytest.raises(ValueError, match="one year") as refused:
-        parse_ddl_lock_timeout("99999999m")
-    assert "ddl_lock_timeout" in str(refused.value)
-    assert "31536000" in str(refused.value)
+    longest = parse_ddl_lock_timeout("2147483647ms")
+    assert longest.total_seconds() == MAX_DDL_LOCK_TIMEOUT_S
 
 
-def test_the_core_bound_is_the_settings_bound():
+@pytest.mark.parametrize("value", ["2147483648ms", "99999999m", "99999999999999m"])
+def test_parse_ddl_lock_timeout_refuses_a_duration_over_its_bound(value: str):
+    from ferro.settings import parse_ddl_lock_timeout
+
+    with pytest.raises(ValueError) as refused:
+        parse_ddl_lock_timeout(value)
+
+    message = str(refused.value)
+    assert "ddl_lock_timeout" in message
+    assert "2147483647 ms" in message and "24.8 days" in message
+
+
+def test_the_core_bounds_are_the_settings_bounds():
     from ferro import _core
-    from ferro.settings import MAX_LOCK_TIMEOUT_S
+    from ferro.settings import MAX_DDL_LOCK_TIMEOUT_S, MAX_LOCK_TIMEOUT_S
 
     assert _core._max_lock_timeout_s() == MAX_LOCK_TIMEOUT_S
+    assert _core._max_ddl_lock_timeout_s() == MAX_DDL_LOCK_TIMEOUT_S
 
 
 def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():

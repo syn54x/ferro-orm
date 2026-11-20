@@ -139,8 +139,9 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
         The duration; zero for `"0"`.
 
     Raises:
-        ValueError: `value` is not one of those forms, or is longer than one
-            year.
+        ValueError: `value` is not one of those forms, or is longer than
+            2147483647 ms (about 24.8 days), the longest `lock_timeout`
+            Postgres accepts.
     """
     if value == "0":
         return timedelta(0)
@@ -150,21 +151,32 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
             f"ddl_lock_timeout must be a positive duration written as "
             f'{_DURATION_FORMS}, or "0" to wait without a limit; got {value!r}'
         )
-    duration = timedelta(**{_DURATION_UNITS[match.group(2)]: float(match.group(1))})
-    if duration.total_seconds() > MAX_LOCK_TIMEOUT_S:
+    amount, unit = float(match.group(1)), match.group(2)
+    # Checked before the timedelta exists, which overflows on huge values.
+    seconds = amount / 1000 if unit == "ms" else amount * (60 if unit == "m" else 1)
+    if seconds > MAX_DDL_LOCK_TIMEOUT_S:
         raise ValueError(
-            f"ddl_lock_timeout {value!r} is too long; use at most one year "
-            f'({MAX_LOCK_TIMEOUT_S:.0f} seconds), or "0" to wait without a limit'
+            f"ddl_lock_timeout {value!r} is too long; use at most 2147483647 ms "
+            f"(about 24.8 days), the longest lock_timeout Postgres accepts, "
+            f'or "0" to wait without a limit'
         )
-    return duration
+    return timedelta(**{_DURATION_UNITS[unit]: amount})
 
+
+MAX_DDL_LOCK_TIMEOUT_S = 2147483647 / 1000
+"""The longest `ddl_lock_timeout` accepted, in seconds: about 24.8 days.
+
+It is the longest `lock_timeout` Postgres accepts, 2147483647 ms. The Rust
+core refuses a longer DDL lock timeout from any entry point, against the
+same bound.
+"""
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
 """The longest lock timeout accepted, in seconds: one year.
 
 A configured `lock_timeout = "0"` waits this long, which stands for "until
 the lock is free" while staying within the runtime's range. The Rust core
-refuses a longer timeout from any entry point, against the same bound.
+refuses a longer run lock wait from any entry point, against the same bound.
 """
 
 
