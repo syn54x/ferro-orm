@@ -32,6 +32,7 @@ from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
 from tests._pass_harness import auto_migrate, schema_steps, warning_texts
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 SIDE_CHECK_NAME = "ck_orphan_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -208,7 +209,7 @@ def test_leftover_table_check_warns_and_skips_on_sqlite_even_when_destructive():
         [],
         [
             "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-            "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it.",
+            f"CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains. {SQLITE_IN_PLACE_FIX}",
         ],
     )
     assert statements == []
@@ -579,7 +580,7 @@ async def test_sqlite_destructive_still_skips_the_drop(db_url):
         assert schema_steps(report) == []
         assert warning_texts(report) == [
             "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-            "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it.",
+            f"CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains. {SQLITE_IN_PLACE_FIX}",
         ]
     async with engines.session():
         after = (

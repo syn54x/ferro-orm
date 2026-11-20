@@ -15,6 +15,7 @@ from tests._pass_harness import (
     warned_auto_migrate,
     warning_texts,
 )
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -518,11 +519,11 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         count: int
 
-    with pytest.warns(UserWarning, match=r"migdrift\.count.*ferro migrate new"):
+    with pytest.warns(UserWarning, match=r"'migdrift\.count' has type 'varchar'"):
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "Column 'migdrift.count' is declared 'varchar' in the database but the model expects 'integer'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+            f"Column 'migdrift.count' has type 'varchar' but the model expects 'integer', and SQLite cannot change a column's type in place. {SQLITE_IN_PLACE_FIX}",
         ]
 
     columns = _sqlite_columns(db_url, "migdrift")
@@ -573,12 +574,12 @@ async def test_sqlite_a_live_text_column_under_a_str_field_warns_and_runs_nothin
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         body: str
 
-    with pytest.warns(UserWarning, match=r"migtext\.body.*ferro migrate new"):
+    with pytest.warns(UserWarning, match=r"'migtext\.body' has type 'text'"):
         report = await auto_migrate(db_url, destructive=True)
 
     assert schema_steps(report) == []
     assert warning_texts(report) == [
-        "Column 'migtext.body' is declared 'text' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+        f"Column 'migtext.body' has type 'text' but the model expects 'varchar', and SQLite cannot change a column's type in place. {SQLITE_IN_PLACE_FIX}",
     ]
     assert _sqlite_columns(db_url, "migtext")["body"][2].lower() == "text"
 
@@ -638,7 +639,7 @@ async def test_sqlite_genuine_text_to_blob_diff_still_warns(db_url, clean_regist
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "Column 'attachment.payload' is declared 'text' in the database but the model expects 'blob'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+            f"Column 'attachment.payload' has type 'text' but the model expects 'blob', and SQLite cannot change a column's type in place. {SQLITE_IN_PLACE_FIX}",
         ]
 
     # No DDL runs for SQLite type drift — the column is left as declared.
@@ -971,7 +972,7 @@ async def test_destructive_leaves_a_column_a_foreign_key_or_a_table_check_names_
         if w.kind == "SqliteInPlace" and w.subject.column == column
     ]
     assert warning.subject.table == "author"
-    assert "`ferro migrate new`" in warning.text
+    assert warning.text.endswith(SQLITE_IN_PLACE_FIX)
     assert column in _sqlite_columns(db_url, "author")
     conn = sqlite3.connect(db_url.removeprefix("sqlite:").split("?", 1)[0])
     try:
@@ -1667,7 +1668,7 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "Foreign key on 'fkwarnaccount.connection_id' declares on_delete SET NULL but the live constraint enforces CASCADE; SQLite cannot alter constraints in place, so the live behavior remains. Generate a reviewed migration with `ferro migrate new` to apply the declared action.",
+            f"Foreign key on 'fkwarnaccount.connection_id' declares on_delete SET NULL but the live constraint enforces CASCADE; SQLite cannot alter constraints in place, so the live behavior remains. {SQLITE_IN_PLACE_FIX}",
         ]
 
 
@@ -2944,8 +2945,8 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         ]
         assert warning_texts(report) == [
             "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-            "Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place; `ferro migrate new` renames it by rebuilding the table.",
-            "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            f"Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place. {SQLITE_IN_PLACE_FIX}",
+            f"Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced. {SQLITE_IN_PLACE_FIX}",
         ]
     else:
         report = await auto_migrate(db_url, updates=True)
@@ -2997,7 +2998,7 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
             db_url,
             sqlite=[
                 "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-                "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+                f"Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced. {SQLITE_IN_PLACE_FIX}",
             ],
             postgres=[],
         )
@@ -3046,7 +3047,7 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
         # SQLite renames in place but cannot change a type in place: the
         # type change is the pass's usual warning (ADR-0014).
         with pytest.warns(
-            UserWarning, match=r"pf2author\.full_name.*ferro migrate new"
+            UserWarning, match=r"'pf2author\.full_name' has type 'integer'"
         ):
             report = await auto_migrate(db_url, updates=True)
             assert schema_steps(report) == [
@@ -3056,7 +3057,7 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
                 ),
             ]
             assert warning_texts(report) == [
-                "Column 'pf2author.full_name' is declared 'int' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+                f"Column 'pf2author.full_name' has type 'integer' but the model expects 'varchar', and SQLite cannot change a column's type in place. {SQLITE_IN_PLACE_FIX}",
             ]
     else:
         report = await auto_migrate(db_url, updates=True)
@@ -3143,8 +3144,7 @@ _PD3_CHECK_BODY_TEXT = (
     "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared "
     "body that differs from the live constraint, and SQLite cannot alter "
     "constraints in place (it requires a full table rebuild). The live body "
-    "remains; generate a reviewed migration with `ferro migrate new` to apply the "
-    "declared predicate."
+    "remains. " + SQLITE_IN_PLACE_FIX
 )
 
 _PD3_SQLITE_CHECKED = (
@@ -4635,7 +4635,7 @@ async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_des
         report = await auto_migrate(db_url, destructive=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. Generate a reviewed migration with `ferro migrate new` to rebuild the table without it.",
+            f"Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. {SQLITE_IN_PLACE_FIX}",
         ]
     assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
 

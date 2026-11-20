@@ -54,6 +54,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     write_models,
 )
 from tests.test_migrate_up import db  # noqa: F401 - fixture
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
@@ -107,7 +108,7 @@ def sqlite_warns_and_runs_nothing(report: PassReport) -> None:
     assert schema_sql(report) == []
     assert [warning.kind for warning in report.warnings] == ["SqliteInPlace"]
     assert report.warnings[0].subject.column == "direction"
-    assert "ferro migrate new" in str(report.warnings[0])
+    assert str(report.warnings[0]).endswith(SQLITE_IN_PLACE_FIX)
 
 
 def test_migrate_updates_adds_a_generated_column(project, pkg, db):
@@ -207,7 +208,7 @@ def test_migrate_updates_drops_and_adds_back_around_an_input_type_change(
     if db.backend == "sqlite":
         assert schema_sql(report) == []
         assert {warning.kind for warning in report.warnings} == {"SqliteInPlace"}
-        assert all("ferro migrate new" in str(w) for w in report.warnings)
+        assert all(str(w).endswith(SQLITE_IN_PLACE_FIX) for w in report.warnings)
         assert directions(db) == [(-5, -1)]
         return
     assert schema_sql(report) == [

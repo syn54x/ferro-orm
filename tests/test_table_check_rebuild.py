@@ -37,6 +37,7 @@ from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
 from tests._pass_harness import auto_migrate, schema_steps, warning_texts
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 SIDE_CHECK_NAME = "ck_rebuild_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -245,7 +246,7 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     assert (statements, warnings) == (
         [],
         [
-            "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+            f"CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains. {SQLITE_IN_PLACE_FIX}",
         ],
     )
     assert statements == []
@@ -562,7 +563,7 @@ async def test_sqlite_rebuild_warns_with_the_constraint_name_and_rewrites_nothin
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+            f"CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains. {SQLITE_IN_PLACE_FIX}",
         ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert len(named) == 1, "one warning per drifted constraint"
