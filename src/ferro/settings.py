@@ -139,7 +139,8 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
         The duration; zero for `"0"`.
 
     Raises:
-        ValueError: `value` is not one of those forms.
+        ValueError: `value` is not one of those forms, or is longer than one
+            year.
     """
     if value == "0":
         return timedelta(0)
@@ -149,14 +150,21 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
             f"ddl_lock_timeout must be a positive duration written as "
             f'{_DURATION_FORMS}, or "0" to wait without a limit; got {value!r}'
         )
-    return timedelta(**{_DURATION_UNITS[match.group(2)]: float(match.group(1))})
+    duration = timedelta(**{_DURATION_UNITS[match.group(2)]: float(match.group(1))})
+    if duration.total_seconds() > MAX_LOCK_TIMEOUT_S:
+        raise ValueError(
+            f"ddl_lock_timeout {value!r} is too long; use at most one year "
+            f'({MAX_LOCK_TIMEOUT_S:.0f} seconds), or "0" to wait without a limit'
+        )
+    return duration
 
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
 """The longest lock timeout accepted, in seconds: one year.
 
 A configured `lock_timeout = "0"` waits this long, which stands for "until
-the lock is free" while staying within the runtime's range.
+the lock is free" while staying within the runtime's range. The Rust core
+refuses a longer timeout from any entry point, against the same bound.
 """
 
 
