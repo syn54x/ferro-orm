@@ -25,10 +25,11 @@ from typing import Annotated, Any
 import pytest
 
 import ferro
-from ferro import Model
+from ferro import Model, _core
 from ferro.base import FerroField
 from ferro.exceptions import OperationalError
 from ferro.migrations import runner
+from ferro.settings import MAX_LOCK_TIMEOUT_S
 from tests._pass_harness import auto_migrate
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -621,3 +622,43 @@ async def test_databases_that_agree_on_the_timeout_run_under_it(project, pkg, db
         assert timeouts == ["SET LOCAL lock_timeout = '2000ms'"]
     else:
         assert timeouts == []
+
+
+# -- the one-year bound on a timeout from Python (#611) ---------------------------
+
+ONE_YEAR = "31536000"
+UNUSED_URL = "postgresql://nowhere.invalid/never"
+"""A URL no test may reach: a refusal that came after connecting would fail."""
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: _core._open_tracked(None, None, "migrations", ddl_lock_timeout_s=s),
+        lambda s: _core.connect(UNUSED_URL, auto_migrate=True, ddl_lock_timeout_s=s),
+        lambda s: _core.migrate(using="nowhere", ddl_lock_timeout_s=s),
+        lambda s: _core.create_tables(using="nowhere", ddl_lock_timeout_s=s),
+    ],
+    ids=["_open_tracked", "connect", "migrate", "create_tables"],
+)
+async def test_a_ddl_lock_timeout_over_one_year_is_refused_naming_the_bound(call):
+    with pytest.raises(ValueError) as refused:
+        call(1e20)
+
+    assert "ddl_lock_timeout" in str(refused.value)
+    assert ONE_YEAR in str(refused.value)
+    assert str(refused.value).endswith("got 1e20")
+
+
+async def test_a_ddl_lock_timeout_of_exactly_one_year_is_accepted_everywhere(
+    db, tmp_path
+):
+    await _core.connect(db.url, name="year", ddl_lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    ferro._ensure_rust_registration_synced()  # what ferro.migrate does first
+    await _core.migrate(using="year", ddl_lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    await _core.create_tables(using="year", ddl_lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    tracked = await _core._open_tracked(
+        "year", None, str(tmp_path), ddl_lock_timeout_s=MAX_LOCK_TIMEOUT_S
+    )
+
+    assert tracked is not None

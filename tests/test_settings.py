@@ -862,6 +862,23 @@ def test_without_a_config_an_auto_migrate_pass_takes_the_defaults(project: Path)
     }
 
 
+def test_parse_ddl_lock_timeout_refuses_a_duration_over_one_year():
+    from ferro.settings import MAX_LOCK_TIMEOUT_S, parse_ddl_lock_timeout
+
+    assert parse_ddl_lock_timeout("525600m").total_seconds() == MAX_LOCK_TIMEOUT_S
+    with pytest.raises(ValueError, match="one year") as refused:
+        parse_ddl_lock_timeout("99999999m")
+    assert "ddl_lock_timeout" in str(refused.value)
+    assert "31536000" in str(refused.value)
+
+
+def test_the_core_bound_is_the_settings_bound():
+    from ferro import _core
+    from ferro.settings import MAX_LOCK_TIMEOUT_S
+
+    assert _core._max_lock_timeout_s() == MAX_LOCK_TIMEOUT_S
+
+
 def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():
     # The run lock's ``--lock-timeout`` / ``lock_timeout=`` duration (its
     # async tests are in test_run_lock.py).

@@ -16,8 +16,10 @@ import gc
 import pytest
 
 import ferro
+from ferro import _core
 from ferro.migrations import runner
 from ferro.migrations.report import RunRefused
+from ferro.settings import MAX_LOCK_TIMEOUT_S
 from tests.test_migrate_inherit import squashed
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -288,15 +290,6 @@ async def test_a_lock_timeout_beyond_the_bound_is_refused_from_the_cli(
     assert "author" not in db.tables()
 
 
-async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking(
-    project, pkg, db
-):
-    _, database = _project(project, pkg, db)
-    tracked = await _tracked(db, database)
-    with pytest.raises(ValueError, match="1e+20"):
-        tracked.locked(1e20)
-
-
 async def test_a_lock_lost_before_a_no_transaction_step_starts_runs_nothing(
     project, pkg, db
 ):
@@ -456,3 +449,49 @@ async def test_a_cancelled_up_on_an_in_memory_database_leaves_the_next_up_unbloc
             runner.up(settings, database.name, url=memory, lock_timeout=0)
         )
         assert report.refusal is None, (point, report.refusal)
+
+
+# -- the one-year bound on a timeout from Python (#611) ---------------------------
+
+ONE_YEAR = "31536000"
+UNUSED_URL = "postgresql://nowhere.invalid/never"
+"""A URL no test may reach: a refusal that came after connecting would fail."""
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: _core.connect(UNUSED_URL, auto_migrate=True, lock_timeout_s=s),
+        lambda s: _core.migrate(using="nowhere", lock_timeout_s=s),
+        lambda s: _core.create_tables(using="nowhere", lock_timeout_s=s),
+    ],
+    ids=["connect", "migrate", "create_tables"],
+)
+async def test_a_lock_timeout_over_one_year_is_refused_naming_the_bound(call):
+    with pytest.raises(ValueError) as refused:
+        call(1e19)
+
+    assert "lock_timeout" in str(refused.value)
+    assert ONE_YEAR in str(refused.value)
+
+
+async def test_locked_refuses_a_wait_over_one_year_naming_the_bound(project, pkg, db):
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+
+    with pytest.raises(ValueError, match=ONE_YEAR):
+        tracked.locked(1e19)
+
+
+async def test_a_lock_timeout_of_exactly_one_year_is_accepted_everywhere(
+    project, pkg, db
+):
+    _, database = _project(project, pkg, db)
+    await _core.connect(db.url, name="year", lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    ferro._ensure_rust_registration_synced()  # what ferro.migrate does first
+    await _core.migrate(using="year", lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    await _core.create_tables(using="year", lock_timeout_s=MAX_LOCK_TIMEOUT_S)
+    tracked = await runner.open_tracked("year", database)
+
+    async with tracked.locked(MAX_LOCK_TIMEOUT_S):
+        assert await tracked.lock_held()
