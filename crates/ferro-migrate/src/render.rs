@@ -355,8 +355,7 @@ pub(crate) fn render_from(
                     Subject::table(table),
                     format!(
                         "Constraint '{old}' on '{table}' is now named '{new}', and SQLite \
-                         cannot rename a table constraint in place; `ferro migrate new` \
-                         renames it by rebuilding the table."
+                         cannot rename a table constraint in place."
                     ),
                 )),
             },
@@ -388,8 +387,7 @@ pub(crate) fn render_from(
                     Subject::column(table, column),
                     format!(
                         "Generated column '{table}.{column}' {what}, and SQLite cannot add a \
-                         stored generated column in place; `ferro migrate new` adds it by \
-                         rebuilding the table."
+                         stored generated column in place."
                     ),
                 ));
             }
@@ -469,9 +467,7 @@ pub(crate) fn render_from(
                             format!(
                                 "Column '{table}.{column}' is no longer declared, but {names}, \
                                  and SQLite cannot drop such a column in place (it requires a \
-                                 full table rebuild). The column stays with its values; \
-                                 generate a reviewed migration with `ferro migrate new` to \
-                                 drop it."
+                                 full table rebuild). The column stays with its values."
                             ),
                         ));
                     }
@@ -491,7 +487,14 @@ pub(crate) fn render_from(
                 }
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
                 let new_col = find_column(find_model(&new_models, table)?, column)?;
-                let emission = emit_alter_column_type(table, column, old_col, new_col, dialect)?;
+                let emission = emit_alter_column_type(
+                    table,
+                    column,
+                    old_col,
+                    new_col,
+                    old_side.foreign_type_name(table, column),
+                    dialect,
+                )?;
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
@@ -517,8 +520,7 @@ pub(crate) fn render_from(
                     Subject::column(table, column),
                     format!(
                         "Generated column '{table}.{column}' differs from the model, and \
-                         SQLite cannot change a generated column in place; `ferro migrate \
-                         new` changes it by rebuilding the table."
+                         SQLite cannot change a generated column in place."
                     ),
                 )),
             },
@@ -532,9 +534,8 @@ pub(crate) fn render_from(
                     Subject::column(table, column),
                     format!(
                         "Column '{table}.{column}' is generated in the database and plain in \
-                         the model, and SQLite cannot make a generated column plain in place; \
-                         `ferro migrate new` does it by rebuilding the table, keeping its \
-                         values."
+                         the model, and SQLite cannot make a generated column plain in \
+                         place."
                     ),
                 )),
             },
@@ -653,8 +654,7 @@ pub(crate) fn render_from(
                             "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
                              constraint, and SQLite cannot add table constraints to an \
                              existing table. Referential integrity for this column is not \
-                             database-enforced; generate a reviewed migration with \
-                             `ferro migrate new` to rebuild the table with the constraint.",
+                             database-enforced.",
                             table,
                             column,
                             fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
@@ -690,8 +690,7 @@ pub(crate) fn render_from(
                         format!(
                             "Foreign key '{name}' on '{table}.{column}' is no longer declared, \
                              and SQLite cannot drop a table constraint in place, so it stays \
-                             and keeps enforcing its reference. Generate a reviewed migration \
-                             with `ferro migrate new` to rebuild the table without it."
+                             and keeps enforcing its reference."
                         ),
                     )),
                 }
@@ -725,9 +724,7 @@ pub(crate) fn render_from(
                             format!(
                                 "Foreign key on '{}.{}' declares on_delete {} but the live \
                                  constraint enforces {}; SQLite cannot alter constraints in \
-                                 place, so the live behavior remains. Generate a reviewed \
-                                 migration with `ferro migrate new` to apply the declared \
-                                 action.",
+                                 place, so the live behavior remains.",
                                 table,
                                 column,
                                 fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
@@ -961,8 +958,7 @@ fn catalog_check_in_place(table: &str, name: &str) -> Report {
         Subject::table(table),
         format!(
             "CHECK constraint '{name}' on table '{table}' cannot be put back on the existing \
-             table in place: SQLite takes a constraint only by rebuilding the table, which \
-             `ferro migrate new` writes."
+             table in place: SQLite takes a constraint only by rebuilding the table."
         ),
     )
 }

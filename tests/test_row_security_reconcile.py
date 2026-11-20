@@ -43,6 +43,7 @@ from ferro._core import (
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all, fetch_one
 from tests._pass_harness import auto_migrate, schema_steps, warning_texts
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -321,8 +322,8 @@ def test_sqlite_reconciliation_emits_no_row_security_ddl():
     assert (statements, warnings) == (
         [],
         [
-            "Column 'ledgerrow.label' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
-            "Column 'ledgerrow.ledger_id' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+            f"Column 'ledgerrow.label' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place. {SQLITE_IN_PLACE_FIX}",
+            f"Column 'ledgerrow.ledger_id' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place. {SQLITE_IN_PLACE_FIX}",
         ],
     )
     assert not any("POLICY" in sql.upper() for sql in statements)

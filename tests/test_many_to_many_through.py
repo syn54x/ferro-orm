@@ -43,6 +43,7 @@ from tests.test_postponed_annotations import (
     _refusal,
     _wipe,
 )
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 PRE_CONVERSION = (
     Path(__file__).parent
@@ -292,7 +293,7 @@ async def test_auto_migrate_renames_a_join_table_in_place(db_url):
     stale = [
         f"Constraint 'fk_writer_tags_{column}' on 'author_tags' is now named "
         f"'fk_author_tags_{column}', and SQLite cannot rename a table constraint "
-        "in place; `ferro migrate new` renames it by rebuilding the table."
+        f"in place. {SQLITE_IN_PLACE_FIX}"
         for column in ("author_id_author", "tag_id_tag")
     ]
     assert warning_texts(report) == on(db_url, sqlite=stale, postgres=[])

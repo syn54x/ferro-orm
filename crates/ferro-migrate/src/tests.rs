@@ -4275,6 +4275,7 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
                 indexes: vec![],
                 row_security: ferro_ddl_lowering::LiveRowSecurity::default(),
                 generated: vec![],
+                foreign_type_names: Default::default(),
             },
         );
         facts
@@ -4359,6 +4360,7 @@ fn ledgerrow_with_leftovers() -> (IrEnvelope<SchemaIrPayload>, LiveFacts) {
                 ],
             },
             generated: vec![],
+            foreign_type_names: Default::default(),
         },
     );
     (envelope(vec![live_model]), facts)
@@ -9073,6 +9075,13 @@ fn author_with_team(index: bool) -> SchemaModel {
     }
 }
 
+/// The fix every SQLite in-place warning ends with, word for word.
+const SQLITE_IN_PLACE_FIX: &str = "To make this change, rebuild the table by hand (create it \
+     under a new name as the models declare it, copy the rows, drop the old table, rename the new \
+     one); or, if the models can be put back to what the database holds, adopt migrations there \
+     (`ferro migrate new`, then `ferro migrate baseline`) and generate this change as the next \
+     migration.";
+
 /// `ck_author_age_positive`: `age > 0`.
 fn age_positive() -> SchemaTableCheck {
     SchemaTableCheck {
@@ -9113,14 +9122,16 @@ fn sqlite_leaves_a_column_its_tables_foreign_key_or_a_table_check_names() {
         table_checks: vec![age_positive()],
         ..author_with(vec![col("age", "int", true)])
     };
-    let fk_sentence = "Column 'author.team_id' is no longer declared, but foreign key \
+    let fk_sentence = &format!(
+        "Column 'author.team_id' is no longer declared, but foreign key \
          'fk_author_team_id_team' names it, and SQLite cannot drop such a column in place (it \
-         requires a full table rebuild). The column stays with its values; generate a reviewed \
-         migration with `ferro migrate new` to drop it.";
-    let check_sentence = "Column 'author.age' is no longer declared, but CHECK constraint \
+         requires a full table rebuild). The column stays with its values. {SQLITE_IN_PLACE_FIX}"
+    );
+    let check_sentence = &format!(
+        "Column 'author.age' is no longer declared, but CHECK constraint \
          'ck_author_age_positive' reads it, and SQLite cannot drop such a column in place (it \
-         requires a full table rebuild). The column stays with its values; generate a reviewed \
-         migration with `ferro migrate new` to drop it.";
+         requires a full table rebuild). The column stays with its values. {SQLITE_IN_PLACE_FIX}"
+    );
     let cases = [
         ("team_id", author_with_team(false), fk_sentence),
         ("team_id", author_with_team(true), fk_sentence),
@@ -9163,13 +9174,18 @@ fn sqlite_leaves_a_column_its_tables_foreign_key_or_a_table_check_names() {
                     }
                 }
                 assert!(rendered[drop].statements.is_empty(), "{context}");
+                let [report] = rendered[drop].reports.as_slice() else {
+                    panic!("{context}: {:?}", rendered[drop].reports);
+                };
                 assert_eq!(
-                    rendered[drop].reports,
-                    vec![ferro_ddl_lowering::sqlite_in_place_report(
-                        InPlaceChange::DropColumn,
-                        ferro_ddl_lowering::Subject::column("author", column),
-                        sentence.to_string(),
-                    )],
+                    (&report.kind, &report.subject, report.text.as_str()),
+                    (
+                        &ReportKind::SqliteInPlace {
+                            what: InPlaceChange::DropColumn
+                        },
+                        &ferro_ddl_lowering::Subject::column("author", column),
+                        sentence.as_str(),
+                    ),
                     "{context}"
                 );
             }
@@ -9344,6 +9360,91 @@ fn an_index_over_several_dropped_columns_stays_only_when_every_one_of_them_stays
             plan.render().expect("renders")[index].statements,
             expected,
             "{second}"
+        );
+    }
+}
+
+/// The text of the one SQLite report of a plan from `before` to `after`
+/// whose only op is a column's type change.
+fn sqlite_type_change_text(before: &Side, after: SchemaModel) -> String {
+    let plan = plan_from_ir(
+        before,
+        &Side::declared(envelope(vec![after])),
+        Dialect::Sqlite,
+        PlanOptions { destructive: true },
+    );
+    let rendered = plan.render().expect("renders");
+    let [op] = rendered.as_slice() else {
+        panic!("{:?}", plan.op_list());
+    };
+    assert!(op.statements.is_empty(), "{op:?}");
+    let [report] = op.reports.as_slice() else {
+        panic!("{:?}", op.reports);
+    };
+    assert_eq!(
+        report.kind,
+        ReportKind::SqliteInPlace {
+            what: InPlaceChange::AlterColumnType
+        }
+    );
+    report.text.clone()
+}
+
+#[test]
+fn a_sqlite_type_change_report_names_both_types_as_sqlite_holds_them() {
+    let note = |column: SchemaColumn| schema_model("note", vec![pk_col("id", "int"), column]);
+    let live = |column: SchemaColumn, type_name: Option<&str>| {
+        let mut table = LiveTableFacts::default();
+        if let Some(name) = type_name {
+            table
+                .foreign_type_names
+                .insert(column.name.clone(), name.to_string());
+        }
+        let mut facts = LiveFacts::default();
+        facts.tables.insert("note".to_string(), table);
+        let column = SchemaColumn {
+            logical_type: "unknown".to_string(),
+            ..column
+        };
+        Side::live(envelope(vec![note(column)]), facts).expect("live side")
+    };
+    let status = SchemaColumn {
+        enum_values: Some(vec![
+            serde_json::json!("paid"),
+            serde_json::json!("cancelled"),
+        ]),
+        ..col("status", "varchar", false)
+    };
+    let cases = [
+        (
+            // Two declared snapshots: the old side is what the create pass
+            // writes for it.
+            Side::declared(envelope(vec![note(col("count", "int", false))])),
+            note(col("count", "varchar", false)),
+            "Column 'note.count' has type 'integer' but the model expects 'varchar'",
+        ),
+        (
+            // A live name ferro never writes is printed as the database
+            // holds it.
+            live(col("prefs", "text", false), Some("json_text")),
+            note(col("prefs", "json", false)),
+            "Column 'note.prefs' has type 'json_text' but the model expects 'JSON'",
+        ),
+        (
+            // A live name ferro writes is printed as ferro writes it, and an
+            // enum's expected type is its storage.
+            live(col("status", "int", false), None),
+            note(status),
+            "Column 'note.status' has type 'integer' but the model expects 'varchar(9)'",
+        ),
+    ];
+    for (before, after, differs) in cases {
+        assert_eq!(
+            sqlite_type_change_text(&before, after),
+            format!(
+                "{differs}, and SQLite cannot change a column's type in place. \
+                 {SQLITE_IN_PLACE_FIX}"
+            )
         );
     }
 }

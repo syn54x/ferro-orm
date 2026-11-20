@@ -15,7 +15,9 @@ use crate::introspect::{
     live_table_columns, live_table_foreign_keys, live_table_indexes, live_table_names,
     live_table_row_security, postgres_table_hidden_by_privilege, printed_pairs,
 };
-use ferro_ddl_lowering::{Dialect, LiveRowSecurity, information_schema_to_db_type_token};
+use ferro_ddl_lowering::{
+    Dialect, LiveRowSecurity, information_schema_to_db_type_token, sqlite_holds_written_type,
+};
 use ferro_migrate::plan::live_table_hints;
 use ferro_migrate::plan::{
     live_column_name, printed_pair_checks, printed_pair_column, renamed_value_expr,
@@ -61,7 +63,9 @@ pub(crate) fn live_tables_to_schema_ir(
     let models = tables
         .into_iter()
         .map(|table| {
-            facts.tables.insert(table.name.clone(), table_facts(&table));
+            facts
+                .tables
+                .insert(table.name.clone(), table_facts(&table, dialect));
             live_table_model(table, &facts.enum_labels, dialect)
         })
         .collect();
@@ -182,7 +186,7 @@ fn native_enum_type(col: &LiveColumn) -> Option<&str> {
     col.enum_type_name.as_deref().filter(|_| col.is_enum_udt)
 }
 
-fn table_facts(table: &LiveTable) -> LiveTableFacts {
+fn table_facts(table: &LiveTable, dialect: Dialect) -> LiveTableFacts {
     LiveTableFacts {
         checks: table
             .checks
@@ -227,6 +231,21 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
                 })
             })
             .collect(),
+        // SQLite keeps the name a column was declared with, which its token
+        // may not spell (SQLite has no enum types, so no labels to pass);
+        // Postgres runs every type change and reports none.
+        foreign_type_names: match dialect {
+            Dialect::Sqlite => table
+                .columns
+                .iter()
+                .filter(|col| {
+                    let read = live_column(col, &BTreeMap::new(), Dialect::Sqlite);
+                    !sqlite_holds_written_type(&col.declared_type, &read)
+                })
+                .map(|col| (col.name.clone(), col.declared_type.clone()))
+                .collect(),
+            Dialect::Postgres => BTreeMap::new(),
+        },
     }
 }
 
@@ -783,6 +802,39 @@ mod tests {
         );
         assert_eq!(post.row_security.policies[0].name, "dba_fence");
         assert!(!post.row_security.policies[0].ferro_owned);
+    }
+
+    #[test]
+    fn a_sqlite_type_name_its_token_does_not_spell_is_a_live_fact() {
+        let table = LiveTable {
+            name: "note".to_string(),
+            columns: vec![
+                column("id", "integer", false, true),
+                column("title", "VARCHAR(8)", false, false),
+                column("at", "DATETIME", false, false),
+                column("prefs", "json_text", false, false),
+                column("score", "real", false, false),
+                column("code", "char(5)", false, false),
+                column("flag", "boolean", false, false),
+                column("bare", "", false, false),
+                column("key", "CHAR(32)", false, false),
+            ],
+            ..LiveTable::default()
+        };
+        let (_, facts) =
+            live_tables_to_schema_ir(vec![table.clone()], BTreeMap::new(), Dialect::Sqlite);
+        assert_eq!(
+            facts.tables["note"].foreign_type_names,
+            BTreeMap::from([
+                ("bare".to_string(), String::new()),
+                ("code".to_string(), "char(5)".to_string()),
+                ("flag".to_string(), "boolean".to_string()),
+                ("prefs".to_string(), "json_text".to_string()),
+                ("score".to_string(), "real".to_string()),
+            ])
+        );
+        let (_, facts) = live_tables_to_schema_ir(vec![table], BTreeMap::new(), Dialect::Postgres);
+        assert!(facts.tables["note"].foreign_type_names.is_empty());
     }
 
     /// A declared modelset of `tables`, each `(table, renamed_from)`.

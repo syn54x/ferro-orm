@@ -61,9 +61,12 @@ under SQLAlchemy and produced phantom `modify_type` diffs in the sentinel.
 SQLite's type affinity makes the storage classes identical either way, so
 an existing database still stores and reads the same values. Its type names
 are not the model's, though, and since #614 the reconciliation pass reports
-every such column on every pass (`SQLite cannot change column types in
+every such column on every pass (`SQLite cannot change a column's type in
 place`): a live `json_text` reads as `text` against `JSON`, a live `real`
-as `double` against `NUMERIC`. The pass's own comparison, which read both as
+as `double` against `NUMERIC`. The warning prints the name the table holds
+(`has type 'json_text' but the model expects 'JSON'`), from the live
+`foreign_type_names` fact, and the expected type from
+`sqlite_column_type`, the one storage decision in SQLite's spelling (#997). The pass's own comparison, which read both as
 one storage class and stayed silent, is gone. The warning clears once the
 column carries the name the model expects (the upgrade guide's "After
 0.28" section shows the column swap). PK columns
@@ -82,7 +85,7 @@ live read (`information_schema_to_db_type_token`) reports `VARCHAR(n)` as
 (`sqlite_type_storage_drift` is gone): it warns for every type change the
 planner plans. A change of type name is still a change, so a live `text`
 column under a `str` field (`varchar`) is planned, warned about by the pass
-and rebuilt by `ferro migrate new`. Postgres enforces the length and still
+and rebuilt by a migration once the database has adopted migrations. Postgres enforces the length and still
 compares it.
 
 **Enum fields** (IR `enum_values` present, no explicit `db_type`) are not a

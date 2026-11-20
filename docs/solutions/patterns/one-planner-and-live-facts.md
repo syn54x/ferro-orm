@@ -9,7 +9,7 @@ related_files:
   - src/migrate.rs
   - src/ferro/pass_report.py
   - tests/test_cross_emitter_parity.py
-related_issues: [511, 517, 614]
+related_issues: [511, 517, 614, 997]
 captured: 2026-10-06
 ---
 
@@ -30,7 +30,12 @@ execute (type ops autocommit; each table's ops in one Postgres transaction)
 ```
 
 `LiveFacts` carries what the IR cannot say: CHECK bodies and row policies as
-the catalog prints them, validity flags, live enum labels. A plan's two sides
+the catalog prints them, validity flags, live enum labels, and on SQLite the
+type name of a column whose live token the create pass does not write back
+as that name (`LiveTableFacts::foreign_type_names`: `json_text`, `char(5)`,
+`boolean`, `""`; decided by `sqlite_holds_written_type`, which compares the
+name with `sqlite_column_type` of the column's live read, never with a list
+of names). A plan's two sides
 are adapters (ADR-0050): `Side::live(ir, facts)` (refused when it is built if
 a table lacks its facts) and `Side::declared(ir)`, whose facts are read off
 the declaration. Either may be the target: `plan_down` plans toward a live
@@ -61,6 +66,28 @@ side, whose checks and policies render as the catalog printed them.
   said nothing about (#614). An emitter reports or writes every type change
   the planner hands it; a rule about what counts as a change (on SQLite a
   declared length does not, ADR-0034) goes in the one function.
+- **A report's text reads both sides the way a reader knows them.** The
+  SQLite type-change report prints the old type as the live table holds it
+  whenever its token does not spell that name (the `foreign_type_names`
+  fact; a column declared with no type reads `has no declared type`), else
+  as the create pass writes the old column (`sqlite_column_type`), which is
+  also what a declared snapshot has; the expected type is
+  `sqlite_column_type` of the model's column. `old_col.db_type` is the live
+  read's lossy token (`int`, `text`; `char(5)` and `json_text` both read
+  `text`) and is empty on a declared snapshot, so printing it showed `''`
+  and the wrong name (#997). A first cut decided the fact from a hand-kept
+  list of the names ferro writes, which took `boolean` and `char(5)` for
+  ferro's and printed `integer` and `text`: compare with the one renderer
+  instead. A database ferro created carries no such fact, so the facts pins
+  (e) and (i) compare stay as they were.
+- **Every SQLite in-place report ends in one fix sentence.**
+  `sqlite_in_place_report` appends `sqlite_in_place_fix()` to the text that
+  says what differs, so no call site writes a fix of its own. The pass runs
+  only on an untracked database, where `ferro migrate new` alone writes the
+  models as they are now and `ferro migrate baseline` refuses the difference;
+  the sentence names a rebuild by hand, or adopting migrations at what the
+  database holds and generating the change next (#997). The drop-default
+  report keeps its own `--sql-step` fix.
 - **`AddTable` ops in the pass belong to the create pass.** The pass reads
   only tables that existed before the create pass (ADR-0010), so tables it
   just created plan as adds, which the executor skips with their warnings.

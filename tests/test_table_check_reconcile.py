@@ -33,6 +33,7 @@ from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
 from tests._pass_harness import auto_migrate, schema_steps, warning_texts
+from tests.test_sqlite_in_place_warning import SQLITE_IN_PLACE_FIX
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -204,7 +205,7 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     assert (statements, warnings) == (
         [],
         [
-            "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            f"Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced. {SQLITE_IN_PLACE_FIX}",
         ],
     )
     assert statements == []
@@ -231,7 +232,7 @@ def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
     assert (statements, warnings) == (
         [],
         [
-            "Check constraint 'ck_cookie_flavor' on column 'cookie.flavor' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            f"Check constraint 'ck_cookie_flavor' on column 'cookie.flavor' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced. {SQLITE_IN_PLACE_FIX}",
         ],
     )
     assert statements == []
@@ -582,7 +583,7 @@ async def test_sqlite_reconcile_warns_with_the_constraint_name_and_adds_nothing(
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == []
         assert warning_texts(report) == [
-            "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            f"Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced. {SQLITE_IN_PLACE_FIX}",
         ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert len(named) == 1, "one warning per missing constraint"
