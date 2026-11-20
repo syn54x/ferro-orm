@@ -166,7 +166,8 @@ async def _plan_drift(using: str | None, declared_json: str) -> dict[str, Any]:
     would change, never how it runs) but its ``replaces`` (why a generated
     column is dropped and added back: ``made_generated``, ``input_type`` or
     ``own_type``) on the two ops of such a pair, ``carried`` on an op that
-    takes down or puts back what the plan carries around another change
+    takes down or puts back what the plan carries around another change, or
+    takes down a row policy whose own body changed
     (``unchanged``, ``changed`` or ``not_compared``: whether it is put back
     as it was), ``held`` on a type change no emitter runs (``{"fix": ...,
     "artifacts": [{"kind": "check" | "generated_column" | "policy",

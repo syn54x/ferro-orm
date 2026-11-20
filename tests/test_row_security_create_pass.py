@@ -1148,9 +1148,9 @@ async def test_a_failed_policy_rolls_back_the_tables_created_after_a_rename(db_u
     with pytest.raises(OperationalError) as excinfo:
         await migrate(updates=True)
     assert 'CREATE POLICY "rls_document_members" ON "document"' in str(excinfo.value)
-    # The rename committed on its own; the new tables are one unit and left
-    # nothing.
-    assert all(subject == "author" for subject, _ in schema_steps(excinfo.value.report))
+    # A pass that creates a policy is one transaction (#995): the rename
+    # rolled back with the new tables.
+    assert schema_steps(excinfo.value.report) == []
 
     async with engines.session():
         rows = await fetch_all(
@@ -1158,7 +1158,7 @@ async def test_a_failed_policy_rolls_back_the_tables_created_after_a_rename(db_u
             "WHERE relname IN ('author', 'writer', 'document', 'membership') "
             "AND relkind = 'r' AND relnamespace = current_schema()::regnamespace"
         )
-        assert [row["relname"] for row in rows] == ["author"]
+        assert [row["relname"] for row in rows] == ["writer"]
 
 
 @pytest.mark.backend_matrix

@@ -3056,6 +3056,174 @@ fn a_dropped_tables_ferro_policies_are_dropped_before_the_first_drop_table() {
     );
 }
 
+/// `document`, with a forced policy whose raw body is `"owner_id" IN (SELECT
+/// id FROM <reads>)` when `reads` is given (#995).
+fn document_reading(reads: Option<&str>) -> SchemaModel {
+    SchemaModel {
+        row_security: reads.map(|reads| ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                name: "rls_document_members".to_string(),
+                command: ferro_schema_ir::RowPolicyCommand::All,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                    using: Some(format!("\"owner_id\" IN (SELECT id FROM {reads})")),
+                    with_check: None,
+                },
+            }],
+        }),
+        ..schema_model(
+            "document",
+            vec![pk_col("id", "int"), col("owner_id", "int", false)],
+        )
+    }
+}
+
+/// `table` with its key and each of `columns`, nullable text.
+fn keyed(table: &str, columns: &[&str]) -> SchemaModel {
+    let mut cols = vec![pk_col("id", "int")];
+    cols.extend(columns.iter().map(|name| col(name, "text", true)));
+    schema_model(table, cols)
+}
+
+fn declared_statements(
+    old: Vec<SchemaModel>,
+    new: Vec<SchemaModel>,
+    dialect: Dialect,
+) -> Vec<String> {
+    statements_of(&plan_from_ir(
+        &Side::declared(envelope(old)),
+        &Side::declared(envelope(new)),
+        dialect,
+        destructive(),
+    ))
+}
+
+const MEMBERS_OF_TEAM: &str = "CREATE POLICY \"rls_document_members\" ON \"document\" FOR ALL \
+     USING (\"owner_id\" IN (SELECT id FROM team WHERE name IS NOT NULL))";
+
+#[test]
+fn a_policy_create_follows_a_column_added_to_another_table() {
+    let reads = Some("team WHERE name IS NOT NULL");
+    // Shape 1: `document` is new. Shape 2: it exists and gains the policy,
+    // and is visited before `team`.
+    for before in [
+        vec![keyed("team", &[])],
+        vec![document_reading(None), keyed("team", &[])],
+    ] {
+        let after = vec![document_reading(reads), keyed("team", &["name"])];
+        let statements = declared_statements(before.clone(), after.clone(), Dialect::Postgres);
+        let from = statements.len() - 4;
+        assert_eq!(
+            statements[from..],
+            [
+                "ALTER TABLE \"team\" ADD COLUMN \"name\" text",
+                "ALTER TABLE \"document\" ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE \"document\" FORCE ROW LEVEL SECURITY",
+                MEMBERS_OF_TEAM,
+            ],
+            "{statements:?}"
+        );
+        assert!(
+            statements[..from]
+                .iter()
+                .all(|sql| sql.starts_with("CREATE TABLE IF NOT EXISTS \"document\"")),
+            "{statements:?}"
+        );
+        // SQLite renders no row security.
+        let sqlite = declared_statements(before, after, Dialect::Sqlite);
+        assert!(
+            sqlite
+                .iter()
+                .all(|sql| !sql.contains("POLICY") && !sql.contains("ROW LEVEL SECURITY")),
+            "{sqlite:?}"
+        );
+        assert!(sqlite.contains(&"ALTER TABLE \"team\" ADD COLUMN \"name\" text".to_string()));
+    }
+}
+
+#[test]
+fn a_policy_drop_precedes_the_drop_of_a_column_it_read_on_another_table() {
+    // Shape 3.
+    let before = vec![
+        keyed("account", &["name"]),
+        document_reading(Some("account WHERE name IS NOT NULL")),
+    ];
+    let after = vec![keyed("account", &[]), document_reading(None)];
+    assert_eq!(
+        declared_statements(before.clone(), after.clone(), Dialect::Postgres),
+        [
+            "DROP POLICY \"rls_document_members\" ON \"document\"",
+            "ALTER TABLE \"account\" DROP COLUMN \"name\"",
+            "ALTER TABLE \"document\" NO FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE \"document\" DISABLE ROW LEVEL SECURITY",
+        ]
+    );
+    assert_eq!(
+        declared_statements(before, after, Dialect::Sqlite),
+        ["ALTER TABLE \"account\" DROP COLUMN \"name\""]
+    );
+}
+
+#[test]
+fn a_changed_policy_is_dropped_before_and_created_after_the_column_changes_it_reads() {
+    let before = vec![
+        keyed("account", &["name"]),
+        document_reading(Some("account WHERE name IS NOT NULL")),
+    ];
+    let after = vec![
+        keyed("account", &["title"]),
+        document_reading(Some("account WHERE title IS NOT NULL")),
+    ];
+    let plan = plan_from_ir(
+        &Side::declared(envelope(before)),
+        &Side::declared(envelope(after)),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        statements_of(&plan),
+        [
+            "DROP POLICY \"rls_document_members\" ON \"document\"",
+            "ALTER TABLE \"account\" ADD COLUMN \"title\" text",
+            "ALTER TABLE \"account\" DROP COLUMN \"name\"",
+            "CREATE POLICY \"rls_document_members\" ON \"document\" FOR ALL USING \
+             (\"owner_id\" IN (SELECT id FROM account WHERE title IS NOT NULL))",
+        ]
+    );
+    // The change is one difference: the drop is its first half, marked, and
+    // the rebuild says it.
+    let policy = |name: &str| "rls_document_members" == name;
+    let halves: Vec<(&MigrationOp, Option<crate::Carry>)> = plan
+        .operations
+        .iter()
+        .filter(|planned| {
+            matches!(&planned.op, MigrationOp::DropRowPolicy { name, .. }
+                | MigrationOp::RebuildRowPolicy { name, .. } if policy(name))
+        })
+        .map(|planned| (&planned.op, planned.verdict.carried))
+        .collect();
+    assert_eq!(
+        halves,
+        [
+            (
+                &MigrationOp::DropRowPolicy {
+                    table: "document".into(),
+                    name: "rls_document_members".into(),
+                },
+                Some(crate::Carry::Changed),
+            ),
+            (
+                &MigrationOp::RebuildRowPolicy {
+                    table: "document".into(),
+                    name: "rls_document_members".into(),
+                },
+                None,
+            ),
+        ]
+    );
+}
+
 /// `table` with a nullable foreign-key column `<to>_id` to each of `to`.
 fn referencing(table: &str, to: &[&str]) -> SchemaModel {
     let mut columns = vec![pk_col("id", "int")];
@@ -4231,20 +4399,20 @@ fn updates_only_plans_no_drop_and_keeps_every_leftover_warning() {
     assert_eq!(
         dropped.op_list(),
         vec![
-            MigrationOp::DropCheck {
-                table: "ledgerrow".into(),
-                name: "ck_ledgerrow_old".into(),
-            },
             MigrationOp::DropRowPolicy {
                 table: "ledgerrow".into(),
                 name: "rls_ledgerrow_retired".into(),
+            },
+            MigrationOp::DropCheck {
+                table: "ledgerrow".into(),
+                name: "ck_ledgerrow_old".into(),
             },
             MigrationOp::DropColumn {
                 table: "ledgerrow".into(),
                 column: "legacy".into(),
             },
         ],
-        "drops: checks with the checks, policies with row security, columns last"
+        "drops: policies ahead of every table change, checks with the checks, columns last"
     );
 }
 
@@ -4371,11 +4539,25 @@ fn row_security_ops_are_the_reconcile_decisions_names_and_flags() {
                 MigrationOp::DisableRowSecurity { table: table() }
             }
         };
-        // The decision's names and flags, one op each, in its order.
+        // The decision's names and flags, one op each, a drifted policy's
+        // drop and create apart: every policy drop, the creates in the
+        // decision's order, then the flags turned off.
+        let drop = |name: &String| MigrationOp::DropRowPolicy {
+            table: table(),
+            name: name.clone(),
+        };
         let expected: Vec<MigrationOp> = reconcile
-            .missing_flags
+            .drifted
             .iter()
-            .map(flag)
+            .map(drop)
+            .chain(
+                reconcile
+                    .extra
+                    .iter()
+                    .filter(|_| options.destructive)
+                    .map(drop),
+            )
+            .chain(reconcile.missing_flags.iter().map(flag))
             .chain(
                 reconcile
                     .missing
@@ -4394,16 +4576,6 @@ fn row_security_ops_are_the_reconcile_decisions_names_and_flags() {
                         name: name.clone(),
                     }),
             )
-            .chain(
-                reconcile
-                    .extra
-                    .iter()
-                    .filter(|_| options.destructive)
-                    .map(|name| MigrationOp::DropRowPolicy {
-                        table: table(),
-                        name: name.clone(),
-                    }),
-            )
             .chain(reconcile.excess_flags.iter().map(flag))
             .collect();
         assert!(!expected.is_empty());
@@ -4412,22 +4584,25 @@ fn row_security_ops_are_the_reconcile_decisions_names_and_flags() {
         // Only the plan's renderer writes the statements.
         let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
         let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
-        let mut wanted = vec![
+        let mut wanted =
+            vec!["DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string()];
+        if options.destructive {
+            wanted.push("DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string());
+        }
+        wanted.extend([
             "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
             ferro_ddl_lowering::render_create_row_policy(
                 &declared_model,
                 &declared_model.row_security.as_ref().unwrap().policies[1],
             )
             .unwrap(),
-            "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
             ferro_ddl_lowering::render_create_row_policy(
                 &declared_model,
                 &declared_model.row_security.as_ref().unwrap().policies[0],
             )
             .unwrap(),
-        ];
+        ]);
         if options.destructive {
-            wanted.push("DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string());
             wanted.push("ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string());
         }
         assert_eq!(statements, wanted, "{options:?}");
@@ -5829,6 +6004,28 @@ fn ledgerrow_ops(plan: &Plan) -> Vec<MigrationOp> {
 }
 
 #[test]
+fn a_rebuild_rendered_without_its_drop_is_refused() {
+    // A rebuild renders the `CREATE POLICY` alone: over a policy that still
+    // exists Postgres would refuse it, so the renderer does first.
+    let rebuild = Plan::unplaced(vec![MigrationOp::RebuildRowPolicy {
+        table: "ledgerrow".into(),
+        name: "rls_ledgerrow_raw".into(),
+    }]);
+    let failed = render_plan(
+        &rebuild,
+        &raw_policy_model("ann"),
+        &raw_policy_model("bob"),
+        Dialect::Postgres,
+    )
+    .expect_err("refused");
+    assert_eq!(
+        failed.message,
+        "Row-policy rebuild for 'rls_ledgerrow_raw' on table 'ledgerrow' is rendered without \
+         the drop of the policy it replaces"
+    );
+}
+
+#[test]
 fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw_body() {
     let (bare, none) = bare_row_security_pair();
     let plan = plan_from_ir(
@@ -5857,10 +6054,16 @@ fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw
     );
     assert_eq!(
         ledgerrow_ops(&plan),
-        [MigrationOp::RebuildRowPolicy {
-            table: "ledgerrow".into(),
-            name: "rls_ledgerrow_raw".into(),
-        }]
+        [
+            MigrationOp::DropRowPolicy {
+                table: "ledgerrow".into(),
+                name: "rls_ledgerrow_raw".into(),
+            },
+            MigrationOp::RebuildRowPolicy {
+                table: "ledgerrow".into(),
+                name: "rls_ledgerrow_raw".into(),
+            },
+        ]
     );
     assert!(plan.reports.is_empty(), "{:?}", plan.reports);
 }
@@ -8042,9 +8245,13 @@ fn a_raw_policy_naming_a_re_added_generated_column_on_a_live_table_refuses_namin
         Dialect::Postgres,
         updates_only(),
     );
-    assert_eq!(up.op_list()[0], direction_op("drop"));
-    let Execution::Refused(refusal) = &up.operations[0].verdict.execution else {
-        panic!("{:?}", up.operations[0].verdict);
+    let drop = up
+        .operations
+        .iter()
+        .find(|planned| planned.op == direction_op("drop"))
+        .expect("the column's drop");
+    let Execution::Refused(refusal) = &drop.verdict.execution else {
+        panic!("{:?}", drop.verdict);
     };
     let text = refusal.to_string();
     assert!(

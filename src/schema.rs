@@ -52,7 +52,9 @@ use std::sync::Arc;
 /// creates none of them ([`CreatePass::left_to_plan`]) and the plan's ops
 /// do, after the renames and beside the tables held back for one, which a
 /// policy may read too. Otherwise this pass runs the unit
-/// ([`planned_create_unit`]).
+/// ([`planned_create_unit`]). It creates none either when `plan_creates`:
+/// the plan that follows changes row security, so its table changes are one
+/// transaction, which a table committed here would be outside of (#995).
 ///
 /// What it executes and warns goes into `report` (ADR-0049).
 ///
@@ -62,6 +64,7 @@ use std::sync::Arc;
 pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
     reconciliation_follows: bool,
+    plan_creates: bool,
     ddl: &DdlExecutor,
     report: &mut PassReport,
 ) -> PyResult<CreatePass> {
@@ -174,7 +177,7 @@ pub async fn internal_create_tables(
         }
         _ => None,
     };
-    if unit.is_some() && reconciliation_follows {
+    if (unit.is_some() || plan_creates) && reconciliation_follows {
         return Ok(CreatePass {
             existing: existing_tables,
             held_back: held_back.into_keys().collect(),
@@ -284,10 +287,11 @@ pub struct CreatePass {
     /// new table that references one, directly or through another.
     pub held_back: BTreeSet<String>,
     /// The new tables the pass left to the reconciliation pass's plan: every
-    /// table it would have created, when on Postgres a statement of theirs
-    /// runs after the last `CREATE TABLE` (a deferred key, #304, or row
-    /// security, #753) and a reconciliation follows. The plan creates them
-    /// as one unit, after its renames.
+    /// table it would have created, when on Postgres a reconciliation follows
+    /// and a statement of theirs runs after the last `CREATE TABLE` (a
+    /// deferred key, #304, or row security, #753), or the plan changes row
+    /// security on any table (#995). The plan creates them as one unit,
+    /// after its renames.
     pub left_to_plan: BTreeSet<String>,
 }
 

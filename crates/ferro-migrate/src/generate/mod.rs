@@ -4577,11 +4577,14 @@ mod tests {
                 .find(needle)
                 .unwrap_or_else(|| panic!("{needle}: {}", pg.down))
         };
-        assert!(down_at("DISABLE ROW LEVEL SECURITY") < down_at("DROP COLUMN \"note\""));
+        // The down drops the policy ahead of the column and turns the flags
+        // off after it (#995).
+        assert!(down_at("DROP POLICY") < down_at("DROP COLUMN \"note\""));
+        assert!(down_at("DROP COLUMN \"note\"") < down_at("NO FORCE ROW LEVEL SECURITY"));
     }
 
     #[test]
-    fn row_security_lands_after_the_tables_column_changes_and_its_down_before_their_reverse() {
+    fn row_security_lands_after_the_tables_column_changes_and_its_down_drops_the_policy_first() {
         let mut after = order(Some((true, vec![tenant_policy("app.tenant")])));
         after.columns.push(optional("note", "string"));
         let migration = edit(vec![order(None)], vec![after.clone()], &[Dialect::Postgres]);
@@ -4598,15 +4601,16 @@ mod tests {
                 ""
             )
         );
-        // Its down tears the row security down before dropping the column.
+        // Its down drops the policy before the column, which the policy may
+        // read, and turns the flags off after every column change (#995).
         assert_eq!(
             pg.down,
             file(
                 &[
                     drop_policy("rls_order_tenant_id"),
+                    "ALTER TABLE \"order\" DROP COLUMN \"note\"".to_string(),
                     no_force(),
                     disable(),
-                    "ALTER TABLE \"order\" DROP COLUMN \"note\"".to_string(),
                 ],
                 ""
             )

@@ -312,6 +312,10 @@ CASES: tuple[Case, ...] = (
         row_security.models(),
         row_security.models() + row_security.READS_ANOTHER_TABLE,
     ),
+    *(
+        Case(name, row_security.models() + before, row_security.models() + after)
+        for name, (before, after) in row_security.READS_A_CHANGED_COLUMN.items()
+    ),
     # -- G: generated columns -----------------------------------------------------
     Case("G1-add-an-indexed-generated-column", generated.HEAD, generated.INDEXED),
     Case("G2-change-a-generated-expression", generated.INDEXED, generated.ABS),

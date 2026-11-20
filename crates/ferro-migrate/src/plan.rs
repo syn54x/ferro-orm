@@ -1308,7 +1308,8 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
     // Every new table first, then every new table's row security: a policy
     // may read any table of the plan, and no order of the tables could give
     // it that (a raw body is not parsed, ADR-0019, and two policies may read
-    // each other's tables) (#753).
+    // each other's tables) (#753). [`order_row_security`] then moves it past
+    // every existing table's changes too (#995).
     let mut row_security = Vec::new();
     let created = emit::order_models_for_create(&added);
     for model in &created {
@@ -1386,15 +1387,79 @@ fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) ->
         }
     }
 
+    plan.operations = order_row_security(std::mem::take(&mut plan.operations));
     plan
+}
+
+/// `ops` (what [`plan_named`] plans, each table's row security beside its
+/// table) with every row-security op where a policy may read a column the
+/// plan adds, renames or drops on any table (#995). A policy body can read
+/// any column of any table and a raw one is never parsed (ADR-0019), so no
+/// order of the tables could give it that:
+///
+/// ```text
+/// DROP POLICY "rls_document_members" ON "document"     every policy drop
+/// ALTER TABLE "account" DROP COLUMN "name"             every table and column change
+/// ALTER TABLE "account" ADD COLUMN "title" text
+/// CREATE POLICY "rls_document_members" ON "document" … each table's ENABLE / FORCE, then its policies
+/// ALTER TABLE "ledger" NO FORCE ROW LEVEL SECURITY     every NO FORCE / DISABLE
+/// DROP TABLE "legacy"                                  the dropped tables, the enum types
+/// ```
+///
+/// Each group keeps the order it was planned in. The plan's renames run
+/// ahead of all of it ([`plan_with_hints`]): Postgres carries a policy's
+/// body with a rename, and every op here names its policy as they leave it.
+/// SQLite plans no row-security op, so its plans are unchanged.
+fn order_row_security(ops: Vec<MigrationOp>) -> Vec<MigrationOp> {
+    let (mut drops, mut creates, mut teardown, mut rest) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for op in ops {
+        if !op.changes_row_security() {
+            rest.push(op);
+            continue;
+        }
+        match op {
+            MigrationOp::DropRowPolicy { .. } => drops.push(op),
+            MigrationOp::NoForceRowSecurity { .. } | MigrationOp::DisableRowSecurity { .. } => {
+                teardown.push(op);
+            }
+            // `ENABLE`, `FORCE`, a policy added or rebuilt.
+            _ => creates.push(op),
+        }
+    }
+    if drops.is_empty() && creates.is_empty() && teardown.is_empty() {
+        return rest;
+    }
+    // What ends the table and column changes: the first `DROP TABLE`, or the
+    // enum types dropped after the last of them.
+    let ends = |op: &MigrationOp| {
+        matches!(
+            op,
+            MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. }
+        )
+    };
+    let last = rest.iter().position(ends).unwrap_or(rest.len());
+    let first = rest[..last]
+        .iter()
+        .position(|op| op.table().is_some())
+        .unwrap_or(last);
+    let tail = rest.split_off(last);
+    let changes = rest.split_off(first);
+    rest.into_iter()
+        .chain(drops)
+        .chain(changes)
+        .chain(creates)
+        .chain(teardown)
+        .chain(tail)
+        .collect()
 }
 
 /// What a table `side` holds needs beyond its `CREATE TABLE`, which renders
 /// the table's columns, indexes and declared checks: each check its facts
 /// hold that its IR does not declare (a live table's, put back as the
 /// catalog printed it), then, on Postgres, its row security as the side
-/// holds it: `ENABLE`, `FORCE`, each policy. The caller runs the row
-/// security after the last `AddTable` of the plan.
+/// holds it: `ENABLE`, `FORCE`, each policy. The plan runs the row security
+/// after its last table or column change ([`order_row_security`]).
 fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<MigrationOp> {
     let table = model.table_name.as_str();
     let facts = side.table_facts(model);
@@ -1528,9 +1593,10 @@ fn plan_existing_table(
         &mut plan.reports,
     );
     // Postgres refuses to drop a column a policy reads: a policy the plan
-    // can carry ([`carries_policy`]) is dropped first and added back with the
-    // table's row security, after the add. Any other policy that reads a
-    // replaced column refuses its drop ([`policy_blocking_replace`]).
+    // can carry ([`carries_policy`]) is dropped with the plan's policy drops
+    // and added back with its policy creates ([`order_row_security`]). Any
+    // other policy that reads a replaced column refuses its drop
+    // ([`policy_blocking_replace`]).
     let declaration = new.declaration(new_model);
     let carried: Vec<String> = if dialect == Dialect::Postgres {
         facts
@@ -1811,9 +1877,10 @@ fn plan_existing_table(
         }));
     }
 
-    // Row security lands last for the table (#413; PRD #406 user story 20):
-    // every column change and data-shaped step above has run before any
-    // policy starts filtering the rows it touches.
+    // Row security lands after every table's changes (#413; PRD #406 user
+    // story 20; [`order_row_security`], #995): every column change and
+    // data-shaped step has run before any policy starts filtering the rows
+    // it touches.
     let mut row_security = facts.row_security.clone();
     row_security
         .policies
@@ -1829,10 +1896,27 @@ fn plan_existing_table(
         &mut security_ops,
         &mut plan.reports,
     );
-    ops.extend(security_ops.into_iter().filter(|op| {
-        !matches!(op, MigrationOp::RebuildRowPolicy { name, .. }
+    for op in security_ops {
+        if matches!(&op, MigrationOp::RebuildRowPolicy { name, .. }
             | MigrationOp::AddRowPolicy { name, .. } if held.holds(HeldKind::Policy, name))
-    }));
+        {
+            continue;
+        }
+        // A changed policy is two ops, so that its `DROP POLICY` runs with
+        // the plan's policy drops and its `CREATE POLICY` with the creates:
+        // the old body may read a column the plan drops, the new one a
+        // column it adds (#995). The drop is marked as the first half of
+        // the change, which the rebuild alone reports.
+        if let MigrationOp::RebuildRowPolicy { table, name } = &op {
+            let drop = MigrationOp::DropRowPolicy {
+                table: table.clone(),
+                name: name.clone(),
+            };
+            plan.carried.push((drop.clone(), Carry::Changed));
+            ops.push(drop);
+        }
+        ops.push(op);
+    }
     plan.held.extend(held.verdicts(table));
 
     if options.destructive {
@@ -1851,8 +1935,9 @@ fn plan_existing_table(
 
 /// Translate the row-security reconciliation decision for one table
 /// (`plan_row_security_reconcile`, the single seam; AGENTS.md § I-1 item 16)
-/// into ops, in its execution order: missing flags, policy additions,
-/// rebuilds, then (destructive) orphan drops and the flag teardown. `model`
+/// into ops: missing flags, policy additions, rebuilds, then (destructive)
+/// orphan drops and the flag teardown. Where each runs in the plan is
+/// [`order_row_security`]'s. `model`
 /// is the table as the target declares it ([`Side::declaration`]) and `live`
 /// its row security on the `old` side.
 ///
@@ -2486,7 +2571,10 @@ pub struct OpVerdict {
     /// another change (a row policy around a generated column's drop and
     /// add, a check around it or around a type change of a column it
     /// reads), and whether what it puts back is what it took down. Only an
-    /// [`Carry::Unchanged`] one is no difference.
+    /// [`Carry::Unchanged`] one is no difference. The `DROP POLICY` of a
+    /// changed policy is marked [`Carry::Changed`] too: it is the first half
+    /// of the change its `RebuildRowPolicy` reports, and runs ahead of
+    /// every table change (#995).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried: Option<Carry>,
     /// On a type change no emitter runs ([`type_change_withheld`]): the checks,
@@ -6188,18 +6276,26 @@ mod down_tests {
         let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
         assert_eq!(
             ops(&up),
-            vec![MigrationOp::RebuildRowPolicy {
-                table: "card".into(),
-                name: "rls_card_mine".into()
-            }]
+            vec![
+                MigrationOp::DropRowPolicy {
+                    table: "card".into(),
+                    name: "rls_card_mine".into()
+                },
+                MigrationOp::RebuildRowPolicy {
+                    table: "card".into(),
+                    name: "rls_card_mine".into()
+                },
+            ]
         );
         assert_eq!(
             statements(&down),
-            vec![vec![
-                "DROP POLICY \"rls_card_mine\" ON \"card\"".to_string(),
-                "CREATE POLICY \"rls_card_mine\" ON \"card\" FOR SELECT USING ((id > 0))"
-                    .to_string()
-            ]]
+            vec![
+                vec!["DROP POLICY \"rls_card_mine\" ON \"card\"".to_string()],
+                vec![
+                    "CREATE POLICY \"rls_card_mine\" ON \"card\" FOR SELECT USING ((id > 0))"
+                        .to_string()
+                ],
+            ]
         );
     }
 

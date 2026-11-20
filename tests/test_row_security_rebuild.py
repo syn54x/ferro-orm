@@ -376,7 +376,10 @@ def test_row_policy_rebuild_statement_parity_pin():
     _define_ledger_row(setting=OTHER_SETTING)
     live = _live()
     plan = plan_live_ledgerrow(live)
-    assert ops_of(plan) == [("RebuildRowPolicy", POLICY_NAME)]
+    assert ops_of(plan) == [
+        ("DropRowPolicy", POLICY_NAME),
+        ("RebuildRowPolicy", POLICY_NAME),
+    ]
     assert statements_of(plan) == [DROP_POLICY_SQL, _create_policy_sql(OTHER_SETTING)]
 
     runtime, _ = _render(live)
@@ -591,7 +594,10 @@ async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url, pg_
             # The body did not change at all — only the audience did.
             assert narrowed["policies"][0]["using"] == live["policies"][0]["using"]
             plan = plan_live_ledgerrow(narrowed)
-            assert ops_of(plan) == [("RebuildRowPolicy", POLICY_NAME)]
+            assert ops_of(plan) == [
+                ("DropRowPolicy", POLICY_NAME),
+                ("RebuildRowPolicy", POLICY_NAME),
+            ]
 
         reset_engine()
         report = await auto_migrate(db_url, updates=True)
