@@ -80,7 +80,8 @@ async def test_a_server_reporting_16_is_refused_and_not_registered(db_url):
         await ferro.connect(db_url, name="floor")
 
     message = str(excinfo.value)
-    assert message.startswith("Ferro needs PostgreSQL 17 or newer; postgresql://")
+    scheme = urlsplit(db_url).scheme
+    assert message.startswith(f"Ferro needs PostgreSQL 17 or newer; {scheme}://")
     assert refusal("16.4", 160004) in message
     password = urlsplit(db_url).password
     assert password and f":{password}@" not in message
