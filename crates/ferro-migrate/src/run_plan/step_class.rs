@@ -769,7 +769,7 @@ mod tests {
         assert!(
             text.starts_with(
                 "ferro migrate: 0002_move_key does not regenerate from its snapshots, so ferro \
-                 cannot decide the class of its generated steps (ADR-0054): "
+                 cannot decide the class of its generated steps: "
             ),
             "{text}"
         );

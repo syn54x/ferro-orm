@@ -900,5 +900,5 @@ def retired_clause(model_cls: type[Any], name: str) -> str:
         return ""
     return (
         f" {model_cls.__name__}.{name} is retired in this release: the model "
-        "no longer reads or writes it (ADR-0053)."
+        "no longer reads or writes it."
     )

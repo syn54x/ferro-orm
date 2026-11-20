@@ -544,7 +544,7 @@ impl Side {
                 type_name, label, ..
             } => Err(format!(
                 "label {label:?} of enum type {type_name} cannot be removed: enum labels are \
-                 append-only (ADR-0011), and rows may hold it"
+                 append-only, and rows may hold it"
             )),
             MigrationOp::DropDefault { table, column, was } => Err(format!(
                 "the default {was} on {table}.{column} was set outside ferro, and no declared \
@@ -5911,8 +5911,8 @@ mod down_tests {
         };
         assert_eq!(
             reason,
-            "label \"y\" of enum type status cannot be removed: enum labels are append-only \
-             (ADR-0011), and rows may hold it"
+            "label \"y\" of enum type status cannot be removed: enum labels are append-only, \
+             and rows may hold it"
         );
     }
 

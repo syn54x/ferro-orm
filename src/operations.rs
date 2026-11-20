@@ -6387,7 +6387,7 @@ mod schema_value_expr_tests {
 
         assert!(
             sql.contains("CAST"),
-            "temporal null should still CAST until #40: {sql}"
+            "temporal null should still CAST: {sql}"
         );
     }
 

@@ -106,7 +106,7 @@ _RESERVED_KEYS = {
     "unmanaged_tables": (
         "is reserved for the list of live tables ferro leaves alone, which has "
         "not shipped yet (https://github.com/syn54x/ferro-orm/issues/486); "
-        "remove it until #486 lands"
+        "remove it until it ships"
     ),
 }
 _FERRO_KEYS = frozenset(_DATABASE_KEYS + _TOP_LEVEL_KEYS) | frozenset(_RESERVED_KEYS)

@@ -135,7 +135,7 @@ impl std::fmt::Display for ComposeError {
             ComposeError::OldNameReAdded { hint, re_added_at } => write!(
                 f,
                 "the range renames {}, then declares \"{}\" again from migration #{} of the \
-                 range: one migration cannot rename a name and keep it (ADR-0032); start the \
+                 range: one migration cannot rename a name and keep it; start the \
                  squash range at migration #{}, leaving the rename below the squash",
                 describe(hint),
                 old_of(hint),
@@ -155,7 +155,7 @@ impl std::fmt::Display for ComposeError {
             ComposeError::RefusedHint { position, error } => write!(
                 f,
                 "the snapshot of migration #{} of the range declares a rename hint the planner \
-                 refuses ({error}); a schema snapshot is never re-recorded (ADR-0030): restore \
+                 refuses ({error}); a schema snapshot is never re-recorded: restore \
                  that migration's ir.json from version control, or start the squash range after \
                  migration #{}",
                 position + 1,

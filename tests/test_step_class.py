@@ -381,7 +381,7 @@ def test_a_migration_that_does_not_regenerate_refuses_up_and_warns_down(
     assert raised.value.report.refused.kind == "unclassifiable"
     assert str(raised.value).startswith(
         "ferro migrate: 0002_bio does not regenerate from its snapshots, so ferro "
-        "cannot decide the class of its generated steps (ADR-0054): "
+        "cannot decide the class of its generated steps: "
     ), raised.value
     assert str(raised.value).endswith(
         "No class was recorded for it, and none of its steps was applied."

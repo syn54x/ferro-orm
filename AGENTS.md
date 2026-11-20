@@ -598,6 +598,13 @@ What this means in practice:
   tracked-database refusal of `connect(auto_migrate=True)` and of Alembic
   autogenerate, and the edited-file refusals (`ferro migrate rerecord`,
   `--continue` / `--restart`).
+- **No message cites an ADR or issue number.** A message Ferro raises or
+  prints says what happened and what to do in words; a reader cannot follow
+  `(ADR-0053)` or `(#492)`. A full URL is a reference a reader can follow.
+  Pinned by
+  `tests/test_lambda_parameter_in_errors.py::test_no_message_source_spells_t_or_cites_a_number`
+  over every string in `src/ferro` and every Rust source line that is not a
+  comment.
 - **A fix computed from the models is a list of edits.**
 
   ```python
@@ -724,9 +731,8 @@ Rules:
   (`order_by(lambda transaction: transaction.account.label)`).
 - **An error raised from a lambda uses the lambda's own parameter name**
   (`sale.amount is a column reference ...` for `lambda sale: ...`), and the
-  model's name in snake case where there is no lambda to read. No message
-  raised from `src/ferro/query/` or `src/ferro/checks.py` carries an ADR or
-  issue number. Pinned by `tests/test_lambda_parameter_in_errors.py`.
+  model's name in snake case where there is no lambda to read. Pinned by
+  `tests/test_lambda_parameter_in_errors.py`.
 - **The lint** `uv run --no-sync python -m tests._docs_checks PATH...` lists
   every lambda passed to a query method whose parameter is one character,
   as `path:line: message`, and exits 1. It reads Python files, Python fences

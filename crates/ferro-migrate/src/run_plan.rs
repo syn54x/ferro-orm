@@ -1363,7 +1363,7 @@ impl std::fmt::Display for RunRefusal {
             } => write!(
                 f,
                 "ferro migrate: {migration_name} does not regenerate from its snapshots, so \
-                 ferro cannot decide the class of its generated steps (ADR-0054): {error}\nA \
+                 ferro cannot decide the class of its generated steps: {error}\nA \
                  step records the class the planner decides for it, never a guess. Restore \
                  {migration_name}/ir.json and the snapshot before it as `ferro migrate new` \
                  wrote them, or run the migration with the ferro version that generated it. \
@@ -3494,7 +3494,7 @@ impl RunRefusal {
                 ..
             } => Some(format!(
                 "ferro migrate: {migration_name} does not regenerate from its snapshots, so \
-                 its records keep no class and read as contract (ADR-0054): {error}\nThe next \
+                 its records keep no class and read as contract: {error}\nThe next \
                  `ferro migrate up` or `ferro migrate baseline` classifies them, or refuses \
                  naming the fix."
             )),

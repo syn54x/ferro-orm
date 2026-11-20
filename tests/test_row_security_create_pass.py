@@ -581,7 +581,7 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
     report = await auto_migrate(db_url)
     assert schema_steps(report) == []
     assert warning_texts(report) == [
-        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
+        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table. Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
     ]
 
     unenforced = [w for w in recwarn if "__ferro_rls__" in str(w.message)]
@@ -589,7 +589,7 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
     message = str(unenforced[0].message)
     assert "ledgerrow" in message
     assert "NOT filtered" in message
-    assert "ADR-0010" in message
+    assert "ADR-" not in message
 
     async with engines.session():
         flags = await _pg_row_security_flags("ledgerrow")
@@ -603,7 +603,7 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
     report = await auto_migrate(db_url)
     assert schema_steps(report) == []
     assert warning_texts(report) == [
-        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
+        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table. Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
     ]
     assert len([w for w in recwarn if "__ferro_rls__" in str(w.message)]) == 1
 

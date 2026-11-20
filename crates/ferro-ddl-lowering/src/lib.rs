@@ -2271,7 +2271,7 @@ pub fn row_security_existing_table_warning(
             Subject::table(&model.table_name),
             format!(
                 "Table '{}' declares __ferro_rls__, but the table already exists and the \
-                 create pass never alters an existing table (ADR-0010). Its row-security \
+                 create pass never alters an existing table. Its row-security \
                  flags and policies were NOT applied — rows are NOT filtered. Connect with \
                  migrate_updates=True to reconcile them, or apply them with a reviewed \
                  migration.",
@@ -5060,7 +5060,7 @@ mod tests {
             ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
-        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        assert!(emission.statement.is_none(), "no SQLite ALTER");
         let warning = emission
             .warning
             .expect("SQLite must never skip silently")
@@ -5087,7 +5087,7 @@ mod tests {
             ConstraintMode::Plain,
         )
         .expect("declared column check must resolve");
-        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        assert!(emission.statement.is_none(), "no SQLite ALTER");
         assert!(
             emission.inline.is_none(),
             "no column definition to carry it"
@@ -5280,12 +5280,12 @@ mod tests {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
             drifted_check_names(&declared_check_bodies(&model), &[]).is_empty(),
-            "a missing name is an add (#343), not a rebuild"
+            "a missing name is an add, not a rebuild"
         );
         let leftover = [("ck_transfer_orphan".to_string(), "CHECK (true)".to_string())];
         assert!(
             drifted_check_names(&declared_check_bodies(&model), &leftover).is_empty(),
-            "an undeclared live name is leftover handling (#345), not a rebuild"
+            "an undeclared live name is leftover handling, not a rebuild"
         );
     }
 
@@ -5479,7 +5479,7 @@ mod tests {
             ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
-        assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
+        assert!(emission.statements.is_empty(), "no SQLite ALTER");
         let warning = emission
             .warning
             .expect("SQLite must never skip silently")
@@ -5584,7 +5584,7 @@ mod tests {
     #[test]
     fn render_check_drop_warns_and_skips_on_sqlite() {
         let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite);
-        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        assert!(emission.statement.is_none(), "no SQLite ALTER");
         let warning = emission
             .warning
             .expect("SQLite must never skip silently")
@@ -8994,7 +8994,7 @@ mod tests {
                 Subject::table("ledgerrow"),
                 true,
                 "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and \
-                 the create pass never alters an existing table (ADR-0010). Its row-security \
+                 the create pass never alters an existing table. Its row-security \
                  flags and policies were NOT applied — rows are NOT filtered. Connect with \
                  migrate_updates=True to reconcile them, or apply them with a reviewed \
                  migration.",
