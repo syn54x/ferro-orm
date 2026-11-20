@@ -1,6 +1,87 @@
 # CHANGELOG
 
 
+## v0.29.0 (2026-11-20)
+
+### Bug Fixes
+
+- A step that creates a new table with row security may be classed contract, which expand-only
+  refuses (#1001) ([#1006](https://github.com/syn54x/ferro-orm/pull/1006),
+  [`bd4a5d0`](https://github.com/syn54x/ferro-orm/commit/bd4a5d0c7907283ddd1ad4e764b360cfef198d93))
+
+- Auto_migrate: genuine cross-table FK cycles cannot CREATE on Postgres — defer cycle FKs to
+  post-create ALTER (#304) ([#1000](https://github.com/syn54x/ferro-orm/pull/1000),
+  [`553b4aa`](https://github.com/syn54x/ferro-orm/commit/553b4aa3ea63245da31f19016f8b99b2508e57ff))
+
+- No timeout value panics across the FFI (from_seconds, with_lock_timeout_seconds) (#611)
+  ([#1011](https://github.com/syn54x/ferro-orm/pull/1011),
+  [`4d86097`](https://github.com/syn54x/ferro-orm/commit/4d8609798f57ceda0fab1c1db3cbffc8f809cde5))
+
+- Offset() without limit() fails on SQLite with a syntax error (#756)
+  ([#994](https://github.com/syn54x/ferro-orm/pull/994),
+  [`6eb8ce3`](https://github.com/syn54x/ferro-orm/commit/6eb8ce3fe0561ca7111db4e5c93925ebc47a26ed))
+
+- Query error messages hard-code lambda parameter t. and cite ADR numbers (#758)
+  ([#991](https://github.com/syn54x/ferro-orm/pull/991),
+  [`5e9e345`](https://github.com/syn54x/ferro-orm/commit/5e9e345a67bc458f142b37796ce9b2b2108c240b))
+
+- RLS policy on a new table that reads a column the same pass adds to an existing table fails on
+  Postgres (#995) ([#1008](https://github.com/syn54x/ferro-orm/pull/1008),
+  [`c97c4eb`](https://github.com/syn54x/ferro-orm/commit/c97c4eb504ff2ba2198cca023147dfaf5585abfe))
+
+- RLS policy that reads another table fails on Postgres: tables are created in foreign-key order
+  only (#753) ([#992](https://github.com/syn54x/ferro-orm/pull/992),
+  [`eeed581`](https://github.com/syn54x/ferro-orm/commit/eeed581b0124711a3b33c0178a115354407b9f0f))
+
+- SQLite type-change warning prints an empty old type and the wrong expected type for an enum (#997)
+  ([#1010](https://github.com/syn54x/ferro-orm/pull/1010),
+  [`0b9d3f2`](https://github.com/syn54x/ferro-orm/commit/0b9d3f2f9f679c292de86b5809a498a86dbe98ca))
+
+- SQLite: a column named by a foreign key or a table check is refused at render time, not at
+  execution (parity C2) (#610) ([#998](https://github.com/syn54x/ferro-orm/pull/998),
+  [`a76d109`](https://github.com/syn54x/ferro-orm/commit/a76d109f5f352d1acbfa8c277564f48abc9cbd93))
+
+- SQLite: a hand-written check that names a column as a bare keyword keeps the column (#999)
+  ([#1005](https://github.com/syn54x/ferro-orm/pull/1005),
+  [`bc1f96f`](https://github.com/syn54x/ferro-orm/commit/bc1f96f55e321151cb0dc6026a2d17452d35218c))
+
+- SQLite: a storage change that differs only in an unenforced length is no change on every emitter
+  (#614) ([#1002](https://github.com/syn54x/ferro-orm/pull/1002),
+  [`5cfdf3b`](https://github.com/syn54x/ferro-orm/commit/5cfdf3b9c07e77d071627d17348d709341a72b83))
+
+- Test_postgres_floor fails locally when FERRO_POSTGRES_URL uses postgres:// (#996)
+  ([#1012](https://github.com/syn54x/ferro-orm/pull/1012),
+  [`591bbb3`](https://github.com/syn54x/ferro-orm/commit/591bbb3b5e78f0f6eded3d49d4de35385ba55abc))
+
+### Continuous Integration
+
+- Skip the macos packaging smoke on a push to main (#1003)
+  ([#1004](https://github.com/syn54x/ferro-orm/pull/1004),
+  [`046f157`](https://github.com/syn54x/ferro-orm/commit/046f15771946352262f941d78d9e086ec0a53c14))
+
+### Documentation
+
+- Record that a nullable foreign key never picks the join type (#871)
+  ([#988](https://github.com/syn54x/ferro-orm/pull/988),
+  [`4900d9e`](https://github.com/syn54x/ferro-orm/commit/4900d9e8aace3792c557a162a8e3e6882a4242d8))
+
+### Features
+
+- Export RunReport, StatusReport, CheckReport, ModelConnection, EngineManager, Subject and the types
+  of their fields (#759) ([#990](https://github.com/syn54x/ferro-orm/pull/990),
+  [`37ac5cb`](https://github.com/syn54x/ferro-orm/commit/37ac5cb96f63c9d7a1f1faf85fd7492d8e7f9bb7))
+
+### Testing
+
+- Drop the redundant branch in the public-names test (#759)
+  ([#993](https://github.com/syn54x/ferro-orm/pull/993),
+  [`2c929a0`](https://github.com/syn54x/ferro-orm/commit/2c929a046e3fc3effbc00b406c03bf9954aff4c9))
+
+- Give the set_config revoking test a database of its own (#984)
+  ([#987](https://github.com/syn54x/ferro-orm/pull/987),
+  [`b19a984`](https://github.com/syn54x/ferro-orm/commit/b19a984b58485eaa537cbf735671f1848f4c94d2))
+
+
 ## v0.28.0 (2026-11-17)
 
 ### Bug Fixes
