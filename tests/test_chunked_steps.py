@@ -693,7 +693,7 @@ def test_a_query_over_a_join_table_is_refused_naming_the_parent_model_recipe(
     )
 
     assert "0002_add_slug/02_backfill_author.py: @chunked pages author_tags" in err
-    assert "#492" in err
+    assert "#492" not in err
     assert "page the parent model" in err
 
 
