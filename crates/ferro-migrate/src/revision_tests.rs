@@ -449,8 +449,8 @@ fn a_label_the_upgrade_adds_cannot_come_off_a_live_type() {
     assert_eq!(
         revision.downgrade[0].irreversible.as_deref(),
         Some(
-            "label \"y\" of enum type status cannot be removed: enum labels are append-only \
-             (ADR-0011), and rows may hold it"
+            "label \"y\" of enum type status cannot be removed: enum labels are append-only, \
+             and rows may hold it"
         )
     );
 }

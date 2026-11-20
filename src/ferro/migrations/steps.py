@@ -362,7 +362,7 @@ def chunked_query(shape: Chunked, models: HistoricalModels, path: Path) -> Query
         raise StepRefused(
             f"ferro migrate: {shown}: @chunked pages {table}, a table without a single "
             f"primary key (a many-to-many join table), and keyset paging over a "
-            f"composite key is not built yet (#492). Instead page the parent model "
+            f"composite key is not built yet. Instead page the parent model "
             f"and change each parent's join rows inside the batch: @chunked over "
             f"ctx.models.<Parent> ordered by its primary key, then "
             f'ctx.models.table("{table}").where(...) in the step'

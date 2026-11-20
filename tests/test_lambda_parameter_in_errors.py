@@ -243,20 +243,72 @@ def _docstring_nodes(tree: ast.Module) -> set[int]:
     return found
 
 
+# `migration #3` is a position in a squash range, not an issue number.
+_CITATION = re.compile(r"ADR-\d+|(?<!migration )#\d+")
+
+
+def _python_citations(source: str) -> list[tuple[int, str]]:
+    """Each string constant in `source` that is not a docstring and cites a number.
+
+    An f-string's literal parts are string constants too, so they are read.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_nodes(tree)
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and _CITATION.search(node.value)
+    ]
+
+
+def _rust_citations(source: str) -> list[tuple[int, str]]:
+    """Each line of `source` that is not a `//` comment and cites a number.
+
+    Reading lines, not string literals, sees a string continued over lines.
+    """
+    return [
+        (lineno, line)
+        for lineno, line in enumerate(source.splitlines(), start=1)
+        if not line.lstrip().startswith("//") and _CITATION.search(line)
+    ]
+
+
+def test_the_citation_matcher_reads_messages_and_skips_comments_and_urls():
+    python = 'raise TypeError(f"{name} is retired (ADR-0053); drop {name}=")\n'
+    rust = (
+        'let message = format!("an enum label is \\\n'
+        '    append-only (ADR-0011), and rows may hold it");\n'
+        "// see ADR-0011\n"
+        'let range = "migration #3";\n'
+        'let url = "https://github.com/syn54x/ferro-orm/issues/486";\n'
+    )
+
+    assert [line for line, _ in _python_citations(python)] == [1]
+    assert [line for line, _ in _rust_citations(rust)] == [2]
+
+
 def test_no_message_source_spells_t_or_cites_a_number():
-    files = sorted((_SRC / "query").glob("*.py")) + [_SRC / "checks.py"]
+    root = _SRC.parent.parent
     stale_lambda = re.compile(r"lambda t:|(?<![\w.])t\.[a-z_{<]")
-    citation = re.compile(r"ADR-\d+|#\d+")
     hits: list[str] = []
-    for path in files:
-        tree = ast.parse(path.read_text(), filename=str(path))
-        docstrings = _docstring_nodes(tree)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
-                continue
-            where = f"{path.relative_to(_SRC.parent.parent)}:{node.lineno}"
-            if stale_lambda.search(node.value):
-                hits.append(f"{where}: {node.value!r}")
-            elif id(node) not in docstrings and citation.search(node.value):
-                hits.append(f"{where}: {node.value!r}")
+    for path in sorted((_SRC / "query").glob("*.py")) + [_SRC / "checks.py"]:
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and stale_lambda.search(node.value)
+            ):
+                hits.append(f"{path.relative_to(root)}:{node.lineno}: {node.value!r}")
+    for path in sorted(_SRC.rglob("*.py")):
+        for lineno, text in _python_citations(path.read_text()):
+            hits.append(f"{path.relative_to(root)}:{lineno}: {text!r}")
+    rust_files = sorted((root / "src").rglob("*.rs")) + sorted(
+        root.glob("crates/*/src/**/*.rs")
+    )
+    for path in rust_files:
+        for lineno, text in _rust_citations(path.read_text()):
+            hits.append(f"{path.relative_to(root)}:{lineno}: {text.strip()}")
     assert not hits, "\n".join(hits)

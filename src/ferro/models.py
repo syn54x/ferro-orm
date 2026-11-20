@@ -426,7 +426,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             name = min(retired.intersection(data))
             raise TypeError(
                 f"{self.__class__.__name__}.{name} is retired in this release: the "
-                f"model no longer reads or writes it (ADR-0053); drop {name}= from "
+                f"model no longer reads or writes it; drop {name}= from "
                 "the call"
             )
         generated = self.__class__.__ferro_generated__
@@ -449,7 +449,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
                     f"{type(self).__name__}.{item} is retired in this release: the "
-                    "model no longer reads or writes it (ADR-0053)",
+                    "model no longer reads or writes it",
                     name=item,
                     obj=self,
                 )
