@@ -18,6 +18,7 @@ set and the statements are what they were.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from typing import Annotated, Any
@@ -25,10 +26,11 @@ from typing import Annotated, Any
 import pytest
 
 import ferro
-from ferro import Model
+from ferro import Model, _core
 from ferro.base import FerroField
 from ferro.exceptions import OperationalError
 from ferro.migrations import runner
+from ferro.settings import MAX_DDL_LOCK_TIMEOUT_S
 from tests._pass_harness import auto_migrate
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -621,3 +623,76 @@ async def test_databases_that_agree_on_the_timeout_run_under_it(project, pkg, db
         assert timeouts == ["SET LOCAL lock_timeout = '2000ms'"]
     else:
         assert timeouts == []
+
+
+# -- the bound on a DDL lock timeout from Python (#611) ---------------------------
+
+LONGEST_PG_LOCK_TIMEOUT_MS = "2147483647"
+UNUSED_URL = "postgresql://nowhere.invalid/never"
+"""A URL no test may reach: a refusal that came after connecting would fail."""
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: _core._open_tracked(None, None, "migrations", ddl_lock_timeout_s=s),
+        lambda s: _core.connect(UNUSED_URL, auto_migrate=True, ddl_lock_timeout_s=s),
+        lambda s: _core.migrate(using="nowhere", ddl_lock_timeout_s=s),
+        lambda s: _core.create_tables(using="nowhere", ddl_lock_timeout_s=s),
+    ],
+    ids=["_open_tracked", "connect", "migrate", "create_tables"],
+)
+async def test_a_ddl_lock_timeout_over_its_bound_is_refused_naming_the_bound(call):
+    with pytest.raises(ValueError) as refused:
+        call(1e20)
+
+    assert "ddl_lock_timeout" in str(refused.value)
+    assert LONGEST_PG_LOCK_TIMEOUT_MS in str(refused.value)
+    assert str(refused.value).endswith("got 1e20 seconds")
+
+
+async def test_a_ddl_lock_timeout_of_exactly_its_bound_is_accepted_everywhere(
+    db, tmp_path
+):
+    longest = MAX_DDL_LOCK_TIMEOUT_S
+    await _core.connect(db.url, name="longest", ddl_lock_timeout_s=longest)
+    ferro._ensure_rust_registration_synced()  # what ferro.migrate does first
+    await _core.migrate(using="longest", ddl_lock_timeout_s=longest)
+    await _core.create_tables(using="longest", ddl_lock_timeout_s=longest)
+    tracked = await _core._open_tracked(
+        "longest", None, str(tmp_path), ddl_lock_timeout_s=longest
+    )
+
+    assert tracked is not None
+
+
+async def test_a_create_runs_under_the_longest_ddl_lock_timeout_postgres_accepts(db):
+    _postgres_only(db)
+    _declare_author()
+    await _core.connect(db.url, name="longest")
+    ferro._ensure_rust_registration_synced()  # what ferro.create_tables does first
+
+    report = json.loads(
+        await _core.create_tables(
+            using="longest", ddl_lock_timeout_s=MAX_DDL_LOCK_TIMEOUT_S
+        )
+    )
+
+    assert "author" in db.tables()
+    timeouts = [s["sql"] for s in report["statements"] if s["role"] == "lock_timeout"]
+    assert timeouts
+    assert {sql.split("= ")[1] for sql in timeouts} == {"'2147483647ms'"}
+
+
+async def test_a_ddl_lock_timeout_one_millisecond_over_creates_nothing(db):
+    _postgres_only(db)
+    _declare_author()
+    await _core.connect(db.url, name="over")
+    ferro._ensure_rust_registration_synced()
+
+    with pytest.raises(ValueError, match=LONGEST_PG_LOCK_TIMEOUT_MS):
+        _core.create_tables(
+            using="over", ddl_lock_timeout_s=MAX_DDL_LOCK_TIMEOUT_S + 0.001
+        )
+
+    assert "author" not in db.tables()

@@ -583,7 +583,10 @@ pub fn register_model_schema(name: String, columns: String, table_name: String) 
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized, the database is
 /// governed by ferro migrations, or SQL execution fails; a failure of the
-/// pass carries its report.
+/// pass carries its report. A `ValueError`, before any connection is used,
+/// for a negative or non-finite `ddl_lock_timeout_s` or `lock_timeout_s`, a
+/// `ddl_lock_timeout_s` longer than 2147483647 ms (about 24.8 days),
+/// or a `lock_timeout_s` longer than one year (31536000 seconds).
 #[pyfunction]
 #[pyo3(signature = (using=None, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0, lock_timeout_s=30.0))]
 pub fn create_tables(

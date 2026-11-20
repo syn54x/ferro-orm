@@ -170,13 +170,14 @@ impl MigrateOptions {
     /// Python reads it from `FerroSettings`.
     ///
     /// # Errors
-    /// `ValueError` for a negative, non-finite or unrepresentable number.
+    /// `ValueError` for a negative or non-finite number, or one longer than
+    /// one year ([`crate::ddl_exec::RUN_LOCK_BOUND`]).
     pub fn with_lock_timeout_seconds(self, seconds: f64) -> PyResult<Self> {
-        let lock_timeout = Duration::try_from_secs_f64(seconds).map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "{LOCK_TIMEOUT_SETTING} must be a non-negative number of seconds; got {seconds}"
-            ))
-        })?;
+        let lock_timeout = crate::ddl_exec::timeout_from_seconds(
+            LOCK_TIMEOUT_SETTING,
+            seconds,
+            &crate::ddl_exec::RUN_LOCK_BOUND,
+        )?;
         Ok(Self {
             lock_timeout,
             ..self
@@ -187,7 +188,9 @@ impl MigrateOptions {
     /// as Python reads it from `FerroSettings` (`0` disables).
     ///
     /// # Errors
-    /// `ValueError` for a negative or non-finite number.
+    /// `ValueError` for a negative or non-finite number, or one longer than
+    /// 2147483647 ms, the longest `lock_timeout` Postgres accepts
+    /// ([`crate::ddl_exec::DDL_LOCK_BOUND`]).
     pub fn with_ddl_lock_timeout_seconds(self, seconds: f64) -> PyResult<Self> {
         Ok(Self {
             ddl_lock_timeout: DdlExecutor::from_seconds(seconds)?.timeout,
@@ -1412,6 +1415,10 @@ fn table_ops_unit<'a>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or the migration
 /// fails; a failure of the pass carries its report ([`with_pass_report`]).
+/// A `ValueError`, before any connection is used, for a negative or
+/// non-finite `ddl_lock_timeout_s` or `lock_timeout_s`, a
+/// `ddl_lock_timeout_s` longer than 2147483647 ms (about 24.8 days),
+/// or a `lock_timeout_s` longer than one year (31536000 seconds).
 #[pyfunction]
 #[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0, lock_timeout_s=30.0))]
 pub fn migrate(
@@ -1814,4 +1821,31 @@ fn plan_json(plan: &Plan, render: bool) -> PyResult<String> {
         "reports": reports_json(&plan.reports)?,
     });
     Ok(out.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ddl_exec::RUN_LOCK_BOUND;
+
+    #[test]
+    fn lock_timeout_seconds_hold_the_one_year_bound() {
+        let at_bound = MigrateOptions::laddered(false, false)
+            .with_lock_timeout_seconds(RUN_LOCK_BOUND.seconds)
+            .map(|opts| opts.lock_timeout)
+            .ok();
+        assert_eq!(at_bound, Some(Duration::from_secs(31_536_000)));
+
+        for over in [RUN_LOCK_BOUND.seconds + 0.001, 1e19] {
+            let refused = MigrateOptions::laddered(false, false)
+                .with_lock_timeout_seconds(over)
+                .expect_err("over the bound is refused");
+            Python::attach(|py| {
+                assert!(refused.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                let message = refused.value(py).to_string();
+                assert!(message.contains("lock_timeout"), "{message}");
+                assert!(message.contains("31536000 seconds"), "{message}");
+            });
+        }
+    }
 }

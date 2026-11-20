@@ -109,6 +109,23 @@ fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// The longest run lock wait, in seconds, any `_core` entry point accepts:
+/// one year. Exposed only so a test can pin it to
+/// `ferro.settings.MAX_LOCK_TIMEOUT_S`.
+#[pyfunction]
+fn _max_lock_timeout_s() -> f64 {
+    ddl_exec::RUN_LOCK_BOUND.seconds
+}
+
+/// The longest DDL lock timeout, in seconds, any `_core` entry point
+/// accepts: 2147483647 ms, the longest `lock_timeout` Postgres accepts.
+/// Exposed only so a test can pin it to
+/// `ferro.settings.MAX_DDL_LOCK_TIMEOUT_S`.
+#[pyfunction]
+fn _max_ddl_lock_timeout_s() -> f64 {
+    ddl_exec::DDL_LOCK_BOUND.seconds
+}
+
 /// Clears the global model registry, the SchemaIR modelset, and the recorded
 /// modelset fingerprint — the whole installed registration, under one lock
 /// scope (#244) so the fingerprint can never outlive the schema it names.
@@ -180,6 +197,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(_max_lock_timeout_s, m)?)?;
+    m.add_function(wrap_pyfunction!(_max_ddl_lock_timeout_s, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::migrate, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::_install_registration, m)?)?;
